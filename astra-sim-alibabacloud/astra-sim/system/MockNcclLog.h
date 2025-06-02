@@ -26,7 +26,7 @@
 #include <cstdarg>
 #include <thread>
 
-#define LOG_PATH  "/etc/astra-sim/"
+#define LOG_PATH  "/data1/lichenni/projects/SimAI/logs/"
 
 enum class NcclLogLevel { DEBUG, INFO, WARNING,ERROR};
 
