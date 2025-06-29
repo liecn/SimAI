@@ -8,3 +8,4 @@ test/log/
 *.log
 .cur*
 .DS_Store
+command.sh

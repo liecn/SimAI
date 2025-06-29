@@ -101,7 +101,7 @@ string qlen_mon_file;
 string bw_mon_file;
 string rate_mon_file;
 string cnp_mon_file;
-string total_flow_file = "/root/astra-sim/extern/network_backend/ns3-interface/simulation/monitor_output/";
+string total_flow_file = "/data1/lichenni/projects/SimAI/extern/network_backend/ns3-interface/simulation/monitor_output/";
 FILE* total_flow_output = nullptr;
 
 unordered_map<uint64_t, uint32_t> rate2kmax, rate2kmin;
