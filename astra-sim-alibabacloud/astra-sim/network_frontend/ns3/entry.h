@@ -371,13 +371,26 @@ void send_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
   notify_sender_sending_finished(sid, did, all_sent_chunksize, flowTag);
 }
 
-int main1(string network_topo,string network_conf) {
+int main1(string network_topo,string network_conf, bool use_custom_routing = false) {
+  // Set random seed BEFORE any other NS3 operations for maximum determinism
+  Config::SetGlobal("RngSeed", UintegerValue(12345));
+  Config::SetGlobal("RngRun", UintegerValue(1));
+  
   clock_t begint, endt;
   begint = clock();
 
   if (!ReadConf(network_topo,network_conf))
     return -1;
   SetConfig();
+  
+  // Set the custom routing flag - SetupNetwork will handle the actual enabling
+  EnableCustomRouting(use_custom_routing);
+  if (use_custom_routing) {
+    cout << "[CUSTOM ROUTING] Custom routing enabled via command line argument" << endl;
+  } else {
+    cout << "[CUSTOM ROUTING] Using default NS3 ECMP routing" << endl;
+  }
+  
   SetupNetwork(qp_finish,send_finish);
 
 std::cout << "Running Simulation.\n";

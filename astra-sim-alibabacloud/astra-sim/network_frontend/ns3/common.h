@@ -41,6 +41,7 @@
 #include <ns3/sim-setting.h>
 #include <ns3/switch-node.h>
 #include <ns3/nvswitch-node.h>
+#include <ns3/flow-routing.h>
 #include <atomic>
 
 using namespace ns3;
@@ -143,6 +144,68 @@ struct FlowInput {
 
 FlowInput flow_input = {0};
 uint32_t flow_num;
+
+// Flow-to-path mapping for custom routing
+// Note: FlowKey struct is defined in flow-routing.h
+
+// Global flow-to-path map and control
+std::unordered_map<FlowKey, uint32_t, FlowKeyHash> flow_to_path_map;  // FlowKey -> next_hop_interface
+bool use_custom_routing = false;
+
+// Backend interface function declarations
+extern "C" {
+    void SetGlobalFlowMapDirect(const FlowKey* keys, const uint32_t* values, size_t size);
+    void SetGlobalCustomRoutingDirect(bool enable);
+    void ClearGlobalFlowMapDirect();
+    void PrintRoutingStatsDirect();
+    void ResetRoutingStatsDirect();
+}
+
+// Forward declarations for flow path functions
+std::vector<uint32_t> GetFlowPath(uint32_t src_node_id, uint32_t dst_node_id, 
+                                  uint8_t protocol = 0x11, uint16_t src_port = 10006, uint16_t dst_port = 100);
+void PrintFlowPath(uint32_t src_node_id, uint32_t dst_node_id, 
+                   uint8_t protocol, uint16_t src_port, uint16_t dst_port);
+
+// ECMP hash function (same as NS3)
+uint32_t EcmpHash(const uint8_t* key, size_t len, uint32_t seed) {
+  uint32_t h = seed;
+  if (len > 3) {
+    const uint32_t* key_x4 = (const uint32_t*) key;
+    size_t i = len >> 2;
+    do {
+      uint32_t k = *key_x4++;
+      k *= 0xcc9e2d51;
+      k = (k << 15) | (k >> 17);
+      k *= 0x1b873593;
+      h ^= k;
+      h = (h << 13) | (h >> 19);
+      h += (h << 2) + 0xe6546b64;
+    } while (--i);
+    key = (const uint8_t*) key_x4;
+  }
+  if (len & 3) {
+    size_t i = len & 3;
+    uint32_t k = 0;
+    key = &key[i - 1];
+    do {
+      k <<= 8;
+      k |= *key--;
+    } while (--i);
+    k *= 0xcc9e2d51;
+    k = (k << 15) | (k >> 17);
+    k *= 0x1b873593;
+    h ^= k;
+  }
+  h ^= len;
+  h ^= h >> 16;
+  h *= 0x85ebca6b;
+  h ^= h >> 13;
+  h *= 0xc2b2ae35;
+  h ^= h >> 16;
+  return h;
+}
+
 Ipv4Address node_id_to_ip(uint32_t id) {
   return Ipv4Address(0x0b000001 + ((id / 256) * 0x00010000) +
                      ((id % 256) * 0x00000100));
@@ -348,7 +411,7 @@ void printRoutingEntries() {
     Ptr<Node> src = i -> first;
     auto &table = i->second;
     for (auto j = table.begin(); j != table.end(); j++) { 
-      Ptr<Node> dst = j->first;
+      Ptr<Node> dst = j -> first;
       Ipv4Address dstAddr = dst->GetObject<Ipv4>()->GetAddress(1, 0).GetLocal();
       vector<Ptr<Node>> nexts = j->second;
       for (int k = 0; k < (int)nexts.size(); k++) {
@@ -950,6 +1013,47 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
   CalculateRoutes(n);
   SetRoutingEntries();
 
+  // Enable custom routing and pre-calculate flow paths only if requested
+  if (use_custom_routing) {
+    PrecalculateFlowPaths();
+    
+    ApplyCustomFlowOverrides();
+    
+    SyncFlowPathsWithBackend();
+    
+    // Example: Print some flow paths to demonstrate the functionality
+    cout << "[CUSTOM ROUTING] Demonstrating flow path queries:" << endl;
+    uint32_t host_count = 0;
+    for (uint32_t i = 0; i < node_num && host_count < 4; i++) {
+      if (n.Get(i)->GetNodeType() == 0) { // Only count hosts
+        host_count++;
+      }
+    }
+    
+    if (host_count >= 2) {
+      // Find first two host node IDs
+      uint32_t host1 = node_num, host2 = node_num;
+      for (uint32_t i = 0; i < node_num; i++) {
+        if (n.Get(i)->GetNodeType() == 0) {
+          if (host1 == node_num) {
+            host1 = i;
+          } else if (host2 == node_num) {
+            host2 = i;
+            break;
+          }
+        }
+      }
+      
+      // Print example flow paths
+      PrintFlowPath(host1, host2, 0x11, 10006, 100);
+      PrintFlowPath(host2, host1, 0x11, 10006, 100);
+    }
+  } else {
+    // Ensure custom routing is disabled
+    ClearFlowPaths();
+    SyncFlowPathsWithBackend();
+  }
+
   maxRtt = maxBdp = 0;
   for (uint32_t i = 0; i < node_num; i++) {
     if (n.Get(i)->GetNodeType() != 0)
@@ -1031,5 +1135,348 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
                         &TakeDownLink, n, n.Get(link_down_A),
                         n.Get(link_down_B));
   }
+
+  // Print initial routing statistics after setup
+  cout << "[CUSTOM ROUTING] Setup complete. Ready for simulation." << endl;
+  cout << "[CUSTOM ROUTING] Custom routing is " << (use_custom_routing ? "ACTIVE" : "INACTIVE") << endl;
+  cout << "[CUSTOM ROUTING] Pre-calculated " << flow_to_path_map.size() << " flow paths upfront (comprehensive coverage for large-scale workloads)" << endl;
 }
+
+// Custom routing functions
+void EnableCustomRouting(bool enable) {
+    use_custom_routing = enable;
+}
+
+void AddFlowPath(uint32_t src_ip, uint32_t dst_ip, uint8_t protocol, 
+                 uint16_t src_port, uint16_t dst_port, uint32_t next_hop_interface) {
+    FlowKey key;
+    key.src_ip = src_ip;
+    key.dst_ip = dst_ip;
+    key.protocol = protocol;
+    key.src_port = src_port;
+    key.dst_port = dst_port;
+    
+    flow_to_path_map[key] = next_hop_interface;
+}
+
+void ClearFlowPaths() {
+    flow_to_path_map.clear();
+}
+
+// Pre-calculate specific paths for each flow (deterministic routing)
+void PrecalculateFlowPaths() {
+    cout << "[CUSTOM ROUTING DEBUG] Starting flow path pre-calculation using ECMP for deterministic routing..." << endl;
+    
+    for (uint32_t src_id = 0; src_id < node_num; src_id++) {
+        if (n.Get(src_id)->GetNodeType() != 0) continue; // Only hosts
+        
+        for (uint32_t dst_id = 0; dst_id < node_num; dst_id++) {
+            if (n.Get(dst_id)->GetNodeType() != 0) continue; // Only hosts
+            if (src_id == dst_id) continue;
+            
+            Ptr<Node> src_node = n.Get(src_id);
+            Ptr<Node> dst_node = n.Get(dst_id);
+            
+            uint32_t src_ip = src_node->GetObject<Ipv4>()->GetAddress(1, 0).GetLocal().Get();
+            uint32_t dst_ip = dst_node->GetObject<Ipv4>()->GetAddress(1, 0).GetLocal().Get();
+            
+            // Use actual simulation parameters
+            uint16_t src_port = 10006;  // Actual simulation source port
+            uint16_t dst_port = 100;    // Actual simulation destination port
+            uint8_t protocol = 0x11;    // UDP protocol
+            
+            // Trace the path from source to destination using ECMP decisions
+            // but store these decisions as fixed input for deterministic routing
+            
+            Ptr<Node> current = src_node;
+            
+            while (current != dst_node) {
+                if (nextHop[current].count(dst_node) == 0) break;
+                
+                vector<Ptr<Node>> nexts = nextHop[current][dst_node];
+                if (nexts.empty()) break;
+                
+                // Use ECMP hash to select next hop (same as NS-3 runtime)
+                union {
+                    uint8_t u8[4+4+2+2];
+                    uint32_t u32[3];
+                } buf;
+                buf.u32[0] = src_ip;
+                buf.u32[1] = dst_ip;
+                buf.u32[2] = src_port | ((uint32_t)dst_port << 16);
+                
+                uint32_t hash = EcmpHash(buf.u8, 12, 0);  // Use same seed as NS-3
+                uint32_t path_idx = hash % nexts.size();
+                
+                Ptr<Node> next_hop = nexts[path_idx];
+                
+                // Store the ECMP decision for this switch
+                if (current->GetNodeType() == 1 || current->GetNodeType() == 2) { // Switch or NVSwitch
+                    uint32_t interface = nbr2if[current][next_hop].idx;
+                    
+                    FlowKey key;
+                    key.src_ip = src_ip;
+                    key.dst_ip = dst_ip;
+                    key.protocol = protocol;
+                    key.src_port = src_port;
+                    key.dst_port = dst_port;
+                    
+                    // Store the pre-calculated ECMP decision
+                    flow_to_path_map[key] = interface;
+                    
+                    // // Debug output for first few entries
+                    // if (flow_to_path_map.size() <= 10) {
+                    //     cout << "[CUSTOM ROUTING DEBUG] Switch " << current->GetId() 
+                    //          << " -> flow (src=" << src_id << " dst=" << dst_id 
+                    //          << " protocol=0x" << hex << (int)protocol << dec
+                    //          << " src_port=" << src_port << " dst_port=" << dst_port 
+                    //          << ") ECMP selected interface " << interface 
+                    //          << " (hash=" << hash << " idx=" << path_idx << "/" << nexts.size() << ")"
+                    //          << " to reach next hop " << next_hop->GetId() << endl;
+                    // }
+                }
+                
+                current = next_hop;
+                
+                // Safety check to prevent infinite loops
+                if (current->GetNodeType() == 0) break; // Reached a host
+            }
+        }
+    }
+    
+    cout << "[CUSTOM ROUTING DEBUG] Pre-calculated " << flow_to_path_map.size() << " ECMP flow path decisions" << endl;
+}
+
+// Sync flow paths with backend
+void SyncFlowPathsWithBackend() {
+    // Convert the map to arrays for the backend
+    std::vector<FlowKey> keys;
+    std::vector<uint32_t> values;
+    
+    for (const auto& pair : flow_to_path_map) {
+        keys.push_back(pair.first);
+        values.push_back(pair.second);
+    }
+    
+    // Call backend functions to sync the flow map
+    if (!keys.empty()) {
+        SetGlobalFlowMapDirect(keys.data(), values.data(), keys.size());
+    }
+    SetGlobalCustomRoutingDirect(use_custom_routing);
+    
+    cout << "[CUSTOM ROUTING] Synced " << flow_to_path_map.size() << " flow paths with backend" << endl;
+    cout << "[CUSTOM ROUTING] Custom routing is " << (use_custom_routing ? "ENABLED" : "DISABLED") << endl;
+}
+
+// Override specific flow paths with custom routing
+void ApplyCustomFlowOverrides() {
+    /*
+     * FLOW_TO_PATH_MAP STRUCTURE:
+     * 
+     * flow_to_path_map is a std::unordered_map<FlowKey, uint32_t, FlowKeyHash>
+     * 
+     * FlowKey structure:
+     * struct FlowKey {
+     *     uint32_t src_ip;      // Source IP address (use node_id_to_ip(node_id).Get())
+     *     uint32_t dst_ip;      // Destination IP address (use node_id_to_ip(node_id).Get())
+     *     uint8_t protocol;     // Protocol (0x11 for UDP, 0x06 for TCP)
+     *     uint16_t src_port;    // Source port (typically 10006 for simulation)
+     *     uint16_t dst_port;    // Destination port (typically 100 for simulation)
+     * };
+     * 
+     * The value (uint32_t) is the next_hop_interface:
+     * - This is the interface index on the current switch/node
+     * - Each switch has multiple interfaces (ports) numbered 1, 2, 3, etc.
+     * - Interface 0 is typically the loopback interface
+     * - The interface determines which physical port the packet goes out on
+     * 
+     * HOW IT WORKS:
+     * 1. When a packet arrives at a switch, NS3 extracts the FlowKey from the packet
+     * 2. NS3 looks up the FlowKey in flow_to_path_map
+     * 3. If found, NS3 uses the specified interface instead of ECMP calculation
+     * 4. If not found, NS3 falls back to default ECMP routing
+     */
+    
+    // cout << "[CUSTOM ROUTING] Applying custom flow overrides..." << endl;
+    
+    // REPRESENTATIVE EXAMPLE: Force specific node pairs to use different interfaces
+    // This demonstrates how to override the default ECMP routing with your own design
+    // if (serverAddress.size() >= 4) {
+    //     // Example: Force traffic between nodes 0->1 and 2->3 to use specific interfaces
+    //     uint32_t node0_ip = serverAddress[0].Get();
+    //     uint32_t node1_ip = serverAddress[1].Get();
+    //     uint32_t node2_ip = serverAddress[2].Get();
+    //     uint32_t node3_ip = serverAddress[3].Get();
+        
+    //     // Force node 0->1 traffic to use interface 2 (instead of ECMP decision)
+    //     OverrideFlowPath(node0_ip, node1_ip, 0x11, 10006, 100, 2);
+        
+    //     // Force node 2->3 traffic to use interface 1 (instead of ECMP decision)
+    //     OverrideFlowPath(node2_ip, node3_ip, 0x11, 10006, 100, 1);
+        
+    //     cout << "[CUSTOM ROUTING] Overrode 2 flow paths with custom interface assignments" << endl;
+    // }
+    
+    // YOUR CUSTOM ROUTING LOGIC HERE:
+    // Uncomment and implement your specific routing strategy
+    /*
+    for (uint32_t src_idx = 0; src_idx < serverAddress.size(); src_idx++) {
+        for (uint32_t dst_idx = 0; dst_idx < serverAddress.size(); dst_idx++) {
+            if (src_idx == dst_idx) continue;
+            
+            uint32_t src_ip = serverAddress[src_idx].Get();
+            uint32_t dst_ip = serverAddress[dst_idx].Get();
+            
+            // Your custom logic to determine the interface
+            uint32_t custom_interface = YourCustomRoutingFunction(src_idx, dst_idx);
+            
+            // Override the path
+            OverrideFlowPath(src_ip, dst_ip, 0x11, 10006, 100, custom_interface);
+        }
+    }
+    */
+    
+    cout << "[CUSTOM ROUTING] Custom overrides complete. Total flows in map: " << flow_to_path_map.size() << endl;
+}
+
+// Override specific flow paths with custom routing
+void OverrideFlowPath(uint32_t src_ip, uint32_t dst_ip, uint8_t protocol, 
+                      uint16_t src_port, uint16_t dst_port, uint32_t forced_interface) {
+    FlowKey key;
+    key.src_ip = src_ip;
+    key.dst_ip = dst_ip;
+    key.protocol = protocol;
+    key.src_port = src_port;
+    key.dst_port = dst_port;
+    
+    // Override the existing path
+    flow_to_path_map[key] = forced_interface;
+}
+
+// Function to get complete path for a flow using flow_to_path_map
+std::vector<uint32_t> GetFlowPath(uint32_t src_node_id, uint32_t dst_node_id, 
+                                  uint8_t protocol, uint16_t src_port, uint16_t dst_port) {
+    std::vector<uint32_t> path;
+    
+    if (src_node_id >= node_num || dst_node_id >= node_num) {
+        cout << "[GET_FLOW_PATH] Invalid node IDs: src=" << src_node_id << " dst=" << dst_node_id << endl;
+        return path;
+    }
+    
+    if (src_node_id == dst_node_id) {
+        path.push_back(src_node_id);
+        return path;
+    }
+    
+    // Start from source node
+    Ptr<Node> current_node = n.Get(src_node_id);
+    Ptr<Node> dst_node = n.Get(dst_node_id);
+    path.push_back(src_node_id);
+    
+    // Get destination IP once
+    uint32_t dst_ip = dst_node->GetObject<Ipv4>()->GetAddress(1, 0).GetLocal().Get();
+    
+    // Follow the path using flow_to_path_map and network topology
+    int max_hops = 20; // Safety limit to prevent infinite loops
+    int hop_count = 0;
+    
+    while (current_node != dst_node && hop_count < max_hops) {
+        hop_count++;
+        
+        // Create FlowKey for the CURRENT node (not the original source)
+        uint32_t current_ip = current_node->GetObject<Ipv4>()->GetAddress(1, 0).GetLocal().Get();
+        
+        FlowKey flow_key;
+        flow_key.src_ip = current_ip;  // Use current node's IP, not original source
+        flow_key.dst_ip = dst_ip;
+        flow_key.protocol = protocol;
+        flow_key.src_port = src_port;
+        flow_key.dst_port = dst_port;
+        
+        // Check if we have a custom routing entry for this flow at this node
+        if (flow_to_path_map.find(flow_key) != flow_to_path_map.end()) {
+            // Use custom routing
+            uint32_t interface = flow_to_path_map[flow_key];
+            
+            // Find the next hop node using this interface
+            Ptr<Node> next_node = nullptr;
+            for (auto& neighbor_pair : nbr2if[current_node]) {
+                if (neighbor_pair.second.idx == interface) {
+                    next_node = neighbor_pair.first;
+                    break;
+                }
+            }
+            
+            if (next_node) {
+                path.push_back(next_node->GetId());
+                current_node = next_node;
+            } else {
+                cout << "[GET_FLOW_PATH] Warning: Custom routing interface " << interface 
+                     << " not found for node " << current_node->GetId() << endl;
+                break;
+            }
+        } else {
+            // Fall back to default routing (use nextHop table)
+            if (nextHop[current_node].find(dst_node) != nextHop[current_node].end()) {
+                auto next_hops = nextHop[current_node][dst_node];
+                if (!next_hops.empty()) {
+                    // Use first available next hop (could be enhanced to use ECMP logic)
+                    Ptr<Node> next_node = next_hops[0];
+                    path.push_back(next_node->GetId());
+                    current_node = next_node;
+                } else {
+                    cout << "[GET_FLOW_PATH] Warning: No next hop found for node " 
+                         << current_node->GetId() << " to reach " << dst_node_id << endl;
+                    break;
+                }
+            } else {
+                cout << "[GET_FLOW_PATH] Warning: No routing entry found for node " 
+                     << current_node->GetId() << " to reach " << dst_node_id << endl;
+                break;
+            }
+        }
+    }
+    
+    if (hop_count >= max_hops) {
+        cout << "[GET_FLOW_PATH] Warning: Path search exceeded maximum hops (" << max_hops 
+             << ") for flow src=" << src_node_id << " dst=" << dst_node_id << endl;
+    }
+    
+    return path;
+}
+
+// Function to print a flow path in a readable format
+void PrintFlowPath(uint32_t src_node_id, uint32_t dst_node_id, 
+                   uint8_t protocol, uint16_t src_port, uint16_t dst_port) {
+    std::vector<uint32_t> path = GetFlowPath(src_node_id, dst_node_id, protocol, src_port, dst_port);
+    
+    cout << "[FLOW_PATH] Flow (src=" << src_node_id << " dst=" << dst_node_id 
+         << " protocol=0x" << hex << (int)protocol << dec 
+         << " sport=" << src_port << " dport=" << dst_port << "): ";
+    
+    if (path.empty()) {
+        cout << "NO PATH FOUND" << endl;
+        return;
+    }
+    
+    for (size_t i = 0; i < path.size(); i++) {
+        uint32_t node_id = path[i];
+        string node_type = "UNKNOWN";
+        
+        if (node_id < node_num) {
+            switch (n.Get(node_id)->GetNodeType()) {
+                case 0: node_type = "HOST"; break;
+                case 1: node_type = "SWITCH"; break;
+                case 2: node_type = "NVSWITCH"; break;
+            }
+        }
+        
+        cout << node_id << "(" << node_type << ")";
+        if (i < path.size() - 1) {
+            cout << " -> ";
+        }
+    }
+    cout << " [" << path.size() << " hops]" << endl;
+}
+
 #endif

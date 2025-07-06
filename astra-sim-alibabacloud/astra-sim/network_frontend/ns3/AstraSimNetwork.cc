@@ -45,7 +45,7 @@
 
 using namespace std;
 using namespace ns3;
-
+extern "C" void PrintRoutingStatsDirect();
 extern std::map<std::pair<std::pair<int, int>,int>, AstraSim::ncclFlowTag> receiver_pending_queue;
 extern uint32_t node_num, switch_num, link_num, trace_num, nvswitch_num, gpus_per_server;
 extern GPUType gpu_type;
@@ -215,18 +215,20 @@ struct user_param {
   string workload;
   string network_topo;
   string network_conf;
+  bool use_custom_routing;
   user_param() {
     thread = 1;
     workload = "";
     network_topo = "";
     network_conf = "";
+    use_custom_routing = false;
   };
   ~user_param(){};
 };
 
 static int user_param_prase(int argc,char * argv[],struct user_param* user_param){
   int opt;
-  while ((opt = getopt(argc,argv,"ht:w:g:s:n:c:"))!=-1){
+  while ((opt = getopt(argc,argv,"ht:w:g:s:n:c:r"))!=-1){
     switch (opt)
     {
     case 'h':
@@ -235,6 +237,7 @@ static int user_param_prase(int argc,char * argv[],struct user_param* user_param
       std::cout<<"-w    workloads default none "<<std::endl;
       std::cout<<"-n    network topo"<<std::endl;
       std::cout<<"-c    network_conf"<<std::endl;
+      std::cout<<"-r    use custom routing (default: false)"<<std::endl;
       return 1;
       break;
     case 't':
@@ -248,6 +251,9 @@ static int user_param_prase(int argc,char * argv[],struct user_param* user_param
       break;
     case 'c':
       user_param->network_conf = optarg;
+      break;
+    case 'r':
+      user_param->use_custom_routing = true;
       break;
     default:
       std::cerr<<"-h    help message"<<std::endl;
@@ -269,7 +275,7 @@ int main(int argc, char *argv[]) {
   MtpInterface::Enable(user_param.thread);
   #endif
   
-  main1(user_param.network_topo,user_param.network_conf);
+  main1(user_param.network_topo,user_param.network_conf,user_param.use_custom_routing);
   int nodes_num = node_num - switch_num;
   int gpu_num = node_num - nvswitch_num - switch_num;
 
@@ -326,6 +332,11 @@ int main(int argc, char *argv[]) {
 
   Simulator::Run();
   Simulator::Stop(Seconds(2000000000));
+  
+  // Print routing statistics after simulation completes
+  std::cout << "\n[SIMULATION COMPLETE] Printing routing statistics..." << std::endl;
+  PrintRoutingStatsDirect();
+  
   Simulator::Destroy();
   
   #ifdef NS3_MPI
