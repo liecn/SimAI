@@ -23,6 +23,7 @@ void FlowSim::Run() {
     while (!call_list.empty())
     {
         CallTask calltask = call_list.front();
+        /*
         while (true) {
           if (calltask.time != tick) {
             tick++;
@@ -30,6 +31,8 @@ void FlowSim::Run() {
             break;
           }
         }
+          */
+        tick = calltask.time;
         
         call_list.pop();
         // std::cout << "after pop call_list: " << call_list.size() << std::endl;
