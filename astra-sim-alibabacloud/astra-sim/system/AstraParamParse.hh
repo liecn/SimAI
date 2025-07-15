@@ -33,7 +33,7 @@
 #define BUSBW_PATH ""
 using namespace std;
 #include <regex>
-enum class ModeType { NONE, ASTRA_SIM, MOCKNCCL, ANALYTICAL };
+enum class ModeType { NONE, ASTRA_SIM, MOCKNCCL, ANALYTICAL, FLOWSIM };
 
 struct NetWorkParam{
   uint32_t node_num;
@@ -46,6 +46,7 @@ struct NetWorkParam{
   uint32_t nvlink_bw;
   uint32_t nic_bw;
   GPUType gpu_type;
+  std::string topology_file;
   float tp_ar = -1.0f; 
   float tp_ag = -1.0f; 
   float tp_rs = -1.0f; 
@@ -79,6 +80,8 @@ private:
     workload = {};
     comm_scale = 1;
     mode = ModeType::MOCKNCCL;
+    // Initialize network parameters to safe defaults
+    net_work_param.gpus_per_server = 1;  // Prevent division by zero
   }
 
 public:
@@ -168,6 +171,7 @@ public:
         std::cout << "-g_p_s,   --gpus-per-server     GPUs per server" << std::endl;
         std::cout << "-r,       --result              Output results path, default: ./results/" << std::endl;
         std::cout << "-busbw,   --bus-bandwidth       Bus bandwidth file, must set" << std::endl;
+        std::cout << "-topo,    --topology            Network topology file (required for FlowSim)" << std::endl;
         std::cout << "-v,       --visual              Enable visual output (Default disable)" << std::endl;
         std::cout << "-dp_o,    --dp-overlap-ratio    DP overlap ratio [float: 0.0-1.0] (Default: 0.0)" << std::endl;
         std::cout << "-ep_o,    --ep-overlap-ratio    EP overlap ratio [float: 0.0-1.0] (Default: 0.0)" << std::endl;
@@ -205,6 +209,9 @@ public:
                 else return printError(arg);
             } else if (arg == "-busbw" || arg == "--bus-bandwidth") {
                 if (++i < argc) parseYaml(this->net_work_param,argv[i]);
+                else return printError(arg);
+            } else if (arg == "-topo" || arg == "--topology") {
+                if (++i < argc) this->net_work_param.topology_file = argv[i];
                 else return printError(arg);
             } else if (arg == "--dp-overlap-ratio" || arg == "-dp_o") {
                 if (++i < argc) this->net_work_param.dp_overlap_ratio = std::stof(argv[i]);
