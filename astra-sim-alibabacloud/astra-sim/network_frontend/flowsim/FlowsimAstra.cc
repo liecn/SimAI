@@ -25,6 +25,9 @@
 
 #include "FlowsimNetwork.h"
 #include "FlowSim.h"
+#include "TopologyBuilder.h"
+#include "Topology.h"
+#include "Type.h"
 
 #define RESULT_PATH "./results/"
 #define WORKLOAD_PATH ""
@@ -72,6 +75,8 @@ int main(int argc,char *argv[]) {
     return -1;
   }
   param->mode = ModeType::FLOWSIM;
+  std::cout << "Topology file passed to FlowSim: " << param->net_work_param.topology_file << std::endl;
+  std::shared_ptr<Topology> topo = construct_fat_tree_topology(UserParam::getInstance()->net_work_param.topology_file);
   physical_dims = {param->gpus};
   // FlowSimInit(argc, argv);
   uint32_t using_num_gpus = 0;
