@@ -19,6 +19,10 @@
 #include<queue>
 #include<list>
 #include<cstdint>
+#include <memory>
+#include "Topology.h"
+#include "EventQueue.h"
+#include "Type.h"
 
 using namespace std;
 
@@ -35,15 +39,19 @@ class FlowSim {
  private:
   static queue<struct CallTask> call_list;
   static uint64_t tick;
+  static std::shared_ptr<Topology> topology;  
 
  public:
+  static std::shared_ptr<EventQueue> event_queue;
+
   static double Now();
-  static void Run(void);
+  static void Run(std::shared_ptr<Topology> topology);
   static void Schedule(
       uint64_t delay,
       void (*fun_ptr)(void* fun_arg),
       void* fun_arg);
   static void Stop();
   static void Destroy();
+  static void Send(int src, int dst, uint64_t size, Callback callback, CallbackArg callbackArg);
 };
 #endif

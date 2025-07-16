@@ -31,6 +31,7 @@ class Topology {
   static void set_event_queue(std::shared_ptr<EventQueue> event_queue) noexcept;
   Topology(int device_count, int npus_count) noexcept;
   //[[nodiscard]] virtual Route route(uint32_t flow_id, DeviceId src, DeviceId dest) const noexcept = 0;
+  Route get_route(int src, int dst);
   void send(std::unique_ptr<Chunk> chunk) noexcept;
   [[nodiscard]] int get_npus_count() const noexcept;
   [[nodiscard]] int get_devices_count() const noexcept;

@@ -255,3 +255,7 @@ void Topology::cancel_all_events() noexcept {
         //}
     }
 }
+
+Route Topology::get_route(int src, int dst) {
+    return Route();
+}

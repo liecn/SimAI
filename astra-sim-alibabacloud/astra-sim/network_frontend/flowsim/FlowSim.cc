@@ -19,19 +19,21 @@ using namespace std;
 
 queue<struct CallTask> FlowSim::call_list = {};
 uint64_t FlowSim::tick = 0;
-void FlowSim::Run() {
+
+std::shared_ptr<EventQueue> FlowSim::event_queue = nullptr;
+std::shared_ptr<Topology> FlowSim::topology = nullptr;
+
+void FlowSim::Run(std::shared_ptr<Topology> topo) {
+    event_queue = std::make_shared<EventQueue>();
+    topology = topo;
+    topology->set_event_queue(event_queue);
+    while (!event_queue->finished()) {
+        event_queue->proceed();
+    }
+    /*
     while (!call_list.empty())
     {
         CallTask calltask = call_list.front();
-        /*
-        while (true) {
-          if (calltask.time != tick) {
-            tick++;
-          } else {
-            break;
-          }
-        }
-          */
         tick = calltask.time;
         
         call_list.pop();
@@ -40,17 +42,18 @@ void FlowSim::Run() {
         
         // sleep(calltask.delay);
     }
+    */
 }
 
 void FlowSim::Schedule(
-  
     uint64_t delay,
     void (*fun_ptr)(void* fun_arg),
     void* fun_arg) {
-    uint64_t time = tick + delay;
-    CallTask calltask = CallTask(time,fun_ptr,fun_arg);
+    uint64_t time = event_queue->get_current_time() + delay;
+    //CallTask calltask = CallTask(time,fun_ptr,fun_arg);
     // std::cout << "before push all_list: " << call_list.size() << std::endl;
-    call_list.push(calltask);
+    //call_list.push(calltask);
+    event_queue->schedule_event(time, fun_ptr, fun_arg);
     // std::cout << "after push of call_list: " << call_list.size() << std::endl;
 }
 
@@ -63,5 +66,11 @@ void FlowSim::Destroy(){
 }
 
 double FlowSim::Now(){
-    return tick;
+    return event_queue->get_current_time();
+}
+
+void FlowSim::Send(int src, int dst, uint64_t size, Callback callback, CallbackArg callbackArg) {
+  Route route = topology->get_route(src, dst);
+  auto chunk = std::make_unique<Chunk>(size, route, callback, callbackArg);
+  topology->send(std::move(chunk));
 }
