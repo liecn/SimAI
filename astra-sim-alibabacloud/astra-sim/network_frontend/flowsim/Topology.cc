@@ -257,5 +257,7 @@ void Topology::cancel_all_events() noexcept {
 }
 
 Route Topology::get_route(int src, int dst) {
-    return Route();
+    Route route;
+    route.push_back(get_device(src));
+    return route;
 }

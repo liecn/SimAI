@@ -81,6 +81,7 @@ int main(int argc,char *argv[]) {
   int gpu_num = topology->get_npus_count();
   int nvswitch_num = 0;
 
+  std::cout << "constructing networks\n";
   std::vector<FlowSimNetWork *> networks;
   std::vector<AstraSim::Sys *> systems;
   for (uint32_t i = 0; i < topology->get_npus_count(); i++) {
@@ -115,12 +116,14 @@ int main(int argc,char *argv[]) {
     systems.push_back(system);
   }
 
+  std::shared_ptr<EventQueue> event_queue = std::make_shared<EventQueue>();
+  FlowSim::Init(event_queue, topology);
   for (uint32_t i = 0; i < systems.size(); i++) {
     systems[i]->workload->fire();
   }
   
   std::cout << "SimAI begin run FlowSim" << std::endl;
-  FlowSim::Run(topology);
+  FlowSim::Run();
   FlowSim::Stop();
   FlowSim::Destroy();
 

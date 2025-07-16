@@ -45,7 +45,8 @@ class FlowSim {
   static std::shared_ptr<EventQueue> event_queue;
 
   static double Now();
-  static void Run(std::shared_ptr<Topology> topology);
+  static void Init(std::shared_ptr<EventQueue> event_queue, std::shared_ptr<Topology> topo);
+  static void Run();
   static void Schedule(
       uint64_t delay,
       void (*fun_ptr)(void* fun_arg),
