@@ -35,9 +35,9 @@
 using namespace std;
 
 extern std::map<std::pair<std::pair<int, int>,int>, AstraSim::ncclFlowTag> receiver_pending_queue;
-extern uint32_t node_num, switch_num, link_num, trace_num, nvswitch_num, gpus_per_server;
+//extern uint32_t node_num, switch_num, link_num, trace_num, nvswitch_num, gpus_per_server;
 extern std::string gpu_type;
-extern std::vector<int>NVswitchs;
+//extern std::vector<int>NVswitchs;
 extern std::vector<std::vector<int>>all_gpus;
 extern int ngpus_per_node;
 extern map<std::pair<int, std::pair<int, int>>, struct task1> expeRecvHash;
@@ -76,7 +76,22 @@ int main(int argc,char *argv[]) {
   }
   param->mode = ModeType::FLOWSIM;
   std::cout << "Topology file passed to FlowSim: " << param->net_work_param.topology_file << std::endl;
-  std::shared_ptr<Topology> topo = construct_fat_tree_topology(UserParam::getInstance()->net_work_param.topology_file);
+  std::shared_ptr<Topology> topology = construct_fat_tree_topology(UserParam::getInstance()->net_work_param.topology_file);
+  std::map<int, int> node2nvswitch; 
+  int gpu_num = topology->get_npus_count();
+  int nvswitch_num = 0;
+  /*
+  int nvswitch_num = param->net_work_param.nvswitch_num;
+  int gpus_per_server = param->net_work_param.gpus_per_server;
+  for(int i = 0; i < gpu_num; ++ i) {
+    node2nvswitch[i] = gpu_num + i / gpus_per_server;
+  }
+  for(int i = gpu_num; i < gpu_num + nvswitch_num; ++ i){
+    node2nvswitch[i] = i;
+    NVswitchs.push_back(i);
+  }
+  */ 
+  /*
   physical_dims = {param->gpus};
   // FlowSimInit(argc, argv);
   uint32_t using_num_gpus = 0;
@@ -105,9 +120,43 @@ int main(int argc,char *argv[]) {
   for (auto dim : physical_dims[0]) {
       job_npus *= dim;
     }
-  
-  
-  FlowSimNetWork *FlowSim_network = new FlowSimNetWork(0);
+  */
+
+  std::vector<FlowSimNetWork *> networks;
+  std::vector<AstraSim::Sys *> systems;
+  for (uint32_t i = 0; i < topology->get_npus_count(); i++) {
+    FlowSimNetWork *network = new FlowSimNetWork(i);
+    networks.push_back(network);
+    AstraSim::Sys *system = new AstraSim::Sys(
+      network,
+      nullptr,
+      i,
+      0,
+      1,
+      {topology->get_devices_count()},
+      {1},
+      "",
+      WORKLOAD_PATH + param->workload,
+      param->comm_scale,
+      1,
+      1,
+      1,
+      0,
+      RESULT_PATH + param->res,
+      "FlowSim_test",
+      true,
+      false,
+      param->net_work_param.gpu_type,
+      param->gpus,
+      param->net_work_param.NVswitchs,
+      param->net_work_param.gpus_per_server
+    );
+    system->nvswitch_id = nvswitch_num > 0 ? node2nvswitch[i] : -1;
+    system->num_gpus = topology->get_npus_count();
+    systems.push_back(system);
+  }
+  //FlowSimNetWork *FlowSim_network = new FlowSimNetWork(0);
+  /*
   AstraSim::Sys *systems = new AstraSim::Sys(
     FlowSim_network,
     nullptr,
@@ -134,9 +183,12 @@ int main(int argc,char *argv[]) {
   );
   systems->nvswitch_id = node2nvswitch[0];
   systems->num_gpus = using_num_gpus - param->net_work_param.nvswitch_num;
+  */
+  for (uint32_t i = 0; i < systems.size(); i++) {
+    systems[i]->workload->fire();
+  }
   
-
-  systems->workload->fire();
+  //systems->workload->fire();
   std::cout << "SimAI begin run FlowSim" << std::endl;
   FlowSim::Run();
   FlowSim::Stop();
