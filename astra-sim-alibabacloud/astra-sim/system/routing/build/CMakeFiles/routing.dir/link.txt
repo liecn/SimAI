@@ -1,0 +1,2 @@
+/usr/bin/ar qc librouting.a CMakeFiles/routing.dir/src/TopologyParser.cc.o CMakeFiles/routing.dir/src/RoutingFramework.cc.o
+/usr/bin/ranlib librouting.a

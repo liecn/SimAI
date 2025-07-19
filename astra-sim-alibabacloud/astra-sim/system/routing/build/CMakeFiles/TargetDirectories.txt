@@ -1,0 +1,9 @@
+/data1/lichenni/projects/SimAI/astra-sim-alibabacloud/astra-sim/system/routing/build/CMakeFiles/routing.dir
+/data1/lichenni/projects/SimAI/astra-sim-alibabacloud/astra-sim/system/routing/build/CMakeFiles/test_topology_routing.dir
+/data1/lichenni/projects/SimAI/astra-sim-alibabacloud/astra-sim/system/routing/build/CMakeFiles/test.dir
+/data1/lichenni/projects/SimAI/astra-sim-alibabacloud/astra-sim/system/routing/build/CMakeFiles/edit_cache.dir
+/data1/lichenni/projects/SimAI/astra-sim-alibabacloud/astra-sim/system/routing/build/CMakeFiles/rebuild_cache.dir
+/data1/lichenni/projects/SimAI/astra-sim-alibabacloud/astra-sim/system/routing/build/CMakeFiles/list_install_components.dir
+/data1/lichenni/projects/SimAI/astra-sim-alibabacloud/astra-sim/system/routing/build/CMakeFiles/install.dir
+/data1/lichenni/projects/SimAI/astra-sim-alibabacloud/astra-sim/system/routing/build/CMakeFiles/install/local.dir
+/data1/lichenni/projects/SimAI/astra-sim-alibabacloud/astra-sim/system/routing/build/CMakeFiles/install/strip.dir
