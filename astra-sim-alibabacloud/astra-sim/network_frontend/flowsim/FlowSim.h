@@ -15,6 +15,7 @@
 
 #ifndef __FLOWSIM_HH__
 #define __FLOWSIM_HH__
+
 #include<iostream>
 #include<queue>
 #include<list>
@@ -26,15 +27,23 @@
 
 using namespace std;
 
+/**
+ * Callback task structure for FlowSim scheduling
+ */
 struct CallTask {
   uint64_t time;
   void (*fun_ptr)(void* fun_arg);
   void* fun_arg;
+  
   CallTask(uint64_t _time, void (*_fun_ptr)(void* _fun_arg), void* _fun_arg)
       : time(_time), fun_ptr(_fun_ptr), fun_arg(_fun_arg) {};
   ~CallTask(){}
 };
 
+/**
+ * FlowSim Core Simulation Engine
+ * Manages the simulation timeline, event scheduling, and network operations
+ */
 class FlowSim {
  private:
   static queue<struct CallTask> call_list;
@@ -44,6 +53,7 @@ class FlowSim {
  public:
   static std::shared_ptr<EventQueue> event_queue;
 
+  // Core simulation methods
   static double Now();
   static void Init(std::shared_ptr<EventQueue> event_queue, std::shared_ptr<Topology> topo);
   static void Run();
@@ -53,6 +63,9 @@ class FlowSim {
       void* fun_arg);
   static void Stop();
   static void Destroy();
+  
+  // Network communication methods
   static void Send(int src, int dst, uint64_t size, Callback callback, CallbackArg callbackArg);
 };
-#endif
+
+#endif // __FLOWSIM_HH__

@@ -7,6 +7,7 @@ SIMAI_DIR="${ROOT_DIR:?}"/astra-sim-alibabacloud
 SOURCE_NS3_BIN_DIR="${SIMAI_DIR:?}"/extern/network_backend/ns3-interface/simulation/build/scratch/ns3.36.1-AstraSimNetwork-debug
 SOURCE_ANA_BIN_DIR="${SIMAI_DIR:?}"/build/simai_analytical/build/simai_analytical/SimAI_analytical
 SOURCE_PHY_BIN_DIR="${SIMAI_DIR:?}"/build/simai_phy/build/simai_phynet/SimAI_phynet
+SOURCE_FLOWSIM_BIN_DIR="${SIMAI_DIR:?}"/build/simai_flowsim/build/simai_flowsim/SimAI_flowsim
 
 TARGET_BIN_DIR="${SCRIPT_DIR:?}"/../bin
 function compile {
@@ -43,6 +44,16 @@ function compile {
         ./build.sh -lr analytical
         ./build.sh -c analytical 
         ln -s "${SOURCE_ANA_BIN_DIR:?}" "${TARGET_BIN_DIR:?}"/SimAI_analytical;;
+    "flowsim")
+        mkdir -p "${TARGET_BIN_DIR:?}"
+        mkdir -p "${ROOT_DIR:?}"/results
+        if [ -L "${TARGET_BIN_DIR:?}/SimAI_flowsim" ]; then
+            rm -rf "${TARGET_BIN_DIR:?}"/SimAI_flowsim
+        fi
+        cd "${SIMAI_DIR:?}"
+        ./build.sh -lr flowsim
+        ./build.sh -c flowsim 
+        ln -s "${SOURCE_FLOWSIM_BIN_DIR:?}" "${TARGET_BIN_DIR:?}"/SimAI_flowsim;;
     esac
 }
 
@@ -68,6 +79,12 @@ function cleanup_build {
         fi
         cd "${SIMAI_DIR:?}"
         ./build.sh -lr analytical;;
+    "flowsim")
+        if [ -L "${TARGET_BIN_DIR:?}/SimAI_flowsim" ]; then
+            rm -rf "${TARGET_BIN_DIR:?}"/SimAI_flowsim
+        fi
+        cd "${SIMAI_DIR:?}"
+        ./build.sh -lr flowsim;;
     esac
 }
 
@@ -79,7 +96,7 @@ case "$1" in
     compile "$2";;
 -h|--help|*)
     printf -- "help message\n"
-    printf -- "-c|--compile mode supported ns3/phy/analytical  (example:./build.sh -c ns3)\n"
-    printf -- "-l|--clean  (example:./build.sh -l ns3)\n"
-    printf -- "-lr|--clean-result mode  (example:./build.sh -lr ns3)\n"
+    printf -- "-c|--compile mode supported ns3/phy/analytical/flowsim  (example:./build.sh -c flowsim)\n"
+    printf -- "-l|--clean  (example:./build.sh -l flowsim)\n"
+    printf -- "-lr|--clean-result mode  (example:./build.sh -lr flowsim)\n"
 esac

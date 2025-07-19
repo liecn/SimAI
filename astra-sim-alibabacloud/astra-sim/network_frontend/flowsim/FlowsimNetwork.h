@@ -13,35 +13,49 @@
 *limitations under the License.
 */
 
-#ifndef __SIMAI_FLOW_NETWORK_HH__
-#define __SIMAI_FLOW_NETWORK_HH__
+#ifndef __SIMAIFLOW_NETWORK_HH__
+#define __SIMAIFLOW_NETWORK_HH__
+
 #include"astra-sim/system/AstraNetworkAPI.hh"
 
 using namespace std;
 
-class FlowSimNetWork: public AstraSim::AstraNetworkAPI{
+/**
+ * FlowSim Network Interface
+ * Implements AstraSim::AstraNetworkAPI for FlowSim backend
+ */
+class FlowSimNetWork: public AstraSim::AstraNetworkAPI {
 private:
   int npu_offset;
+
 public:
     FlowSimNetWork(int _local_rank);
     ~FlowSimNetWork();
-    int sim_comm_size(AstraSim::sim_comm comm,int * size){
+    
+    // AstraNetworkAPI interface implementations
+    int sim_comm_size(AstraSim::sim_comm comm, int * size) {
         return 0;
     }
-    int sim_finish(){
+    
+    int sim_finish() {
         return 0;
     }
-    double sim_time_resolution(){
+    
+    double sim_time_resolution() {
         return 0;
     }
-    int sim_init(AstraSim::AstraMemoryAPI* MEM){
-            return 0;
+    
+    int sim_init(AstraSim::AstraMemoryAPI* MEM) {
+        return 0;
     }
+    
     AstraSim::timespec_t sim_get_time();
+    
     virtual void sim_schedule(
         AstraSim::timespec_t delta,
         void (*fun_ptr)(void* fun_arg),
         void* fun_arg);
+        
     virtual int sim_send(
         void* buffer,
         uint64_t count,
@@ -50,7 +64,8 @@ public:
         int tag,
         AstraSim::sim_request* request,
         void (*msg_handler)(void* fun_arg),
-        void* fun_arg) ;
+        void* fun_arg);
+        
     virtual int sim_recv(
         void* buffer,
         uint64_t count,
@@ -59,6 +74,7 @@ public:
         int tag,
         AstraSim::sim_request* request,
         void (*msg_handler)(void* fun_arg),
-        void* fun_arg) ;
+        void* fun_arg);
 };
-#endif
+
+#endif // __SIMAIFLOW_NETWORK_HH__

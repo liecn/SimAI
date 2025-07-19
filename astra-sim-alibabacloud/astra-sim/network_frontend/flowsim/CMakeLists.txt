@@ -1,17 +1,23 @@
 # CMake requirement
 cmake_minimum_required(VERSION 3.15)
 
-# 项目名称和设置
+# Project name and settings
 project(SimAI_flowsim)
 
-# 查找源文件
-file(GLOB SOURCES "*.cc") # 会查找当前目录下的所有 .cpp 文件
-file(GLOB HEADERS "*.h")    # 会查找当前目录下的所有 .h 文件
+# Find source files
+file(GLOB SOURCES "*.cc")
+file(GLOB HEADERS "*.h")
+
+# Include directories
 include_directories("${PROJECT_SOURCE_DIR}/../../../")
+include_directories("${PROJECT_SOURCE_DIR}/../../system/")
+include_directories("${PROJECT_SOURCE_DIR}/../../")
 
-
-# 设置可执行文件
+# Create executable
 add_executable(SimAI_flowsim ${SOURCES} ${HEADERS})
 
-# 链接库
-target_link_libraries(SimAI_flowsim AstraSim) # 替换为实际需要链接的库名 
+# Link libraries
+target_link_libraries(SimAI_flowsim AstraSim)
+
+# Set C++ standard
+set_property(TARGET SimAI_flowsim PROPERTY CXX_STANDARD 17) 
