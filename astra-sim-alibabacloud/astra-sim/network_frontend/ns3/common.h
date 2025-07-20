@@ -24,6 +24,12 @@
 #include <time.h>
 #include <unordered_map>
 
+#include "astra-sim/system/routing/include/RoutingFramework.h"
+
+// Forward declarations for routing functions
+void TestRoutingFrameworkVsNS3();
+void ReplaceNS3RoutingWithFramework();
+
 #include "ns3/applications-module.h"
 #include "ns3/core-module.h"
 #include "ns3/error-model.h"
@@ -46,6 +52,9 @@
 
 using namespace ns3;
 using namespace std;
+
+// Global routing framework instance
+AstraSim::RoutingFramework* g_system_routing = nullptr;
 
 NS_LOG_COMPONENT_DEFINE("GENERIC_SIMULATION");
 
@@ -765,6 +774,18 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
       link_num >> gpu_type_str;
   flowf >> flow_num;
   tracef >> trace_num;
+  
+  // Initialize routing framework from system
+  g_system_routing = new AstraSim::RoutingFramework();
+  if (g_system_routing->ParseTopology(topology_file)) {
+    g_system_routing->PrecalculateRoutingTables();
+    std::cout << "[SYSTEM ROUTING] Routing framework initialized with topology: " << topology_file << std::endl;
+  } else {
+    std::cerr << "[SYSTEM ROUTING] Failed to load topology: " << topology_file << std::endl;
+    delete g_system_routing;
+    g_system_routing = nullptr;
+  }
+  
   if(gpu_type_str == "A100"){
     gpu_type = GPUType::A100;
   } else if(gpu_type_str == "A800"){
@@ -883,7 +904,7 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
     nbr2if[dnode][snode].delay =
         DynamicCast<QbbChannel>(
             DynamicCast<QbbNetDevice>(d.Get(1))->GetChannel())
-            ->GetDelay()
+            ->GetDelay()    
             .GetTimeStep();
     nbr2if[dnode][snode].bw =
         DynamicCast<QbbNetDevice>(d.Get(1))->GetDataRate().GetBitRate();
@@ -1013,6 +1034,9 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
   CalculateRoutes(n);
   SetRoutingEntries();
 
+  // Test routing framework against NS3's original routing
+  TestRoutingFrameworkVsNS3();
+
   // Enable custom routing and pre-calculate flow paths only if requested
   if (use_custom_routing) {
     PrecalculateFlowPaths();
@@ -1137,9 +1161,47 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
   }
 
   // Print initial routing statistics after setup
-  cout << "[CUSTOM ROUTING] Setup complete. Ready for simulation." << endl;
-  cout << "[CUSTOM ROUTING] Custom routing is " << (use_custom_routing ? "ACTIVE" : "INACTIVE") << endl;
-  cout << "[CUSTOM ROUTING] Pre-calculated " << flow_to_path_map.size() << " flow paths upfront (comprehensive coverage for large-scale workloads)" << endl;
+  cout << "[ROUTING] Setup complete. Ready for simulation." << endl;
+  
+  // Keep routing framework alive for simulation - cleanup happens elsewhere
+}
+
+// Simple routing framework functions
+void EnableRoutingFramework(bool enable) {
+    // g_use_routing_framework = enable;
+    // if (enable) {
+    //     std::cout << "[ROUTING] Routing framework enabled for comparison" << std::endl;
+    // } else {
+    //     std::cout << "[ROUTING] Using NS3's built-in routing only" << std::endl;
+    // }
+}
+
+// Function to compare routing framework results with NS3's built-in routing
+void CompareRoutingResults(NodeContainer &n) {
+    // if (!g_routing_framework) {
+    //     std::cout << "[COMPARISON] Routing framework not initialized" << std::endl;
+    //     return;
+    // }
+    
+    // std::cout << "\n[ROUTING COMPARISON] Comparing routing framework with NS3's built-in routing..." << std::endl;
+    
+    // // Simple comparison - just check if routing tables are populated
+    // int routing_entries = 0;
+    // for (uint32_t i = 0; i < node_num; i++) {
+    //     if (n.Get(i)->GetNodeType() == 0) {  // Host nodes only
+    //         for (uint32_t j = 0; j < node_num; j++) {
+    //             if (n.Get(j)->GetNodeType() == 0 && i != j) {  // Different host
+    //                 if (nextHop.find(n.Get(i)) != nextHop.end() && 
+    //                     nextHop[n.Get(i)].find(n.Get(j)) != nextHop[n.Get(i)].end()) {
+    //                     routing_entries++;
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
+    
+    // std::cout << "[ROUTING COMPARISON] Found " << routing_entries << " routing entries" << std::endl;
+    // std::cout << "[ROUTING COMPARISON] Comparison complete." << std::endl;
 }
 
 // Custom routing functions
@@ -1353,6 +1415,77 @@ void OverrideFlowPath(uint32_t src_ip, uint32_t dst_ip, uint8_t protocol,
     flow_to_path_map[key] = forced_interface;
 }
 
+// Function to get next-hop interface for a given flow
+uint32_t GetNextHopInterface(uint32_t src_node_id, uint32_t dst_node_id, 
+                             uint8_t protocol, uint16_t src_port, uint16_t dst_port) {
+    if (src_node_id >= node_num || dst_node_id >= node_num) {
+        cout << "[GET_NEXT_HOP] Invalid node IDs: src=" << src_node_id << " dst=" << dst_node_id << endl;
+        return 0; // Return a default or error value
+    }
+
+    Ptr<Node> src_node = n.Get(src_node_id);
+    Ptr<Node> dst_node = n.Get(dst_node_id);
+
+    // Get destination IP once
+    uint32_t dst_ip = dst_node->GetObject<Ipv4>()->GetAddress(1, 0).GetLocal().Get();
+
+    FlowKey flow_key;
+    flow_key.src_ip = src_node->GetObject<Ipv4>()->GetAddress(1, 0).GetLocal().Get();
+    flow_key.dst_ip = dst_ip;
+    flow_key.protocol = protocol;
+    flow_key.src_port = src_port;
+    flow_key.dst_port = dst_port;
+
+    // Check if we have a custom routing entry for this flow
+    if (flow_to_path_map.find(flow_key) != flow_to_path_map.end()) {
+        return flow_to_path_map[flow_key];
+    }
+
+    // Fallback to default routing (use nextHop table)
+    if (nextHop[src_node].find(dst_node) != nextHop[src_node].end()) {
+        auto next_hops = nextHop[src_node][dst_node];
+        if (!next_hops.empty()) {
+            // Use first available next hop (could be enhanced to use ECMP logic)
+            return nbr2if[src_node][next_hops[0]].idx;
+        }
+    }
+
+    cout << "[GET_NEXT_HOP] Warning: No routing entry found for node " 
+         << src_node_id << " to reach " << dst_node_id << endl;
+    return 0; // Return a default or error value
+}
+
+// Function to get next-hop interface using routing framework from system
+uint32_t GetRoutingFrameworkNextHop(uint32_t src_node_id, uint32_t dst_node_id) {
+    // Call routing framework from system directory
+    if (g_system_routing) {
+        std::vector<int> interfaces = g_system_routing->GetNextHopInterfaces(src_node_id, dst_node_id);
+        if (!interfaces.empty()) {
+            // Return the first interface (could be enhanced with load balancing)
+            return static_cast<uint32_t>(interfaces[0]);
+        }
+    }
+    
+    // Fallback to existing NS3 routing if routing framework not available
+    if (src_node_id >= node_num || dst_node_id >= node_num) {
+        return 0;
+    }
+
+    Ptr<Node> src_node = n.Get(src_node_id);
+    Ptr<Node> dst_node = n.Get(dst_node_id);
+
+    // Fallback to default routing (use nextHop table)
+    if (nextHop[src_node].find(dst_node) != nextHop[src_node].end()) {
+        auto next_hops = nextHop[src_node][dst_node];
+        if (!next_hops.empty()) {
+            // Use first available next hop (could be enhanced to use ECMP logic)
+            return nbr2if[src_node][next_hops[0]].idx;
+        }
+    }
+
+    return 0; // Return a default or error value
+}
+
 // Function to get complete path for a flow using flow_to_path_map
 std::vector<uint32_t> GetFlowPath(uint32_t src_node_id, uint32_t dst_node_id, 
                                   uint8_t protocol, uint16_t src_port, uint16_t dst_port) {
@@ -1479,4 +1612,138 @@ void PrintFlowPath(uint32_t src_node_id, uint32_t dst_node_id,
     cout << " [" << path.size() << " hops]" << endl;
 }
 
-#endif
+// Test function to compare routing framework with NS3's original routing
+void TestRoutingFrameworkVsNS3() {
+    if (!g_system_routing) {
+        cout << "[ROUTING TEST] Error: Routing framework not initialized" << endl;
+        return;
+    }
+    
+    cout << "\n[ROUTING TEST] Comparing routing framework with NS3's original routing..." << endl;
+    
+    int mismatches = 0;
+    int total_comparisons = 0;
+    
+    // Test all host-to-host pairs
+    for (uint32_t src_id = 0; src_id < node_num; src_id++) {
+        if (n.Get(src_id)->GetNodeType() != 0) continue; // Only hosts
+        
+        for (uint32_t dst_id = 0; dst_id < node_num; dst_id++) {
+            if (n.Get(dst_id)->GetNodeType() != 0) continue; // Only hosts
+            if (src_id == dst_id) continue;
+            
+            total_comparisons++;
+            
+            // Get NS3's next-hop interfaces
+            Ptr<Node> src_node = n.Get(src_id);
+            Ptr<Node> dst_node = n.Get(dst_id);
+            
+            std::vector<uint32_t> ns3_interfaces;
+            if (nextHop[src_node].find(dst_node) != nextHop[src_node].end()) {
+                auto next_hops = nextHop[src_node][dst_node];
+                for (auto next_hop : next_hops) {
+                    uint32_t interface = nbr2if[src_node][next_hop].idx;
+                    ns3_interfaces.push_back(interface);
+                }
+                // Sort for comparison
+                std::sort(ns3_interfaces.begin(), ns3_interfaces.end());
+            }
+            
+            // Get routing framework's next-hop interfaces
+            std::vector<int> rf_interfaces_int = g_system_routing->GetNextHopInterfaces(src_id, dst_id);
+            std::vector<uint32_t> rf_interfaces;
+            for (int iface : rf_interfaces_int) {
+                rf_interfaces.push_back(static_cast<uint32_t>(iface));
+            }
+            // Sort for comparison
+            std::sort(rf_interfaces.begin(), rf_interfaces.end());
+            
+            // Compare the results
+            if (ns3_interfaces != rf_interfaces) {
+                mismatches++;
+                cout << "[ROUTING TEST] MISMATCH for src=" << src_id << " dst=" << dst_id << endl;
+                cout << "  NS3 interfaces:     ";
+                for (uint32_t iface : ns3_interfaces) cout << iface << " ";
+                cout << endl;
+                cout << "  Routing framework:  ";
+                for (uint32_t iface : rf_interfaces) cout << iface << " ";
+                cout << endl;
+                
+                // Stop after showing first few mismatches to avoid spam
+                if (mismatches >= 5) {
+                    cout << "[ROUTING TEST] Stopping after 5 mismatches..." << endl;
+                    break;
+                }
+            }
+        }
+        if (mismatches >= 5) break;
+    }
+    
+    cout << "[ROUTING TEST] Comparison complete:" << endl;
+    cout << "  Total comparisons: " << total_comparisons << endl;
+    cout << "  Mismatches: " << mismatches << endl;
+    
+    if (mismatches == 0) {
+        cout << "[ROUTING TEST] ✅ SUCCESS! Routing framework matches NS3's original routing perfectly!" << endl;
+        cout << "[ROUTING TEST] Ready to replace NS3's routing with routing framework." << endl;
+        
+        // Automatically replace NS3's routing with routing framework
+        ReplaceNS3RoutingWithFramework();
+    } else {
+        cout << "[ROUTING TEST] ❌ FAILURE! Found " << mismatches << " mismatches. Need to debug routing framework." << endl;
+    }
+}
+
+// Function to replace NS3's routing with routing framework
+void ReplaceNS3RoutingWithFramework() {
+    if (!g_system_routing) {
+        cout << "[ROUTING REPLACE] Error: Routing framework not initialized" << endl;
+        return;
+    }
+    
+    cout << "[ROUTING REPLACE] Replacing NS3's routing with routing framework..." << endl;
+    
+    // Clear NS3's routing tables
+    nextHop.clear();
+    
+    // Rebuild routing tables using routing framework
+    for (uint32_t src_id = 0; src_id < node_num; src_id++) {
+        if (n.Get(src_id)->GetNodeType() != 0) continue; // Only hosts
+        
+        Ptr<Node> src_node = n.Get(src_id);
+        
+        for (uint32_t dst_id = 0; dst_id < node_num; dst_id++) {
+            if (n.Get(dst_id)->GetNodeType() != 0) continue; // Only hosts
+            if (src_id == dst_id) continue;
+            
+            Ptr<Node> dst_node = n.Get(dst_id);
+            
+            // Get next-hop interfaces from routing framework
+            std::vector<int> rf_interfaces = g_system_routing->GetNextHopInterfaces(src_id, dst_id);
+            
+            // Convert interfaces back to next-hop nodes for NS3 compatibility
+            std::vector<Ptr<Node>> next_hop_nodes;
+            for (int interface : rf_interfaces) {
+                // Find the node connected to this interface
+                for (auto& neighbor_pair : nbr2if[src_node]) {
+                    if (neighbor_pair.second.idx == static_cast<uint32_t>(interface)) {
+                        next_hop_nodes.push_back(neighbor_pair.first);
+                        break;
+                    }
+                }
+            }
+            
+            // Store in NS3's nextHop table
+            if (!next_hop_nodes.empty()) {
+                nextHop[src_node][dst_node] = next_hop_nodes;
+            }
+        }
+    }
+    
+    // Re-set routing entries in switches with new routing
+    SetRoutingEntries();
+    
+    cout << "[ROUTING REPLACE] ✅ Successfully replaced NS3's routing with routing framework!" << endl;
+}
+
+#endif // __COMMON_H__
