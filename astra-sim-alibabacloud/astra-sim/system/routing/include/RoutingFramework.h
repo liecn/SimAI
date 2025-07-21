@@ -35,7 +35,16 @@ public:
     
     bool IsTopologyLoaded() const { return topology_.GetNodeCount() > 0; }
     
+    // Get routing table for a specific node
     const std::unordered_map<uint32_t, std::vector<int>>& GetRoutingTable(int node_id) const;
+    
+    // Pre-calculate flow paths with path tracing and ECMP selection (replaces NS3 logic)
+    std::vector<std::pair<FlowKey, int>> PrecalculateFlowPathsWithTracing(int node_count,
+                                                                          const std::function<uint32_t(int)>& node_id_to_ip,
+                                                                          const std::function<int(int,int)>& get_node_type,
+                                                                          uint16_t src_port = 10006,
+                                                                          uint16_t dst_port = 100,
+                                                                          uint8_t protocol = 0x11);
 
 private:
     TopologyParser topology_;
@@ -48,9 +57,10 @@ private:
     int GetInterfaceIndex(int from_node, int to_node) const;
     std::vector<int> FindPath(int src, int dst);
     
+    // Get next node from interface index
+    int GetNextNodeFromInterface(int from_node, int interface) const;
+    
     uint32_t EcmpHash(const uint8_t* key, size_t len, uint32_t seed);
-    FlowKey CreateFlowKey(int src_node, int dst_node, uint8_t protocol = 0x11, 
-                         uint16_t src_port = 10006, uint16_t dst_port = 100) const;
 };
 
 } // namespace AstraSim

@@ -339,28 +339,42 @@ int RoutingFramework::GetInterfaceIndex(int from_node, int to_node) const {
     return -1;
 }
 
-uint32_t RoutingFramework::EcmpHash(const uint8_t* key, size_t len, uint32_t seed) {
-    uint32_t h = seed;
-    uint32_t k;
-    
-    const uint32_t* key_x4 = (const uint32_t*)key;
-    size_t i = len >> 2;
-    
-    for (; i > 0; i--) {
-        k = *key_x4++;
-        k *= 0xcc9e2d51;
-        k = (k << 15) | (k >> 17);
-        k *= 0x1b873593;
-        h ^= k;
-        h = (h << 13) | (h >> 19);
-        h += (h << 2) + 0xe6546b64;
+int RoutingFramework::GetNextNodeFromInterface(int from_node, int interface) const {
+    const auto& graph = topology_.GetGraph();
+    if (from_node < 0 || from_node >= graph.size()) {
+        return -1;
     }
     
-    key = (const uint8_t*)key_x4;
+    const auto& neighbors = graph[from_node];
+    for (int neighbor : neighbors) {
+        int neighbor_interface = GetInterfaceIndex(from_node, neighbor);
+        if (neighbor_interface == interface) {
+            return neighbor;
+        }
+    }
     
+    return -1;
+}
+
+uint32_t RoutingFramework::EcmpHash(const uint8_t* key, size_t len, uint32_t seed) {
+    uint32_t h = seed;
+    if (len > 3) {
+        const uint32_t* key_x4 = (const uint32_t*) key;
+        size_t i = len >> 2;
+        do {
+            uint32_t k = *key_x4++;
+            k *= 0xcc9e2d51;
+            k = (k << 15) | (k >> 17);
+            k *= 0x1b873593;
+            h ^= k;
+            h = (h << 13) | (h >> 19);
+            h += (h << 2) + 0xe6546b64;
+        } while (--i);
+        key = (const uint8_t*) key_x4;
+    }
     if (len & 3) {
         size_t i = len & 3;
-        k = 0;
+        uint32_t k = 0;
         key = &key[i - 1];
         do {
             k <<= 8;
@@ -371,22 +385,91 @@ uint32_t RoutingFramework::EcmpHash(const uint8_t* key, size_t len, uint32_t see
         k *= 0x1b873593;
         h ^= k;
     }
-    
     h ^= len;
     h ^= h >> 16;
     h *= 0x85ebca6b;
     h ^= h >> 13;
     h *= 0xc2b2ae35;
     h ^= h >> 16;
-    
     return h;
 }
 
-FlowKey RoutingFramework::CreateFlowKey(int src_node, int dst_node, uint8_t protocol, 
-                                       uint16_t src_port, uint16_t dst_port) const {
-    uint32_t src_ip = topology_.NodeIdToIp(src_node);
-    uint32_t dst_ip = topology_.NodeIdToIp(dst_node);
-    return FlowKey(src_ip, dst_ip, protocol, src_port, dst_port);
+std::vector<std::pair<FlowKey, int>> RoutingFramework::PrecalculateFlowPathsWithTracing(
+    int node_count, const std::function<uint32_t(int)>& node_id_to_ip,
+    const std::function<int(int,int)>& get_node_type,
+    uint16_t src_port, uint16_t dst_port, uint8_t protocol) {
+    
+    std::vector<std::pair<FlowKey, int>> flow_paths;
+    
+    if (!IsTopologyLoaded()) {
+        return flow_paths;
+    }
+    
+    for (int src_id = 0; src_id < node_count; src_id++) {
+        if (get_node_type(src_id, 0) != 0) continue; // Only hosts
+        
+        for (int dst_id = 0; dst_id < node_count; dst_id++) {
+            if (get_node_type(dst_id, 0) != 0) continue; // Only hosts
+            if (src_id == dst_id) continue;
+            
+            uint32_t src_ip = node_id_to_ip(src_id);
+            uint32_t dst_ip = node_id_to_ip(dst_id);
+            
+            // Trace the path from source to destination using routing framework
+            // but store these decisions as fixed input for deterministic routing
+            
+            int current = src_id;
+            
+            while (current != dst_id) {
+                // Use routing framework to get next hop interfaces for current node
+                std::vector<int> interfaces = GetNextHopInterfaces(current, dst_id);
+                
+                if (interfaces.empty()) break;
+                
+                // Use ECMP hash to select next hop (same as NS-3 runtime)
+                union {
+                    uint8_t u8[4+4+2+2];
+                    uint32_t u32[3];
+                } buf;
+                buf.u32[0] = src_ip;
+                buf.u32[1] = dst_ip;
+                buf.u32[2] = src_port | ((uint32_t)dst_port << 16);
+                
+                uint32_t hash = EcmpHash(buf.u8, 12, current);  // Use current node ID as seed (same as NS3)
+                uint32_t path_idx = hash % interfaces.size();
+                int selected_interface = interfaces[path_idx];
+                
+                // Store the ECMP decision for this switch
+                int current_node_type = get_node_type(current, 0);
+                if (current_node_type == 1 || current_node_type == 2) { // Switch or NVSwitch
+                    FlowKey key;
+                    key.src_ip = src_ip;
+                    key.dst_ip = dst_ip;
+                    key.protocol = protocol;
+                    key.src_port = src_port;
+                    key.dst_port = dst_port;
+                    
+                    // Store the pre-calculated ECMP decision
+                    flow_paths.push_back(std::make_pair(key, selected_interface));
+                }
+                
+                // Find the next hop node using this interface
+                // This requires the routing framework to provide interface-to-node mapping
+                int next_node = GetNextNodeFromInterface(current, selected_interface);
+                
+                if (next_node >= 0) {
+                    current = next_node;
+                } else {
+                    break; // Can't find next hop
+                }
+                
+                // Safety check to prevent infinite loops
+                if (get_node_type(current, 0) == 0) break; // Reached a host
+            }
+        }
+    }
+    
+    return flow_paths;
 }
 
 } // namespace AstraSim 
