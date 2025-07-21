@@ -22,6 +22,7 @@
 #include "astra-sim/system/MockNcclLog.h"
 #include "astra-sim/system/AstraComputeAPI.hh"
 #include "astra-sim/system/AstraParamParse.hh"
+#include "astra-sim/system/routing/include/RoutingFramework.h"
 
 #include "FlowsimNetwork.h"
 #include "FlowSim.h"
@@ -117,7 +118,29 @@ int main(int argc,char *argv[]) {
   }
 
   std::shared_ptr<EventQueue> event_queue = std::make_shared<EventQueue>();
+  
+  // Initialize FlowSim with routing framework (same approach as NS3)
   FlowSim::Init(event_queue, topology);
+  
+  // Initialize routing framework and pre-calculate flow paths (same as NS3)
+  if (!param->net_work_param.topology_file.empty()) {
+    std::cout << "[FLOWSIM] Initializing routing framework with topology: " << param->net_work_param.topology_file << std::endl;
+    
+    // Create routing framework instance
+    auto routing_framework = std::make_unique<AstraSim::RoutingFramework>();
+    
+    // Pre-calculate flow paths for FlowSim (same method as NS3)
+    if (routing_framework->PrecalculateFlowPathsForFlowSim(param->net_work_param.topology_file, param->net_work_param.topology_file)) {
+      std::cout << "[FLOWSIM] Routing framework initialized successfully with " 
+                << routing_framework->GetFlowPathCount() << " pre-calculated paths" << std::endl;
+      
+      // Set the routing framework in FlowSim
+      FlowSim::SetRoutingFramework(std::move(routing_framework));
+    } else {
+      std::cerr << "[FLOWSIM] Failed to initialize routing framework, using default routing" << std::endl;
+    }
+  }
+  
   for (uint32_t i = 0; i < systems.size(); i++) {
     systems[i]->workload->fire();
   }

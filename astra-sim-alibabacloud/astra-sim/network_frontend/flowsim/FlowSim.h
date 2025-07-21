@@ -25,6 +25,11 @@
 #include "EventQueue.h"
 #include "Type.h"
 
+// Forward declaration
+namespace AstraSim {
+    class RoutingFramework;
+}
+
 using namespace std;
 
 /**
@@ -49,6 +54,7 @@ class FlowSim {
   static queue<struct CallTask> call_list;
   static uint64_t tick;
   static std::shared_ptr<Topology> topology;  
+  static std::unique_ptr<AstraSim::RoutingFramework> routing_framework_;
 
  public:
   static std::shared_ptr<EventQueue> event_queue;
@@ -56,6 +62,9 @@ class FlowSim {
   // Core simulation methods
   static double Now();
   static void Init(std::shared_ptr<EventQueue> event_queue, std::shared_ptr<Topology> topo);
+  static void InitWithRouting(std::shared_ptr<EventQueue> event_queue, std::shared_ptr<Topology> topo,
+                             const std::string& topology_file, const std::string& network_config_file);
+  static void SetRoutingFramework(std::unique_ptr<AstraSim::RoutingFramework> routing_framework);
   static void Run();
   static void Schedule(
       uint64_t delay,
