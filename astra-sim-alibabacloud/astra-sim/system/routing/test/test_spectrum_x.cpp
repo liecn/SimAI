@@ -24,21 +24,13 @@ void TestNS3Compatibility(const std::string& topology_file) {
     assert(routing.IsTopologyLoaded() && "Topology not loaded");
     std::cout << "✓ Topology loaded: " << routing.GetTopology().GetNodeCount() << " nodes" << std::endl;
     
-    // Pre-calculate routing tables (NS3-style)
     routing.PrecalculateRoutingTables();
     std::cout << "✓ Routing tables pre-calculated" << std::endl;
     
     const auto& topology = routing.GetTopology();
     
-    // Reasonable host pairs based on Spectrum-X topology
     std::vector<std::pair<int, int>> test_pairs = {
-        {0, 7},    // Same NVSwitch group
-        {0, 8},    // Different NVSwitch group
-        {0, 64},   // Different switch group
-        {0, 127},  // Far apart
-        {8, 15},   // Same NVSwitch group
-        {16, 24},  // Same NVSwitch group
-        {120, 127} // Same NVSwitch group
+        {0, 7}, {0, 8}, {0, 64}, {0, 127}, {8, 15}, {16, 24}, {120, 127}
     };
     
     std::cout << "\nTesting routing (host pairs):" << std::endl;
@@ -49,7 +41,6 @@ void TestNS3Compatibility(const std::string& topology_file) {
         uint32_t src_ip = topology.NodeIdToIp(src);
         uint32_t dst_ip = topology.NodeIdToIp(dst);
         
-        // Get next-hop interfaces
         std::vector<int> next_hops = routing.GetPrecalculatedNextHops(src, dst);
         std::cout << "  Host " << src << " -> Host " << dst << ": ";
         if (next_hops.empty()) {
@@ -65,7 +56,6 @@ void TestNS3Compatibility(const std::string& topology_file) {
         }
     }
     
-    // Test routing consistency (same flow should get same interface)
     int src = 0, dst = 8;
     uint32_t src_ip = topology.NodeIdToIp(src);
     uint32_t dst_ip = topology.NodeIdToIp(dst);
@@ -94,7 +84,6 @@ int main(int argc, char* argv[]) {
     
     std::string topology_file = argv[1];
     
-    // Check if file exists
     std::ifstream file_check(topology_file);
     if (!file_check.good()) {
         std::cerr << "Error: Cannot open topology file: " << topology_file << std::endl;

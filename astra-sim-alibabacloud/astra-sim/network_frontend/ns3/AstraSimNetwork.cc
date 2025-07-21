@@ -337,6 +337,9 @@ int main(int argc, char *argv[]) {
   std::cout << "\n[SIMULATION COMPLETE] Printing routing statistics..." << std::endl;
   PrintRoutingStatsDirect();
   
+  // Cleanup routing framework before destroying simulator
+  CleanupRoutingFramework();
+  
   Simulator::Destroy();
   
   #ifdef NS3_MPI

@@ -3,11 +3,11 @@ This source code is licensed under the MIT license found in the
 LICENSE file in the root directory of this source tree.
 *******************************************************************************/
 
-#include "RoutingFramework.h"
+#include "../include/RoutingFramework.h"
 #include <iostream>
 #include <map>
 #include <algorithm>
-#include <queue> // Added for BFS queue
+#include <queue>
 
 namespace AstraSim {
 
@@ -25,45 +25,32 @@ int RoutingFramework::GetOutInterface(int src_node, int dst_node, uint32_t src_i
         return -1;
     }
     
-    // Check bounds
     int node_count = topology_.GetNodeCount();
     if (src_node < 0 || src_node >= node_count || dst_node < 0 || dst_node >= node_count) {
         return -1;
     }
     
     if (src_node == dst_node) {
-        return -1; // Same node, no forwarding needed
+        return -1;
     }
     
-    // Use pre-calculated routing table (NS3-style)
     auto next_hops = GetPrecalculatedNextHops(src_node, dst_node);
     if (next_hops.empty()) {
         return -1;
     }
     
-    // If only one next-hop, return it directly
     if (next_hops.size() == 1) {
         return next_hops[0];
     }
     
-    // Use ECMP hash to select interface (exactly like NS3)
     union {
         uint8_t u8[4+4+2+2];
         uint32_t u32[3];
     } buf;
     
-    buf.u32[0] = src_ip;  // Source IP
-    buf.u32[1] = dst_ip;  // Destination IP
-    
-    if (protocol == 0x6) {  // TCP
-        buf.u32[2] = src_port | ((uint32_t)dst_port << 16);
-    } else if (protocol == 0x11) {  // UDP
-        buf.u32[2] = src_port | ((uint32_t)dst_port << 16);
-    } else if (protocol == 0xFC || protocol == 0xFD) {  // ACK
-        buf.u32[2] = src_port | ((uint32_t)dst_port << 16);
-    } else {
-        buf.u32[2] = src_port | ((uint32_t)dst_port << 16);
-    }
+    buf.u32[0] = src_ip;
+    buf.u32[1] = dst_ip;
+    buf.u32[2] = src_port | ((uint32_t)dst_port << 16);
     
     uint32_t hash = EcmpHash(buf.u8, 12, seed);
     uint32_t interface_idx = hash % next_hops.size();
@@ -72,7 +59,6 @@ int RoutingFramework::GetOutInterface(int src_node, int dst_node, uint32_t src_i
 }
 
 int RoutingFramework::GetOutInterface(const FlowKey& flow_key, uint32_t seed) {
-    // Extract node IDs from flow key IPs
     int src_node = -1, dst_node = -1;
     int node_count = topology_.GetNodeCount();
     
@@ -105,14 +91,12 @@ void RoutingFramework::PrecalculateRoutingTables() {
     
     int node_count = topology_.GetNodeCount();
     
-    // NS3-style: only calculate routes from HOST nodes (node type 0)
     for (int src_id = 0; src_id < node_count; src_id++) {
-        if (topology_.GetNodeType(src_id) == 0) {  // HOST nodes only
+        if (topology_.GetNodeType(src_id) == 0) {
             CalculateRouteNS3Style(src_id);
         }
     }
     
-    // Build routing tables from nextHop structure (like NS3's SetRoutingEntries)
     BuildRoutingTablesFromNextHop();
 }
 
@@ -140,71 +124,194 @@ const std::unordered_map<uint32_t, std::vector<int>>& RoutingFramework::GetRouti
     return it->second;
 }
 
-// NS3-style routing calculation (exact copy of CalculateRoute function)
 void RoutingFramework::CalculateRouteNS3Style(int host_node) {
-    int node_count = topology_.GetNodeCount();
-    // NS3 data structures
-    std::map<int, int> dis;  // distance from host
-    std::map<int, std::vector<int>> nextHop;  // nextHop[node] = vector of next hop nodes
-    std::queue<int> q;
-    q.push(host_node);
+    std::map<int, int> dis;
+    std::map<int, std::vector<int>> nextHop;
+    std::vector<int> q;
+    q.push_back(host_node);
     dis[host_node] = 0;
 
-    while (!q.empty()) {
-        int now = q.front();
-        q.pop();
+    for (int i = 0; i < (int)q.size(); i++) {
+        int now = q[i];
         int d = dis[now];
         const auto& neighbors = topology_.GetGraph()[now];
+        
         for (int next : neighbors) {
             if (dis.find(next) == dis.end()) {
                 dis[next] = d + 1;
-                // Only add switches and NV switches to queue (like NS3)
                 if (topology_.GetNodeType(next) == 1 || topology_.GetNodeType(next) == 2) {
-                    q.push(next);
+                    q.push_back(next);
                 }
             }
-            // NS3's key logic: if 'now' is on the shortest path from 'next' to 'host'
+            
             if (d + 1 == dis[next]) {
-                nextHop[next].push_back(now);
-            }
-        }
-    }
-    next_hop_tables_[host_node] = nextHop;
-}
-
-void RoutingFramework::BuildRoutingTablesFromNextHop() {
-    int node_count = topology_.GetNodeCount();
-    // For each host that has nextHop information
-    for (const auto& host_pair : next_hop_tables_) {
-        int host_node = host_pair.first;
-        const auto& nextHop = host_pair.second;
-        
-        // For each destination in this host's nextHop table
-        for (const auto& dst_pair : nextHop) {
-            int dst_node = dst_pair.first;
-            const auto& nexts = dst_pair.second;
-            
-            // Get destination IP
-            uint32_t dst_ip = topology_.NodeIdToIp(dst_node);
-            
-            // For each next hop, get the interface from host to that next hop
-            for (int next : nexts) {
-                int interface = GetInterfaceIndex(host_node, next);
-                if (interface >= 0) {
-                    routing_tables_[host_node][dst_ip].push_back(interface);
+                bool via_nvswitch = false;
+                
+                if (nextHop.find(next) != nextHop.end()) {
+                    for (int x : nextHop[next]) {
+                        if (topology_.GetNodeType(x) == 2) {
+                            via_nvswitch = true;
+                            break;
+                        }
+                    }
+                }
+                
+                if (via_nvswitch == false) {
+                    if (topology_.GetNodeType(now) == 2) {
+                        nextHop[next].clear();
+                    }
+                    nextHop[next].push_back(now);
+                } else if (via_nvswitch == true && topology_.GetNodeType(now) == 2) {
+                    nextHop[next].push_back(now);
+                }
+                
+                if (topology_.GetNodeType(next) == 0 && nextHop.find(next) == nextHop.end()) {
+                    nextHop[next].push_back(now);
                 }
             }
         }
     }
     
-    // Remove duplicates and sort (like NS3)
-    for (auto& node_table : routing_tables_) {
-        for (auto& dst_entry : node_table.second) {
-            std::vector<int>& interfaces = dst_entry.second;
-            std::sort(interfaces.begin(), interfaces.end());
-            interfaces.erase(std::unique(interfaces.begin(), interfaces.end()), interfaces.end());
+    next_hop_tables_[host_node] = nextHop;
+}
+
+void RoutingFramework::BuildRoutingTablesFromNextHop() {
+    int node_count = topology_.GetNodeCount();
+    
+    for (const auto& host_pair : next_hop_tables_) {
+        int host_node = host_pair.first;
+        const auto& nextHop = host_pair.second;
+        
+        for (const auto& dst_pair : nextHop) {
+            int dst_node = dst_pair.first;
+            const auto& nexts = dst_pair.second;
+            
+            uint32_t dst_ip = topology_.NodeIdToIp(dst_node);
+            
+            for (int next : nexts) {
+                int interface = GetInterfaceIndex(host_node, next);
+                if (interface >= 0) {
+                    routing_tables_[host_node][dst_ip].push_back(interface);
+                } else {
+                    std::vector<int> path = FindPath(host_node, next);
+                    if (!path.empty() && path.size() > 1) {
+                        int first_hop = path[1];
+                        int interface = GetInterfaceIndex(host_node, first_hop);
+                        if (interface >= 0) {
+                            routing_tables_[host_node][dst_ip].push_back(interface);
+                        }
+                    }
+                }
+            }
         }
     }
+    
+    for (int src_host = 0; src_host < node_count; src_host++) {
+        if (topology_.GetNodeType(src_host) != 0) continue;
+        
+        for (int dst_host = 0; dst_host < node_count; dst_host++) {
+            if (topology_.GetNodeType(dst_host) != 0) continue;
+            if (src_host == dst_host) continue;
+            
+            uint32_t dst_ip = topology_.NodeIdToIp(dst_host);
+            auto it = routing_tables_.find(src_host);
+            if (it != routing_tables_.end() && it->second.find(dst_ip) != it->second.end()) {
+                continue;
+            }
+            
+            const auto& neighbors = topology_.GetGraph()[src_host];
+            bool direct_connection = false;
+            for (int neighbor : neighbors) {
+                if (neighbor == dst_host) {
+                    direct_connection = true;
+                    break;
+                }
+            }
+            
+            if (direct_connection) {
+                int interface = GetInterfaceIndex(src_host, dst_host);
+                if (interface >= 0) {
+                    routing_tables_[src_host][dst_ip].push_back(interface);
+                }
+            } else {
+                auto host_it = next_hop_tables_.find(src_host);
+                if (host_it != next_hop_tables_.end()) {
+                    auto dst_it = host_it->second.find(dst_host);
+                    if (dst_it != host_it->second.end()) {
+                        const auto& next_hops = dst_it->second;
+                        for (int next_hop : next_hops) {
+                            int interface = GetInterfaceIndex(src_host, next_hop);
+                            if (interface >= 0) {
+                                routing_tables_[src_host][dst_ip].push_back(interface);
+                            } else {
+                                std::vector<int> path = FindPath(src_host, next_hop);
+                                if (!path.empty() && path.size() > 1) {
+                                    int first_hop = path[1];
+                                    int interface = GetInterfaceIndex(src_host, first_hop);
+                                    if (interface >= 0) {
+                                        routing_tables_[src_host][dst_ip].push_back(interface);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                if (routing_tables_[src_host][dst_ip].empty()) {
+                    std::vector<int> path = FindPath(src_host, dst_host);
+                    if (!path.empty() && path.size() > 1) {
+                        int first_hop = path[1];
+                        int interface = GetInterfaceIndex(src_host, first_hop);
+                        if (interface >= 0) {
+                            routing_tables_[src_host][dst_ip].push_back(interface);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+std::vector<int> RoutingFramework::FindPath(int src, int dst) {
+    const auto& graph = topology_.GetGraph();
+    int node_count = graph.size();
+    
+    std::vector<bool> visited(node_count, false);
+    std::vector<int> parent(node_count, -1);
+    std::queue<int> q;
+    
+    q.push(src);
+    visited[src] = true;
+    
+    while (!q.empty()) {
+        int current = q.front();
+        q.pop();
+        
+        if (current == dst) {
+            std::vector<int> path;
+            int node = dst;
+            while (node != -1) {
+                path.push_back(node);
+                node = parent[node];
+            }
+            std::reverse(path.begin(), path.end());
+            return path;
+        }
+        
+        for (int neighbor : graph[current]) {
+            if (!visited[neighbor]) {
+                if (topology_.GetNodeType(neighbor) == 0 && neighbor != src && neighbor != dst) {
+                    continue;
+                }
+                
+                visited[neighbor] = true;
+                parent[neighbor] = current;
+                q.push(neighbor);
+            }
+        }
+    }
+    
+    return {};
 }
 
 int RoutingFramework::GetInterfaceIndex(int from_node, int to_node) const {
@@ -213,20 +320,26 @@ int RoutingFramework::GetInterfaceIndex(int from_node, int to_node) const {
         return -1;
     }
     
-    // Check if there's a direct link
     const auto& neighbors = graph[from_node];
     for (int neighbor : neighbors) {
         if (neighbor == to_node) {
-            // Return interface index (simulating NS3's GetIfIndex())
-            return to_node + 1;  // Simple mapping to avoid interface 0
+            const auto& interface_map = topology_.GetInterfaceMap();
+            auto it = interface_map.find(from_node);
+            if (it != interface_map.end()) {
+                auto dst_it = it->second.find(to_node);
+                if (dst_it != it->second.end()) {
+                    return dst_it->second;
+                }
+            }
+            
+            return to_node + 1;
         }
     }
     
-    return -1;  // No direct link
+    return -1;
 }
 
 uint32_t RoutingFramework::EcmpHash(const uint8_t* key, size_t len, uint32_t seed) {
-    // Exact copy of NS3's EcmpHash function from switch-node.cc
     uint32_t h = seed;
     uint32_t k;
     
