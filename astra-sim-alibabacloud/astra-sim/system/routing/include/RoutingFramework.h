@@ -29,7 +29,7 @@ public:
     
     void PrecalculateRoutingTables();
     
-    std::vector<int> GetPrecalculatedNextHops(int src_node, int dst_node);
+    std::vector<int> GetPrecalculatedNextHops(int src_node, int dst_node) const;
     
     const TopologyParser& GetTopology() const { return topology_; }
     
@@ -87,7 +87,7 @@ private:
     // Get next node from interface index (used by NS3)
     int GetNextNodeFromInterface(int from_node, int interface) const;
     
-    uint32_t EcmpHash(const uint8_t* key, size_t len, uint32_t seed);
+    uint32_t EcmpHash(const uint8_t* key, size_t len, uint32_t seed) const;
 };
 
 } // namespace AstraSim

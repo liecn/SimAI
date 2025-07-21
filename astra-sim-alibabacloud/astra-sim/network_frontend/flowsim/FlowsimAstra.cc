@@ -118,9 +118,11 @@ int main(int argc,char *argv[]) {
   }
 
   std::shared_ptr<EventQueue> event_queue = std::make_shared<EventQueue>();
-  
-  // Initialize FlowSim with routing framework (same approach as NS3)
   FlowSim::Init(event_queue, topology);
+  
+  // Debug: Check topology file parameter
+  std::cout << "[FLOWSIM] DEBUG: param->net_work_param.topology_file = '" << param->net_work_param.topology_file << "'" << std::endl;
+  std::cout << "[FLOWSIM] DEBUG: param->net_work_param.topology_file.empty() = " << (param->net_work_param.topology_file.empty() ? "YES" : "NO") << std::endl;
   
   // Initialize routing framework and pre-calculate flow paths (same as NS3)
   if (!param->net_work_param.topology_file.empty()) {
@@ -128,22 +130,39 @@ int main(int argc,char *argv[]) {
     
     // Create routing framework instance
     auto routing_framework = std::make_unique<AstraSim::RoutingFramework>();
+    std::cout << "[FLOWSIM] Routing framework instance created" << std::endl;
     
-    // Pre-calculate flow paths for FlowSim (same method as NS3)
-    if (routing_framework->PrecalculateFlowPathsForFlowSim(param->net_work_param.topology_file, param->net_work_param.topology_file)) {
-      std::cout << "[FLOWSIM] Routing framework initialized successfully with " 
-                << routing_framework->GetFlowPathCount() << " pre-calculated paths" << std::endl;
+    // First parse the topology file
+    std::cout << "[FLOWSIM] Attempting to parse topology file..." << std::endl;
+    if (routing_framework->ParseTopology(param->net_work_param.topology_file)) {
+      std::cout << "[FLOWSIM] Topology parsed successfully!" << std::endl;
+      routing_framework->PrecalculateRoutingTables();
+      std::cout << "[FLOWSIM] Topology parsed successfully with " << routing_framework->GetTopology().GetNodeCount() << " nodes" << std::endl;
       
-      // Set the routing framework in FlowSim
-      FlowSim::SetRoutingFramework(std::move(routing_framework));
+      // Pre-calculate flow paths for FlowSim (same method as NS3)
+      std::cout << "[FLOWSIM] Attempting to pre-calculate flow paths..." << std::endl;
+      if (routing_framework->PrecalculateFlowPathsForFlowSim(param->net_work_param.topology_file, param->net_work_param.topology_file)) {
+        std::cout << "[FLOWSIM] Routing framework initialized successfully with " 
+                  << routing_framework->GetFlowPathCount() << " pre-calculated paths" << std::endl;
+        
+        // Set the routing framework in FlowSim
+        FlowSim::SetRoutingFramework(std::move(routing_framework));
+        std::cout << "[FLOWSIM] Routing framework set in FlowSim" << std::endl;
+      } else {
+        std::cerr << "[FLOWSIM] Failed to pre-calculate flow paths, using default routing" << std::endl;
+      }
     } else {
-      std::cerr << "[FLOWSIM] Failed to initialize routing framework, using default routing" << std::endl;
+      std::cerr << "[FLOWSIM] Failed to parse topology file, using default routing" << std::endl;
     }
+  } else {
+    std::cout << "[FLOWSIM] No topology file provided, using default routing" << std::endl;
   }
-  
   for (uint32_t i = 0; i < systems.size(); i++) {
     systems[i]->workload->fire();
   }
+  
+  // Debug: Check routing framework status
+  std::cout << "[FLOWSIM] Routing framework loaded: " << (FlowSim::IsRoutingFrameworkLoaded() ? "YES" : "NO") << std::endl;
   
   std::cout << "SimAI begin run FlowSim" << std::endl;
   FlowSim::Run();

@@ -8,6 +8,7 @@ LICENSE file in the root directory of this source tree.
 #include <map>
 #include <algorithm>
 #include <queue>
+#include <set>
 
 namespace AstraSim {
 
@@ -100,7 +101,7 @@ void RoutingFramework::PrecalculateRoutingTables() {
     BuildRoutingTablesFromNextHop();
 }
 
-std::vector<int> RoutingFramework::GetPrecalculatedNextHops(int src_node, int dst_node) {
+std::vector<int> RoutingFramework::GetPrecalculatedNextHops(int src_node, int dst_node) const {
     auto it = routing_tables_.find(src_node);
     if (it == routing_tables_.end()) {
         return {};
@@ -356,7 +357,7 @@ int RoutingFramework::GetNextNodeFromInterface(int from_node, int interface) con
     return -1;
 }
 
-uint32_t RoutingFramework::EcmpHash(const uint8_t* key, size_t len, uint32_t seed) {
+uint32_t RoutingFramework::EcmpHash(const uint8_t* key, size_t len, uint32_t seed) const {
     uint32_t h = seed;
     if (len > 3) {
         const uint32_t* key_x4 = (const uint32_t*) key;
@@ -467,12 +468,6 @@ std::vector<std::pair<FlowKey, int>> RoutingFramework::PrecalculateFlowPathsWith
 
 // FlowSim Integration Methods
 std::vector<int> RoutingFramework::GetFlowSimPath(const FlowKey& flow_key) const {
-    // Use the same pre-calculated flow paths that NS3 uses
-    auto it = flow_to_path_map_.find(flow_key);
-    if (it == flow_to_path_map_.end()) {
-        return {}; // No pre-calculated path found (same as NS3 fallback)
-    }
-    
     // Find source and destination nodes
     int src_node = -1, dst_node = -1;
     int node_count = topology_.GetNodeCount();
@@ -490,13 +485,131 @@ std::vector<int> RoutingFramework::GetFlowSimPath(const FlowKey& flow_key) const
         return {};
     }
     
-    // Simple path: [src_node, dst_node] 
-    // This ensures FlowSim uses the same routing decisions as NS3
-    std::vector<int> path;
-    path.push_back(src_node);
-    path.push_back(dst_node);
+    // If source and destination are the same, return just the source
+    if (src_node == dst_node) {
+        return {src_node};
+    }
     
-    return path;
+    // Use the routing framework to find the actual path
+    // First, get the next hop interface for this flow
+    auto it = flow_to_path_map_.find(flow_key);
+    if (it == flow_to_path_map_.end()) {
+        // No pre-calculated path, use routing tables
+        auto next_hops = GetPrecalculatedNextHops(src_node, dst_node);
+        if (next_hops.empty()) {
+            // Fallback: direct path
+            return {src_node, dst_node};
+        }
+        
+        // Use ECMP hash to select next hop (same as NS3)
+        union {
+            uint8_t u8[4+4+2+2];
+            uint32_t u32[3];
+        } buf;
+        buf.u32[0] = flow_key.src_ip;
+        buf.u32[1] = flow_key.dst_ip;
+        buf.u32[2] = flow_key.src_port | ((uint32_t)flow_key.dst_port << 16);
+        
+        uint32_t hash = EcmpHash(buf.u8, 12, src_node);  // Use source node ID as seed
+        uint32_t path_idx = hash % next_hops.size();
+        int selected_interface = next_hops[path_idx];
+        
+        // Get the next node from the selected interface
+        int next_node = GetNextNodeFromInterface(src_node, selected_interface);
+        if (next_node == -1) {
+            return {src_node, dst_node};
+        }
+        
+        // Build the complete path
+        std::vector<int> path = {src_node};
+        
+        // Trace the path through the network
+        int current_node = next_node;
+        std::set<int> visited = {src_node};
+        
+        while (current_node != dst_node && visited.find(current_node) == visited.end()) {
+            path.push_back(current_node);
+            visited.insert(current_node);
+            
+            // Get next hop from current node to destination
+            auto current_next_hops = GetPrecalculatedNextHops(current_node, dst_node);
+            if (current_next_hops.empty()) {
+                // No path found, add destination and break
+                path.push_back(dst_node);
+                break;
+            }
+            
+            // Use ECMP hash for consistency
+            uint32_t current_hash = EcmpHash(buf.u8, 12, current_node);
+            uint32_t current_path_idx = current_hash % current_next_hops.size();
+            int current_interface = current_next_hops[current_path_idx];
+            
+            int next_current_node = GetNextNodeFromInterface(current_node, current_interface);
+            if (next_current_node == -1) {
+                path.push_back(dst_node);
+                break;
+            }
+            
+            current_node = next_current_node;
+        }
+        
+        if (current_node == dst_node) {
+            path.push_back(dst_node);
+        }
+        
+        return path;
+    } else {
+        // Use pre-calculated path
+        int selected_interface = it->second;
+        int next_node = GetNextNodeFromInterface(src_node, selected_interface);
+        
+        if (next_node == -1) {
+            return {src_node, dst_node};
+        }
+        
+        // Build path similar to above but using the pre-calculated interface
+        std::vector<int> path = {src_node};
+        int current_node = next_node;
+        std::set<int> visited = {src_node};
+        
+        while (current_node != dst_node && visited.find(current_node) == visited.end()) {
+            path.push_back(current_node);
+            visited.insert(current_node);
+            
+            auto current_next_hops = GetPrecalculatedNextHops(current_node, dst_node);
+            if (current_next_hops.empty()) {
+                path.push_back(dst_node);
+                break;
+            }
+            
+            // Use ECMP hash for consistency
+            union {
+                uint8_t u8[4+4+2+2];
+                uint32_t u32[3];
+            } buf;
+            buf.u32[0] = flow_key.src_ip;
+            buf.u32[1] = flow_key.dst_ip;
+            buf.u32[2] = flow_key.src_port | ((uint32_t)flow_key.dst_port << 16);
+            
+            uint32_t current_hash = EcmpHash(buf.u8, 12, current_node);
+            uint32_t current_path_idx = current_hash % current_next_hops.size();
+            int current_interface = current_next_hops[current_path_idx];
+            
+            int next_current_node = GetNextNodeFromInterface(current_node, current_interface);
+            if (next_current_node == -1) {
+                path.push_back(dst_node);
+                break;
+            }
+            
+            current_node = next_current_node;
+        }
+        
+        if (current_node == dst_node) {
+            path.push_back(dst_node);
+        }
+        
+        return path;
+    }
 }
 
 size_t RoutingFramework::GetFlowPathCount() const {

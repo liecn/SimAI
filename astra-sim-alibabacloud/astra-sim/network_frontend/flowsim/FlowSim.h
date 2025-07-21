@@ -24,11 +24,8 @@
 #include "Topology.h"
 #include "EventQueue.h"
 #include "Type.h"
-
-// Forward declaration
-namespace AstraSim {
-    class RoutingFramework;
-}
+#include "astra-sim/system/routing/include/RoutingFramework.h"
+#include "astra-sim/system/routing/include/FlowKey.h"
 
 using namespace std;
 
@@ -62,8 +59,6 @@ class FlowSim {
   // Core simulation methods
   static double Now();
   static void Init(std::shared_ptr<EventQueue> event_queue, std::shared_ptr<Topology> topo);
-  static void InitWithRouting(std::shared_ptr<EventQueue> event_queue, std::shared_ptr<Topology> topo,
-                             const std::string& topology_file, const std::string& network_config_file);
   static void SetRoutingFramework(std::unique_ptr<AstraSim::RoutingFramework> routing_framework);
   static void Run();
   static void Schedule(
@@ -75,6 +70,9 @@ class FlowSim {
   
   // Network communication methods
   static void Send(int src, int dst, uint64_t size, Callback callback, CallbackArg callbackArg);
+  
+  // Routing framework methods
+  static bool IsRoutingFrameworkLoaded();
 };
 
 #endif // __FLOWSIM_HH__
