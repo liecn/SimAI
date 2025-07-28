@@ -64,6 +64,14 @@ public:
     std::vector<int> GetFlowSimPath(const FlowKey& flow_key) const;
     
     /**
+     * Get pre-calculated path for FlowSim using node IDs directly
+     * @param src_node Source node ID
+     * @param dst_node Destination node ID
+     * @return List of node IDs representing the path from source to destination
+     */
+    std::vector<int> GetFlowSimPathByNodeIds(int src_node, int dst_node) const;
+    
+    /**
      * Pre-calculate flow paths for FlowSim backend
      * @param topology_file Path to topology file
      * @param network_config_file Path to network configuration file

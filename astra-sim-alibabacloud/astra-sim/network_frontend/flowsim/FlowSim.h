@@ -25,7 +25,6 @@
 #include "EventQueue.h"
 #include "Type.h"
 #include "astra-sim/system/routing/include/RoutingFramework.h"
-#include "astra-sim/system/routing/include/FlowKey.h"
 
 using namespace std;
 

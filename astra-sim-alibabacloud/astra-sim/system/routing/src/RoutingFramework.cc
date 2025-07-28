@@ -612,6 +612,27 @@ std::vector<int> RoutingFramework::GetFlowSimPath(const FlowKey& flow_key) const
     }
 }
 
+std::vector<int> RoutingFramework::GetFlowSimPathByNodeIds(int src_node, int dst_node) const {
+    // Create FlowKey using the same IP format as pre-calculation (TopologyParser::NodeIdToIp)
+    FlowKey flow_key;
+    
+    // Use the same IP format as TopologyParser::NodeIdToIp
+    uint32_t src_x = (src_node >> 8) & 0xFF;
+    uint32_t src_y = src_node & 0xFF;
+    flow_key.src_ip = (10 << 24) | (src_x << 16) | (src_y << 8) | 1;
+    
+    uint32_t dst_x = (dst_node >> 8) & 0xFF;
+    uint32_t dst_y = dst_node & 0xFF;
+    flow_key.dst_ip = (10 << 24) | (dst_x << 16) | (dst_y << 8) | 1;
+    
+    flow_key.protocol = 17;  // UDP default
+    flow_key.src_port = 10006;  // Default source port
+    flow_key.dst_port = 100;    // Default destination port
+    
+    // Use the existing GetFlowSimPath function
+    return GetFlowSimPath(flow_key);
+}
+
 size_t RoutingFramework::GetFlowPathCount() const {
     return flow_to_path_map_.size();
 }

@@ -58,11 +58,6 @@ void Topology::send(std::unique_ptr<Chunk> chunk) noexcept {
     Chunk* chunk_ptr = active_chunks_ptrs.back().get();
     active_chunks.push_back(chunk_ptr);
 
-    // std::cerr << "Total active chunks: " << active_chunks.size() << std::endl;
-    // for (Chunk* ch : active_chunks) {
-    //     std::cerr << "Debug: Chunk ID: " << ch->get_completion_event_id() << ", Remaining size: " << ch->get_remaining_size() << ", Size: " << ch->get_size() << " from device " << ch->current_device()->get_id() << " to device " << ch->get_dest_device()->get_id() << std::endl;
-    // }
-
     add_chunk_to_links(chunk_ptr);
     update_link_states();
     reschedule_active_chunks();
@@ -190,14 +185,33 @@ void Topology::reschedule_active_chunks() {
 
 void Topology::add_chunk_to_links(Chunk* chunk) {
     const auto& route = chunk->get_route();
+    
     auto it = route.begin();
+    
+    int hop_count = 0;
     while (it != route.end()) {
+        
         auto src_device = (*it)->get_id();
+        
         ++it;
-        if (it == route.end()) break;
+        if (it == route.end()) {
+            break;
+        }
+        
         auto dest_device = (*it)->get_id();
-        link_map[std::make_pair(src_device, dest_device)]->active_chunks.push_back(chunk);
-        active_links.insert(std::make_pair(src_device, dest_device));
+        
+        auto link_key = std::make_pair(src_device, dest_device);
+        auto link_it = link_map.find(link_key);
+        
+        if (link_it == link_map.end()) {
+            // std::cout << "[TOPOLOGY] ERROR: Link not found in link_map!" << std::endl;
+        } else {
+            link_map[link_key]->active_chunks.push_back(chunk);
+            
+            active_links.insert(link_key);
+        }
+        
+        hop_count++;
     }
 }
 
@@ -219,6 +233,7 @@ void Topology::remove_chunk_from_links(Chunk* chunk) {
 }
 
 void Topology::chunk_completion_callback(void* arg) noexcept {
+    std::cout << "[FLOWSIM] Chunk completion callback called!" << std::endl;
     Chunk* chunk = static_cast<Chunk*>(arg);
     Topology* topology = chunk->get_topology();
 
@@ -236,7 +251,9 @@ void Topology::chunk_completion_callback(void* arg) noexcept {
     topology->reschedule_active_chunks();
 
     // Invoke the chunk's callback
+    std::cout << "[FLOWSIM] Invoking chunk callback!" << std::endl;
     chunk->invoke_callback();
+    std::cout << "[FLOWSIM] Chunk callback invoked!" << std::endl;
 }
 
 void Topology::cancel_all_events() noexcept {
