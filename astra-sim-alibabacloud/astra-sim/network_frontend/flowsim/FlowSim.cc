@@ -35,10 +35,13 @@ void FlowSim::SetRoutingFramework(std::unique_ptr<AstraSim::RoutingFramework> ro
 }
 
 void FlowSim::Run() {
+    std::cout << "[FLOWSIM] Running FlowSim" << std::endl;
     while (!event_queue->finished()) {
+        std::cout << "[FLOWSIM] FlowSim event" << std::endl;
         event_queue->proceed();
         tick = event_queue->get_current_time();
     }
+    std::cout << "[FLOWSIM] FlowSim finished" << std::endl;
 }
 
 void FlowSim::Schedule(
@@ -62,8 +65,8 @@ double FlowSim::Now(){
 }
 
 void FlowSim::Send(int src, int dst, uint64_t size, Callback callback, CallbackArg callbackArg) {
+    std::cout << "[FLOWSIM] Sending flow " << src << "->" << dst << " with size " << size << std::endl;
     Route route;
-    
     // Try to get pre-calculated path from routing framework
     if (routing_framework_ && routing_framework_->IsTopologyLoaded()) {
         // Create FlowKey with proper IP mapping (same as NS3)

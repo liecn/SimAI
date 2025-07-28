@@ -290,7 +290,7 @@ Sys::Sys(
         "Unable to initialize the workload layer because it can not open the workload file");
     return;
   }
-  #if defined(NS3_MTP) || defined(NS3_MPI) || defined(PHY_MTP)
+  //#if defined(NS3_MTP) || defined(NS3_MPI) || defined(PHY_MTP)
   result = mock_nccl_grobal_group_init();
   if(result == false) {
     sys_panic(
@@ -301,7 +301,7 @@ Sys::Sys(
     sys_panic(
         "Unable to initialize the system mockncclComm because the file can not be openned");
   }
-  #endif
+  //#endif
   if (inter_dimension_scheduling == InterDimensionScheduling::OfflineGreedy ||
       inter_dimension_scheduling ==
           InterDimensionScheduling::OfflineGreedyFlex) {

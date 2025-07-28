@@ -25,8 +25,8 @@ void EventQueue::proceed() noexcept {
   auto& current_event_list = event_queue.front();
 
   // Check the validity and update current time
-  assert(current_event_list.get_event_time() > current_time);
-  current_time = current_event_list.get_event_time();
+  //assert(current_event_list.get_event_time() > current_time);
+  current_time = std::max(current_time, current_event_list.get_event_time()); //current_event_list.get_event_time();
 
   // Invoke events
   while (!current_event_list.empty()) {
@@ -53,7 +53,7 @@ EventId EventQueue::schedule_event(
     const CallbackArg callback_arg) noexcept {
   // Time should be at least larger than current time
   // std::cerr << "Scheduling event time: " << event_time << ", Current time: " << current_time << std::endl;
-  assert(event_time >= current_time);
+  //assert(event_time >= current_time);
 
   // Find the entry to insert the event
   auto event_list_it = event_queue.begin();

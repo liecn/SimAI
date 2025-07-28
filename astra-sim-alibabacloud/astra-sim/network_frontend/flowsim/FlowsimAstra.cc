@@ -29,6 +29,8 @@
 #include "TopologyBuilder.h"
 #include "Topology.h"
 #include "Type.h"
+#include <tuple>
+#include <stdexcept>
 
 #define RESULT_PATH "./results/"
 #define WORKLOAD_PATH ""
@@ -78,9 +80,38 @@ int main(int argc,char *argv[]) {
   param->mode = ModeType::FLOWSIM;
   std::cout << "Topology file passed to FlowSim: " << param->net_work_param.topology_file << std::endl;
   std::shared_ptr<Topology> topology = construct_fat_tree_topology(UserParam::getInstance()->net_work_param.topology_file);
-  std::map<int, int> node2nvswitch; 
-  int gpu_num = topology->get_npus_count();
+
+  // -----------------------------------------------------------------------------
+  // Build NVSwitch list and GPU->NVSwitch mapping from the topology description
+  // -----------------------------------------------------------------------------
+  std::map<int, int> node2nvswitch; // gpu_id -> nvswitch_id
   int nvswitch_num = 0;
+  try {
+    int npus_cnt = 0;
+    std::vector<int> nv_ids;
+    std::vector<std::tuple<int, int, double, double, double>> dummy_links;
+    std::tie(npus_cnt, nvswitch_num, nv_ids, dummy_links) =
+        parse_fat_tree_topology_file(param->net_work_param.topology_file);
+
+    // Save the NVSwitch IDs globally so that Sys / MockNccl can consume them
+    param->net_work_param.NVswitchs = nv_ids;
+
+    // Basic deterministic mapping: group GPUs by gpus_per_server and assign to NVSwitch
+    int gpus_per_server = param->net_work_param.gpus_per_server > 0
+                              ? param->net_work_param.gpus_per_server
+                              : 1;
+    for (int gpu = 0; gpu < npus_cnt; ++gpu) {
+      int idx = gpu / gpus_per_server;
+      // Clamp idx in case of malformed topologies
+      if (idx >= static_cast<int>(nv_ids.size())) idx = nv_ids.size() - 1;
+      node2nvswitch[gpu] = nv_ids[idx];
+    }
+  } catch (const std::exception &e) {
+    std::cerr << "[FLOWSIM] WARNING: unable to build NVSwitch mapping: " << e.what()
+              << std::endl;
+  }
+
+  int gpu_num = topology->get_npus_count();
 
   std::cout << "constructing networks\n";
   std::vector<FlowSimNetWork *> networks;
@@ -112,7 +143,7 @@ int main(int argc,char *argv[]) {
       param->net_work_param.NVswitchs,
       param->net_work_param.gpus_per_server
     );
-    system->nvswitch_id = nvswitch_num > 0 ? node2nvswitch[i] : -1;
+    system->nvswitch_id = (nvswitch_num > 0 && node2nvswitch.count(i)) ? node2nvswitch[i] : -1;
     system->num_gpus = topology->get_npus_count();
     systems.push_back(system);
   }

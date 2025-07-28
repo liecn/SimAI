@@ -22,6 +22,7 @@ uint64_t AnaSim::tick = 0;
 void AnaSim::Run() {
     while (!call_list.empty())
     {
+        std::cout << "[ANASIM] AnaSim monkey event" << std::endl;
         CallTask calltask = call_list.front();
         while (true) {
           if (calltask.time != tick) {
