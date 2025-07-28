@@ -38,15 +38,6 @@ void EventQueue::proceed() noexcept {
   event_queue.pop_front();
 }
 
-void EventQueue::log_events() {
-    std::cout << "Event lists: " << event_queue.size();
-    int eventCount = 0;
-    for (auto it = event_queue.begin(); it != event_queue.end(); it++) {
-        eventCount += it->num_events();
-    }
-    std::cout << " " << eventCount << "\n";
-}
-
 EventId EventQueue::schedule_event(
     const EventTime event_time,
     const Callback callback,

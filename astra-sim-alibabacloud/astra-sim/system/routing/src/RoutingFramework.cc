@@ -420,10 +420,10 @@ std::vector<std::pair<FlowKey, int>> RoutingFramework::PrecalculateFlowPathsWith
     std::cout << "[ROUTING] Found " << host_count << " host nodes in topology" << std::endl;
     
     for (int src_id = 0; src_id < node_count; src_id++) {
-        if (get_node_type(src_id, 0) != 0) {
-            std::cout << "[ROUTING] Skipping node " << src_id << " (type " << get_node_type(src_id, 0) << ")" << std::endl;
-            continue; // Only hosts
-        }
+        // if (get_node_type(src_id, 0) != 0) {
+        //     std::cout << "[ROUTING] Skipping node " << src_id << " (type " << get_node_type(src_id, 0) << ")" << std::endl;
+        //     continue; // Only hosts
+        // }
         
         for (int dst_id = 0; dst_id < node_count; dst_id++) {
             if (get_node_type(dst_id, 0) != 0) continue; // Only hosts

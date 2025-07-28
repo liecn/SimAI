@@ -54,8 +54,7 @@ int FlowSimNetWork::sim_send(
     AstraSim::sim_request* request,
     void (*msg_handler)(void* fun_arg),
     void* fun_arg) {
-    std::cout << "[FLOWSIM] Sending flow_send " << this->rank << "->" << dst << " with size " << count << std::endl;
-      FlowSim::Send(this->rank, dst, count,msg_handler, fun_arg);
+    FlowSim::Send(this->rank, dst, count,msg_handler, fun_arg);
   return 0;
 }
 
@@ -68,7 +67,6 @@ int FlowSimNetWork::sim_recv(
     AstraSim::sim_request* request,
     void (*msg_handler)(void* fun_arg),
     void* fun_arg) {
-      std::cout << "[FLOWSIM] Receiving flow_recv " << src << "->" << this->rank << " with size " << count << std::endl;
-      FlowSim::Send(src, this->rank, count, msg_handler, fun_arg);
-      return 0;
+    FlowSim::Send(src, this->rank, count, msg_handler, fun_arg);
+    return 0;
 }

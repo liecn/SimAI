@@ -97,3 +97,11 @@ void Chunk::set_topology(Topology* topology) noexcept {
 std::shared_ptr<Device> Chunk::get_dest_device() const noexcept {
     return route.back();
 }
+
+void Chunk::add_active_link_key(const std::pair<DeviceId, DeviceId>& link_key) noexcept {
+    active_link_keys.push_back(link_key);
+}
+
+const std::vector<std::pair<DeviceId, DeviceId>>& Chunk::get_active_link_keys() const noexcept {
+    return active_link_keys;
+}

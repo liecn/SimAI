@@ -58,8 +58,6 @@ class EventQueue {
    */
   void cancel_event(EventId event_id) noexcept;
 
-  void log_events();
-
  private:
   /// current time of the event queue
   EventTime current_time;

@@ -7,6 +7,9 @@
 #include "Type.h"
 #include "EventQueue.h"
 
+// Forward declarations
+using DeviceId = int;
+
 /**
  * Chunk class represents a chunk.
  * Chunk is a basic unit of transmission.
@@ -46,11 +49,16 @@ class Chunk {
   Topology* get_topology() const noexcept;
   [[nodiscard]] const Route& get_route() const noexcept;
   [[nodiscard]] std::shared_ptr<Device> get_dest_device() const noexcept; // New method
+  
+  // Methods for efficient link management
+  void add_active_link_key(const std::pair<DeviceId, DeviceId>& link_key) noexcept;
+  [[nodiscard]] const std::vector<std::pair<DeviceId, DeviceId>>& get_active_link_keys() const noexcept;
 
  private:
   ChunkSize chunk_size;
   ChunkSize remaining_size;
   Route route;
+  std::vector<std::pair<DeviceId, DeviceId>> active_link_keys; // Track which links this chunk is active on
   Callback callback;
   CallbackArg callback_arg;
   EventTime transmission_start_time;

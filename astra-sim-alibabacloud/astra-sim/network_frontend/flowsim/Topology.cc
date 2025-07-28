@@ -3,6 +3,7 @@
 #include <iostream>
 #include <limits>
 #include <set>
+#include <cmath> // Required for std::isfinite
 
 std::shared_ptr<EventQueue> Topology::event_queue = nullptr;
 
@@ -83,12 +84,6 @@ void Topology::connect(DeviceId src, DeviceId dest, Bandwidth bandwidth, Latency
     // }
 }
 
-//void Topology::instantiate_devices() noexcept {
-//    for (int i = 0; i < devices_count; ++i) {
-//        devices.push_back(std::make_shared<Device>(i));
-//    }
-//}
-
 std::shared_ptr<Device> Topology::get_device(int index) {
     return this->devices.at(index);
 }
@@ -142,6 +137,12 @@ double Topology::calculate_bottleneck_rate(const std::pair<DeviceId, DeviceId>& 
     }
 
     double fair_rate = active_chunks > 0 ? remaining_bandwidth / active_chunks : std::numeric_limits<double>::max();
+    
+    // Ensure fair_rate is positive and finite
+    if (fair_rate <= 0 || !std::isfinite(fair_rate)) {
+        fair_rate = 1.0; // Set a minimum rate
+    }
+    
     // std::cerr << "Debug: Link (" << link.first << " -> " << link.second << "), Fair rate: " << fair_rate << ", Remaining bandwidth: " << remaining_bandwidth << ", Active chunks: " << active_chunks << std::endl;
     return fair_rate;
 }
@@ -158,6 +159,12 @@ void Topology::reschedule_active_chunks() {
         //if(chunk->get_completion_event_id() == 0){
             double remaining_size = chunk->get_remaining_size();
             double new_rate = chunk->get_rate();
+            
+            // Prevent division by zero
+            if (new_rate <= 0) {
+                new_rate = 1.0; // Set a minimum rate to avoid division by zero
+            }
+            
             double new_completion_time = std::max(1.0, (remaining_size / new_rate));
             //double new_completion_time = remaining_size / new_rate;
             chunk->set_transmission_start_time(current_time);  // Update transmission start time
@@ -207,8 +214,10 @@ void Topology::add_chunk_to_links(Chunk* chunk) {
             // std::cout << "[TOPOLOGY] ERROR: Link not found in link_map!" << std::endl;
         } else {
             link_map[link_key]->active_chunks.push_back(chunk);
-            
             active_links.insert(link_key);
+            
+            // Record this link key in the chunk for efficient removal
+            chunk->add_active_link_key(link_key);
         }
         
         hop_count++;
@@ -216,24 +225,24 @@ void Topology::add_chunk_to_links(Chunk* chunk) {
 }
 
 void Topology::remove_chunk_from_links(Chunk* chunk) {
-    const auto& route = chunk->get_route();
-    auto it = route.begin();
-    while (it != route.end()) {
-        auto src_device = (*it)->get_id();
-        ++it;
-        if (it == route.end()) break;
-        auto dest_device = (*it)->get_id();
-        auto& active_chunks = link_map[std::make_pair(src_device, dest_device)]->active_chunks;
-        active_chunks.remove(chunk);
-        if (active_chunks.empty()) {
-            active_links.erase(std::make_pair(src_device, dest_device));
+    // Use the recorded link keys for efficient O(k) removal where k is the number of links the chunk is on
+    const auto& link_keys = chunk->get_active_link_keys();
+    
+    for (const auto& link_key : link_keys) {
+        auto link_it = link_map.find(link_key);
+        if (link_it != link_map.end() && link_it->second != nullptr) {
+            auto& active_chunks = link_it->second->active_chunks;
+            active_chunks.remove(chunk);
+            
+            // If link is now empty, remove from active_links
+            if (active_chunks.empty()) {
+                active_links.erase(link_key);
+            }
         }
-        // std::cerr << "Debug: Removed chunk from link (" << src_device << " -> " << dest_device << "). It now has " << active_chunks.size() << " active chunks." << std::endl;
     }
 }
 
 void Topology::chunk_completion_callback(void* arg) noexcept {
-    std::cout << "[FLOWSIM] Chunk completion callback called!" << std::endl;
     Chunk* chunk = static_cast<Chunk*>(arg);
     Topology* topology = chunk->get_topology();
 
@@ -244,16 +253,12 @@ void Topology::chunk_completion_callback(void* arg) noexcept {
     topology->remove_chunk_from_links(chunk);
     topology->active_chunks.remove(chunk);
 
-    // std::cerr << "Debug: Chunk completion callback completed for chunk ID: " << chunk->get_completion_event_id() << std::endl;
-
     // Update link states and reschedule active chunks
     topology->update_link_states();
     topology->reschedule_active_chunks();
 
     // Invoke the chunk's callback
-    std::cout << "[FLOWSIM] Invoking chunk callback!" << std::endl;
     chunk->invoke_callback();
-    std::cout << "[FLOWSIM] Chunk callback invoked!" << std::endl;
 }
 
 void Topology::cancel_all_events() noexcept {

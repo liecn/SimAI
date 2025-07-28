@@ -115,7 +115,7 @@ int main(int argc,char *argv[]) {
 
   int gpu_num = topology->get_npus_count();
 
-  std::cout << "constructing networks\n";
+  // Create FlowSimNetwork and Sys instances
   std::vector<FlowSimNetWork *> networks;
   std::vector<AstraSim::Sys *> systems;
   for (uint32_t i = 0; i < topology->get_npus_count(); i++) {
