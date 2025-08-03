@@ -68,10 +68,11 @@ std::shared_ptr<Topology> construct_fat_tree_topology(const std::string& topolog
     return fat_tree_topology;
 }
 
-Bandwidth bw_GBps_to_Bpns(const Bandwidth bw_GBps) noexcept {
-    assert(bw_GBps > 0);
-
-    // 1 GB is 2^30 B
-    // 1 s is 10^9 ns
-    return bw_GBps / (1'000'000'000);
+// Convert bandwidth expressed in Gbps (gigabits per second) to Bytes per nanosecond.
+//   1 Gbit  = 1e9 bits
+//   1 Byte  = 8 bits
+//   1 second= 1e9 nanoseconds
+Bandwidth bw_GBps_to_Bpns(const Bandwidth bw_Gbps) noexcept {
+    assert(bw_Gbps > 0);
+    return bw_Gbps; // Bytes per ns
 }

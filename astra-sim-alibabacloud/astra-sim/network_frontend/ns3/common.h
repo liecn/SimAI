@@ -370,6 +370,32 @@ void CalculateRoutes(NodeContainer &n) {
 }
 
 void SetRoutingEntries() {
+  cout << "[DEBUG] SetRoutingEntries: Starting to populate routing tables..." << endl;
+  int entries_added = 0;
+  
+  // First, add self-routes for all host nodes
+  cout << "[DEBUG] Adding self-routes for all host nodes..." << endl;
+  for (uint32_t i = 0; i < node_num; i++) {
+    if (n.Get(i)->GetNodeType() == 0) {  // Host nodes
+      Ptr<Node> node = n.Get(i);
+      Ipv4Address selfAddr = node->GetObject<Ipv4>()->GetAddress(1, 0).GetLocal();
+      
+      // Find a valid interface for this host by checking its neighbors
+      uint32_t self_interface = 0;  // Default fallback
+      if (!nbr2if[node].empty()) {
+        auto first_neighbor = nbr2if[node].begin();
+        self_interface = first_neighbor->second.idx;
+        cout << "[DEBUG] Host " << node->GetId() << " using interface " << self_interface << " (from neighbor " << first_neighbor->first->GetId() << ") for self-route" << endl;
+      } else {
+        cout << "[DEBUG] Host " << node->GetId() << " has no neighbors, using interface 0 for self-route" << endl;
+      }
+      
+      cout << "[DEBUG] Adding self-route: node " << node->GetId() << " -> self (IP: " << selfAddr << " = 0x" << std::hex << selfAddr.Get() << std::dec << ") via interface " << self_interface << endl;
+      node->GetObject<RdmaDriver>()->m_rdma->AddTableEntry(selfAddr, self_interface, false);
+      entries_added++;
+    }
+  }
+  
   for (auto i = nextHop.begin(); i != nextHop.end(); i++) {
     Ptr<Node> node = i->first;
     auto &table = i->second;
@@ -385,16 +411,61 @@ void SetRoutingEntries() {
         } else if(node->GetNodeType() == 2){
 					DynamicCast<NVSwitchNode>(node)->AddTableEntry(dstAddr, interface);
           node->GetObject<RdmaDriver>()->m_rdma->AddTableEntry(dstAddr, interface, true);
+          entries_added++;
 				} else {
           bool is_nvswitch = false;
 					if(next->GetNodeType() == 2){ 
 						is_nvswitch = true;
 					}
-					node->GetObject<RdmaDriver>()->m_rdma->AddTableEntry(dstAddr, interface, is_nvswitch);
+					cout << "[DEBUG] Adding route: node " << node->GetId() << " -> dst " << dst->GetId() 
+					     << " (IP: " << dstAddr << ") via next " << next->GetId() 
+					     << " (type: " << next->GetNodeType() << ") interface " << interface 
+					     << " is_nvswitch: " << (is_nvswitch ? "true" : "false") << endl;
+					// Always add to main routing table so RDMA lookups never fail
+					node->GetObject<RdmaDriver>()->m_rdma->AddTableEntry(dstAddr, interface, false);
+					// Also add to NVSwitch table if applicable
+					if(is_nvswitch) {
+						node->GetObject<RdmaDriver>()->m_rdma->AddTableEntry(dstAddr, interface, true);
+					}
+          entries_added++;
           if(next->GetId() == dst->GetId())  {
             node->GetObject<RdmaDriver>()->m_rdma->add_nvswitch(dst->GetId());
           }
         }
+      }
+    }
+  }
+  
+  cout << "[DEBUG] SetRoutingEntries: Added " << entries_added << " RDMA routing table entries" << endl;
+  
+  // Debug: Check what's actually in the RDMA tables for a few hosts
+  cout << "[DEBUG] Verifying RDMA routing tables..." << endl;
+  for (uint32_t i = 0; i < node_num; i++) {
+    if (n.Get(i)->GetNodeType() == 0) {  // Only check hosts
+      Ptr<RdmaDriver> rdma = n.Get(i)->GetObject<RdmaDriver>();
+      if (rdma && rdma->m_rdma) {
+        cout << "[DEBUG] Host " << i << " RDMA tables:" << endl;
+        cout << "  m_rtTable size: " << rdma->m_rdma->m_rtTable.size() << endl;
+        cout << "  m_rtTable_nxthop_nvswitch size: " << rdma->m_rdma->m_rtTable_nxthop_nvswitch.size() << endl;
+        
+        // Show ALL entries in the routing table
+        cout << "  [DEBUG] ALL m_rtTable entries:" << endl;
+        for(auto it = rdma->m_rdma->m_rtTable.begin(); it != rdma->m_rdma->m_rtTable.end(); ++it) {
+          cout << "    IP: 0x" << std::hex << it->first << std::dec << " (" << Ipv4Address(it->first) << ") -> " << it->second.size() << " interfaces" << endl;
+        }
+        
+        // Check what destination IPs are expected
+        cout << "[DEBUG] Expected destination IPs for host " << i << ":" << endl;
+        for (uint32_t j = 0; j < node_num; j++) {
+          if (n.Get(j)->GetNodeType() == 0) {  // Other hosts
+            Ipv4Address expectedIP = n.Get(j)->GetObject<Ipv4>()->GetAddress(1, 0).GetLocal();
+            cout << "  To host " << j << ": IP " << expectedIP << " (0x" << std::hex << expectedIP.Get() << std::dec << ")" << endl;
+            if (rdma->m_rdma->m_rtTable.count(expectedIP.Get()) == 0) {
+              cout << "    WARNING: This IP is NOT in m_rtTable!" << endl;
+            }
+          }
+        }
+        break;  // Only check first host
       }
     }
   }
@@ -1192,6 +1263,7 @@ void PrecalculateFlowPaths() {
         flow_to_path_map[key] = static_cast<uint32_t>(pair.second);
     }
     
+    cout << "[ROUTING] Pre-calculated " << flow_to_path_map.size() << " flow paths" << endl;
     cout << "[ROUTING] Pre-calculated " << flow_to_path_map.size() << " ECMP flow path decisions using routing framework" << endl;
 }
 

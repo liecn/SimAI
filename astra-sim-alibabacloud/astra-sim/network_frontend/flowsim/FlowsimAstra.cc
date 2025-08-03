@@ -175,8 +175,25 @@ int main(int argc,char *argv[]) {
   
   std::cout << "SimAI begin run FlowSim" << std::endl;
   FlowSim::Run();
+  // ---------------------------------------------------------------------------
+  // Ensure stats are written before shutting down: call report() on root system
+  // and explicitly delete Sys instances so that CSVWriter destructors flush.
+  // ---------------------------------------------------------------------------
+  if (!systems.empty() && systems[0] && systems[0]->workload != nullptr) {
+    // Only GPU 0 generates consolidated statistics.
+    systems[0]->workload->report();
+  }
+
   FlowSim::Stop();
   FlowSim::Destroy();
+
+  // Clean-up: trigger destructors (which also close CSV files)
+  for (auto sys_ptr : systems) {
+    delete sys_ptr;
+  }
+  for (auto net_ptr : networks) {
+    delete net_ptr;
+  }
 
   std::cout << "SimAI-FlowSim finished." << std::endl;
   return 0;

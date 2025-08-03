@@ -60,13 +60,17 @@ int FlowSimNetWork::sim_send(
 
 int FlowSimNetWork::sim_recv(
     void* buffer,
-    uint64_t count,
-    int type,
-    int src,
-    int tag,
-    AstraSim::sim_request* request,
+    uint64_t /*count*/,   // size ignored – receive completes via credit
+    int /*type*/,
+    int /*src*/,
+    int /*tag*/,
+    AstraSim::sim_request* /*request*/,
     void (*msg_handler)(void* fun_arg),
     void* fun_arg) {
-    FlowSim::Send(src, this->rank, count, msg_handler, fun_arg);
+    // Zero-byte credit model: schedule the completion callback at the current time
+    // to keep ordering consistent with the event-driven model and avoid re-entrancy.
+    if (msg_handler != nullptr) {
+        FlowSim::Schedule(0, msg_handler, fun_arg);
+    }
     return 0;
 }
