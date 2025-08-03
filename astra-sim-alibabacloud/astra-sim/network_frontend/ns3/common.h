@@ -370,32 +370,7 @@ void CalculateRoutes(NodeContainer &n) {
 }
 
 void SetRoutingEntries() {
-  cout << "[DEBUG] SetRoutingEntries: Starting to populate routing tables..." << endl;
-  int entries_added = 0;
-  
-  // First, add self-routes for all host nodes
-  cout << "[DEBUG] Adding self-routes for all host nodes..." << endl;
-  for (uint32_t i = 0; i < node_num; i++) {
-    if (n.Get(i)->GetNodeType() == 0) {  // Host nodes
-      Ptr<Node> node = n.Get(i);
-      Ipv4Address selfAddr = node->GetObject<Ipv4>()->GetAddress(1, 0).GetLocal();
-      
-      // Find a valid interface for this host by checking its neighbors
-      uint32_t self_interface = 0;  // Default fallback
-      if (!nbr2if[node].empty()) {
-        auto first_neighbor = nbr2if[node].begin();
-        self_interface = first_neighbor->second.idx;
-        cout << "[DEBUG] Host " << node->GetId() << " using interface " << self_interface << " (from neighbor " << first_neighbor->first->GetId() << ") for self-route" << endl;
-      } else {
-        cout << "[DEBUG] Host " << node->GetId() << " has no neighbors, using interface 0 for self-route" << endl;
-      }
-      
-      cout << "[DEBUG] Adding self-route: node " << node->GetId() << " -> self (IP: " << selfAddr << " = 0x" << std::hex << selfAddr.Get() << std::dec << ") via interface " << self_interface << endl;
-      node->GetObject<RdmaDriver>()->m_rdma->AddTableEntry(selfAddr, self_interface, false);
-      entries_added++;
-    }
-  }
-  
+  uint32_t entries_added = 0;
   for (auto i = nextHop.begin(); i != nextHop.end(); i++) {
     Ptr<Node> node = i->first;
     auto &table = i->second;
@@ -411,22 +386,12 @@ void SetRoutingEntries() {
         } else if(node->GetNodeType() == 2){
 					DynamicCast<NVSwitchNode>(node)->AddTableEntry(dstAddr, interface);
           node->GetObject<RdmaDriver>()->m_rdma->AddTableEntry(dstAddr, interface, true);
-          entries_added++;
 				} else {
           bool is_nvswitch = false;
 					if(next->GetNodeType() == 2){ 
 						is_nvswitch = true;
 					}
-					cout << "[DEBUG] Adding route: node " << node->GetId() << " -> dst " << dst->GetId() 
-					     << " (IP: " << dstAddr << ") via next " << next->GetId() 
-					     << " (type: " << next->GetNodeType() << ") interface " << interface 
-					     << " is_nvswitch: " << (is_nvswitch ? "true" : "false") << endl;
-					// Always add to main routing table so RDMA lookups never fail
-					node->GetObject<RdmaDriver>()->m_rdma->AddTableEntry(dstAddr, interface, false);
-					// Also add to NVSwitch table if applicable
-					if(is_nvswitch) {
-						node->GetObject<RdmaDriver>()->m_rdma->AddTableEntry(dstAddr, interface, true);
-					}
+					node->GetObject<RdmaDriver>()->m_rdma->AddTableEntry(dstAddr, interface, is_nvswitch);
           entries_added++;
           if(next->GetId() == dst->GetId())  {
             node->GetObject<RdmaDriver>()->m_rdma->add_nvswitch(dst->GetId());
@@ -436,120 +401,20 @@ void SetRoutingEntries() {
     }
   }
   
-  cout << "[DEBUG] SetRoutingEntries: Added " << entries_added << " RDMA routing table entries" << endl;
-  
-  // Debug: Check what's actually in the RDMA tables for a few hosts
-  cout << "[DEBUG] Verifying RDMA routing tables..." << endl;
   for (uint32_t i = 0; i < node_num; i++) {
-    if (n.Get(i)->GetNodeType() == 0) {  // Only check hosts
-      Ptr<RdmaDriver> rdma = n.Get(i)->GetObject<RdmaDriver>();
-      if (rdma && rdma->m_rdma) {
-        cout << "[DEBUG] Host " << i << " RDMA tables:" << endl;
-        cout << "  m_rtTable size: " << rdma->m_rdma->m_rtTable.size() << endl;
-        cout << "  m_rtTable_nxthop_nvswitch size: " << rdma->m_rdma->m_rtTable_nxthop_nvswitch.size() << endl;
-        
-        // Show ALL entries in the routing table
-        cout << "  [DEBUG] ALL m_rtTable entries:" << endl;
-        for(auto it = rdma->m_rdma->m_rtTable.begin(); it != rdma->m_rdma->m_rtTable.end(); ++it) {
-          cout << "    IP: 0x" << std::hex << it->first << std::dec << " (" << Ipv4Address(it->first) << ") -> " << it->second.size() << " interfaces" << endl;
-        }
-        
-        // Check what destination IPs are expected
-        cout << "[DEBUG] Expected destination IPs for host " << i << ":" << endl;
-        for (uint32_t j = 0; j < node_num; j++) {
-          if (n.Get(j)->GetNodeType() == 0) {  // Other hosts
-            Ipv4Address expectedIP = n.Get(j)->GetObject<Ipv4>()->GetAddress(1, 0).GetLocal();
-            cout << "  To host " << j << ": IP " << expectedIP << " (0x" << std::hex << expectedIP.Get() << std::dec << ")" << endl;
-            if (rdma->m_rdma->m_rtTable.count(expectedIP.Get()) == 0) {
-              cout << "    WARNING: This IP is NOT in m_rtTable!" << endl;
-            }
-          }
-        }
-        break;  // Only check first host
+    if (n.Get(i)->GetNodeType() == 0) {  // Host nodes
+      Ptr<Node> node = n.Get(i);
+      Ipv4Address selfAddr = node->GetObject<Ipv4>()->GetAddress(1, 0).GetLocal();
+      // Find a valid interface for this host by checking its neighbors
+      uint32_t self_interface = 0;  // Default fallback
+      if (!nbr2if[node].empty()) {
+        auto first_neighbor = nbr2if[node].begin();
+        self_interface = first_neighbor->second.idx;
       }
+      node->GetObject<RdmaDriver>()->m_rdma->AddTableEntry(selfAddr, self_interface, false);
+      entries_added++;
     }
   }
-}
-
-void printRoutingEntries() {
-  map<uint32_t, string> types;
-  types[0] = "HOST";
-  types[1] = "SWITCH";
-  types[2] = "NVSWITCH";
-  map<Ptr<Node>, map<Ptr<Node>, vector<pair<Ptr<Node>, uint32_t> >>> NVSwitch, NetSwitch, Host; 
-  for (auto i = nextHop.begin(); i != nextHop.end(); i++) {
-    Ptr<Node> src = i -> first;
-    auto &table = i->second;
-    for (auto j = table.begin(); j != table.end(); j++) { 
-      Ptr<Node> dst = j -> first;
-      Ipv4Address dstAddr = dst->GetObject<Ipv4>()->GetAddress(1, 0).GetLocal();
-      vector<Ptr<Node>> nexts = j->second;
-      for (int k = 0; k < (int)nexts.size(); k++) {
-        Ptr<Node> firstHop = nexts[k];
-        uint32_t interface = nbr2if[src][firstHop].idx;
-        if(src->GetNodeType() == 0) {
-          Host[src][dst].push_back(pair<Ptr<Node>, uint32_t>(firstHop, interface));
-        } else if(src->GetNodeType() == 1) {
-          NetSwitch[src][dst].push_back(pair<Ptr<Node>, uint32_t>(firstHop, interface));
-        } else if(src->GetNodeType() == 2) {
-          NVSwitch[src][dst].push_back(pair<Ptr<Node>, uint32_t>(firstHop, interface));
-        }
-      }
-    }
-  }
-
-  cout << "*********************    PRINT SWITCH ROUTING TABLE    *********************" << endl << endl << endl;
-  for(auto it = NetSwitch.begin(); it != NetSwitch.end(); ++ it) {
-    Ptr<Node> src = it -> first;
-    auto table = it -> second;
-    cout << "SWITCH: " << src->GetId() << "'s routing entries are as follows:" << endl;
-    for(auto j = table.begin(); j != table.end(); ++ j) {
-      Ptr<Node> dst = j -> first;
-      auto entries = j -> second;
-      for(auto k = entries.begin(); k != entries.end(); ++ k) {
-        Ptr<Node> nextHop = k->first;
-        uint32_t interface = k->second;
-        cout << "To " << dst->GetId() << "[" << types[dst->GetNodeType()] << "] via " << nextHop->GetId() << "[" << types[nextHop->GetNodeType()] << "]" << " from port: " << interface << endl;
-      }
-    }
-  } 
-
-  cout << "*********************    PRINT NVSWITCH ROUTING TABLE    *********************" << endl  << endl << endl;
-  for(auto it = NVSwitch.begin(); it != NVSwitch.end(); ++ it) {
-    Ptr<Node> src = it -> first;
-    auto table = it -> second;
-    cout << "NVSWITCH: " << src->GetId() << "'s routing entries are as follows:" << endl;
-    for(auto j = table.begin(); j != table.end(); ++ j) {
-      Ptr<Node> dst = j -> first;
-      auto entries = j -> second;
-      for(auto k = entries.begin(); k != entries.end(); ++ k) {
-        Ptr<Node> nextHop = k->first;
-        uint32_t interface = k->second;
-        cout << "To " << dst->GetId() << "[" << types[dst->GetNodeType()] << "] via " << nextHop->GetId() << "[" << types[nextHop->GetNodeType()] << "]" << " from port: " << interface << endl;
-      }
-    }
-  } 
-
-  cout << "*********************    HOST ROUTING TABLE    *********************" << endl << endl << endl;
-  for(auto it = Host.begin(); it != Host.end(); ++ it) {
-    Ptr<Node> src = it -> first;
-    auto table = it -> second;
-    cout << "HOST: " << src->GetId() << "'s routing entries are as follows:" << endl;
-    for(auto j = table.begin(); j != table.end(); ++ j) {
-      Ptr<Node> dst = j -> first;
-      auto entries = j -> second;
-      for(auto k = entries.begin(); k != entries.end(); ++ k) {
-        Ptr<Node> nextHop = k->first;
-        uint32_t interface = k->second;
-        cout << "To " << dst->GetId() << "[" << types[dst->GetNodeType()] << "] via " << nextHop->GetId() << "[" << types[nextHop->GetNodeType()] << "]" << " from port: " << interface << endl;
-      }
-    }
-  } 
-
-}
-
-bool validateRoutingEntries() {
-  return false;
 }
 
 void TakeDownLink(NodeContainer n, Ptr<Node> a, Ptr<Node> b) {
@@ -1096,12 +961,8 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
   CalculateRoutes(n);
   SetRoutingEntries();
 
-  cout << "[DEBUG] Current use_custom_routing value: " << (use_custom_routing ? "true" : "false") << endl;
-  cout << "[DEBUG] Routing framework available: " << (g_system_routing ? "yes" : "no") << endl;
-
   // Use routing framework for custom routing if enabled
   if (use_custom_routing) {
-    cout << "[ROUTING] Using routing framework for custom routing..." << endl;
     
     if (!g_system_routing) {
       cout << "[ROUTING] Error: Routing framework not initialized, falling back to NS3 routing" << endl;
@@ -1112,12 +973,8 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
       
       // Sync with backend
       SyncFlowPathsWithBackend();
-      
-      cout << "[ROUTING] Routing framework enabled with " << flow_to_path_map.size() << " flow paths" << endl;
     }
   } else {
-    // Disable custom routing and use NS3's default routing
-    cout << "[ROUTING] Using NS3's default routing (routing framework disabled)" << endl;
     ClearFlowPaths();
     SyncFlowPathsWithBackend();
   }
@@ -1203,11 +1060,6 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
                         &TakeDownLink, n, n.Get(link_down_A),
                         n.Get(link_down_B));
   }
-
-  // Print initial routing statistics after setup
-  cout << "[ROUTING] Setup complete. Ready for simulation." << endl;
-  
-  // Keep routing framework alive for simulation - cleanup happens elsewhere
 }
 
 // Cleanup function for routing framework
@@ -1230,13 +1082,6 @@ void ClearFlowPaths() {
 
 // Pre-calculate flow paths using routing framework
 void PrecalculateFlowPaths() {
-    cout << "[ROUTING] Pre-calculating flow paths using routing framework..." << endl;
-    
-    if (!g_system_routing) {
-        cout << "[ROUTING] Error: Routing framework not initialized" << endl;
-        return;
-    }
-    
     // Create helper functions for routing framework
     auto node_id_to_ip_func = [](int node_id) -> uint32_t {
         return node_id_to_ip(node_id).Get();
@@ -1254,6 +1099,7 @@ void PrecalculateFlowPaths() {
     flow_to_path_map.clear();
     for (const auto& pair : flow_paths) {
         FlowKey key;
+        key.cur_node = pair.first.cur_node;  // crucial: preserve current node id
         key.src_ip = pair.first.src_ip;
         key.dst_ip = pair.first.dst_ip;
         key.protocol = pair.first.protocol;
@@ -1262,9 +1108,6 @@ void PrecalculateFlowPaths() {
         
         flow_to_path_map[key] = static_cast<uint32_t>(pair.second);
     }
-    
-    cout << "[ROUTING] Pre-calculated " << flow_to_path_map.size() << " flow paths" << endl;
-    cout << "[ROUTING] Pre-calculated " << flow_to_path_map.size() << " ECMP flow path decisions using routing framework" << endl;
 }
 
 // Sync flow paths with NS3 backend
@@ -1284,8 +1127,7 @@ void SyncFlowPathsWithBackend() {
     }
     SetGlobalCustomRoutingDirect(use_custom_routing);
     
-    cout << "[ROUTING] Synced " << flow_to_path_map.size() << " flow paths with backend" << endl;
-    cout << "[ROUTING] Custom routing is " << (use_custom_routing ? "ENABLED" : "DISABLED") << endl;
+    cout << "[ROUTING] Synced " << flow_to_path_map.size() << " pre-calculated flow paths with backend using routing framework" << endl;
 }
 
 #endif // __COMMON_H__

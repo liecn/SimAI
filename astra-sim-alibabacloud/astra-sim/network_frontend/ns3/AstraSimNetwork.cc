@@ -84,7 +84,6 @@ public:
              << "\n";
       }
     }
-    exit(0);
     return 0;
   }
   double sim_time_resolution() { return 0; }
