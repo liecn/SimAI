@@ -1,61 +1,20 @@
-/* 
-*Copyright (c) 2024, Alibaba Group;
-*Licensed under the Apache License, Version 2.0 (the "License");
-*you may not use this file except in compliance with the License.
-*You may obtain a copy of the License at
+/******************************************************************************
+This source code is licensed under the MIT license found in the
+LICENSE file in the root directory of this source tree.
+*******************************************************************************/
 
-*   http://www.apache.org/licenses/LICENSE-2.0
+#ifndef _FLOWSIM_
+#define _FLOWSIM_
 
-*Unless required by applicable law or agreed to in writing, software
-*distributed under the License is distributed on an "AS IS" BASIS,
-*WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-*See the License for the specific language governing permissions and
-*limitations under the License.
-*/
-
-#ifndef __FLOWSIM_HH__
-#define __FLOWSIM_HH__
-
-#include<iostream>
-#include<queue>
-#include<list>
-#include<cstdint>
 #include <memory>
-#include "Topology.h"
+#include <vector>
 #include "EventQueue.h"
+#include "Topology.h"
 #include "Type.h"
 #include "astra-sim/system/routing/include/RoutingFramework.h"
 
-using namespace std;
-
-/**
- * Callback task structure for FlowSim scheduling
- */
-struct CallTask {
-  uint64_t time;
-  void (*fun_ptr)(void* fun_arg);
-  void* fun_arg;
-  
-  CallTask(uint64_t _time, void (*_fun_ptr)(void* _fun_arg), void* _fun_arg)
-      : time(_time), fun_ptr(_fun_ptr), fun_arg(_fun_arg) {};
-  ~CallTask(){}
-};
-
-/**
- * FlowSim Core Simulation Engine
- * Manages the simulation timeline, event scheduling, and network operations
- */
 class FlowSim {
- private:
-  static queue<struct CallTask> call_list;
-  static uint64_t tick;
-  static std::shared_ptr<Topology> topology;  
-  static std::unique_ptr<AstraSim::RoutingFramework> routing_framework_;
-
  public:
-  static std::shared_ptr<EventQueue> event_queue;
-
-  // Core simulation methods
   static double Now();
   static void Init(std::shared_ptr<EventQueue> event_queue, std::shared_ptr<Topology> topo);
   static void SetRoutingFramework(std::unique_ptr<AstraSim::RoutingFramework> routing_framework);
@@ -64,14 +23,18 @@ class FlowSim {
       uint64_t delay,
       void (*fun_ptr)(void* fun_arg),
       void* fun_arg);
-  static void Stop();
-  static void Destroy();
-  
-  // Network communication methods
-  static void Send(int src, int dst, uint64_t size, Callback callback, CallbackArg callbackArg);
-  
-  // Routing framework methods
+
+  static void Send(int src, int dst, uint64_t size, int tag, Callback callback, CallbackArg callbackArg);
   static bool IsRoutingFrameworkLoaded();
+  
+  // Cleanup methods
+  static void Stop() {}  // Empty for now
+  static void Destroy() {}  // Empty for now
+
+ private:
+  static std::shared_ptr<EventQueue> event_queue;
+  static std::shared_ptr<Topology> topology;
+  static std::unique_ptr<AstraSim::RoutingFramework> routing_framework_;
 };
 
-#endif // __FLOWSIM_HH__
+#endif // _FLOWSIM_

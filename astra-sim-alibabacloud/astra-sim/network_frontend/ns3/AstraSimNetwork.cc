@@ -110,6 +110,13 @@ public:
                        int tag,                       
                        AstraSim::sim_request *request, 
                        void (*msg_handler)(void *fun_arg), void *fun_arg) {
+    static int ns3_send_count = 0;
+    ns3_send_count++;
+    if (ns3_send_count <= 10 || ns3_send_count % 1000 == 0) {
+        std::cout << "[NS3] sim_send #" << ns3_send_count << " at time=" << Simulator::Now().GetNanoSeconds() 
+          << "ns: " << rank << " -> " << (dst + npu_offset) << ", size=" << count << " bytes" << std::endl;
+    }
+    
     dst += npu_offset;
     task1 t;
     t.src = rank;

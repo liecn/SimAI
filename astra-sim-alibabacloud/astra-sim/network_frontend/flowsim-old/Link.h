@@ -26,15 +26,6 @@ class Link {
     return bandwidth;
   }
 
-  /**
-   * Get the latency of the link.
-   *
-   * @return latency of the link in nanoseconds
-   */
-  [[nodiscard]] Latency get_latency() const noexcept {
-    return latency;
-  }
-
   std::list<Chunk*> active_chunks;
 
  private:

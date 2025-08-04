@@ -21,7 +21,7 @@
 #include "astra-sim/system/Sys.hh"
 #include "astra-sim/system/MockNcclLog.h"
 #include "astra-sim/system/AstraComputeAPI.hh"
-#include "astra-sim/system/AstraParamParse.hh"
+#include "astra-sim/system/Common.hh"  // For GPUType enum
 #include "astra-sim/system/routing/include/RoutingFramework.h"
 
 #include "FlowsimNetwork.h"
@@ -32,17 +32,16 @@
 #include <tuple>
 #include <stdexcept>
 
-#define RESULT_PATH "./results/"
+#define RESULT_PATH "./ncclFlowSim_"
 #define WORKLOAD_PATH ""
 
 using namespace std;
 
 extern std::map<std::pair<std::pair<int, int>,int>, AstraSim::ncclFlowTag> receiver_pending_queue;
-//extern uint32_t node_num, switch_num, link_num, trace_num, nvswitch_num, gpus_per_server;
-extern std::string gpu_type;
-//extern std::vector<int>NVswitchs;
-extern std::vector<std::vector<int>>all_gpus;
-extern int ngpus_per_node;
+// Global variables (similar to NS3 common.h)
+GPUType gpu_type = GPUType::NONE;
+std::vector<int> NVswitchs;
+uint32_t gpus_per_server = 8;
 extern map<std::pair<int, std::pair<int, int>>, struct task1> expeRecvHash;
 extern map<std::pair<int, std::pair<int, int>>, int> recvHash;
 extern map<std::pair<int, std::pair<int, int>>, struct task1> sentHash;
@@ -54,71 +53,130 @@ std::vector<std::vector<int>> physical_dims;
 
 struct user_param {
   int thread;
-  int gpus;
   string workload;
-  int comm_scale;
+  string network_topo;
+  string network_conf;
+  bool use_custom_routing;
   user_param() {
     thread = 1;
-    gpus = 1;
     workload = "";
-    comm_scale = 1;
+    network_topo = "";
+    network_conf = "";
+    use_custom_routing = false;
   };
   ~user_param(){};
-  user_param(int _thread, int _gpus, string _workload, int _comm_scale = 1)
-      : thread(_thread),
-        gpus(_gpus),
-        workload(_workload),
-        comm_scale(_comm_scale){};
 };
 
+static int user_param_prase(int argc,char * argv[],struct user_param* user_param){
+  int opt;
+  while ((opt = getopt(argc,argv,"ht:w:n:c:r"))!=-1){
+    switch (opt)
+    {
+    case 'h':
+      std::cout<<"-t    number of threads,default 1"<<std::endl;
+      std::cout<<"-w    workloads default none "<<std::endl;
+      std::cout<<"-n    network topo"<<std::endl;
+      std::cout<<"-c    network_conf"<<std::endl;
+      std::cout<<"-r    use custom routing (default: false)"<<std::endl;
+      return 1;
+    case 't':
+      user_param->thread = stoi(optarg);
+      break;
+    case 'w':
+      user_param->workload = optarg;
+      break;
+    case 'n':
+      user_param->network_topo = optarg;
+      break;
+    case 'c':
+      user_param->network_conf = optarg;
+      break;
+    case 'r':
+      user_param->use_custom_routing = true;
+      break;
+    default:
+      std::cerr<<"-h    help message"<<std::endl;
+      return 1;
+    }
+  }
+  return 0 ;
+}
+
 int main(int argc,char *argv[]) {
-  UserParam* param = UserParam::getInstance();
-  if (param->parseArg(argc,argv)) {
-    std::cerr << "-h,       --help                Help message" << std::endl;
+  struct user_param user_param;
+  if(user_param_prase(argc,argv,&user_param)){
     return -1;
   }
-  param->mode = ModeType::FLOWSIM;
-  std::cout << "[FLOWSIM] Topology file passed to FlowSim: " << param->net_work_param.topology_file << std::endl;
-  std::cout << "[FLOWSIM] Workload file: " << param->workload << std::endl;
-  std::cout << "[FLOWSIM] Result file: " << param->res << std::endl;
-  std::shared_ptr<Topology> topology = construct_fat_tree_topology(UserParam::getInstance()->net_work_param.topology_file);
+  std::cout << "[FLOWSIM] Topology file passed to FlowSim: " << user_param.network_topo << std::endl;
+  std::cout << "[FLOWSIM] Workload file: " << user_param.workload << std::endl;
+  std::cout << "[FLOWSIM] Result file prefix: " << RESULT_PATH << std::endl;
+  std::shared_ptr<Topology> topology = construct_fat_tree_topology(user_param.network_topo);
+
+  // Read topology parameters from file (same as NS3 common.h)
+  std::ifstream topof(user_param.network_topo);
+  uint32_t node_num, switch_num, link_num, nvswitch_num;
+  int gpu_num = 0;
+  if (topof.is_open()) {
+    std::string gpu_type_str;
+    topof >> node_num >> gpus_per_server >> nvswitch_num >> switch_num >> link_num >> gpu_type_str;
+    
+    // Calculate GPU count (same as NS3: total nodes - switches - NVSwitches)
+    gpu_num = node_num - nvswitch_num - switch_num;
+    
+    // Set GPU type (same logic as NS3)
+    if(gpu_type_str == "A100"){
+      gpu_type = GPUType::A100;
+    } else if(gpu_type_str == "A800"){
+      gpu_type = GPUType::A800;
+    } else if(gpu_type_str == "H100"){
+      gpu_type = GPUType::H100;
+    } else if(gpu_type_str == "H800"){
+      gpu_type = GPUType::H800;
+    } else{
+      gpu_type = GPUType::NONE;
+    }
+    topof.close();
+    
+    std::cout << "[FLOWSIM] Read from topology: " << node_num << " total nodes (" << gpu_num << " GPUs, " << nvswitch_num << " NVSwitches, " << switch_num << " switches), " << gpus_per_server << " GPUs per server, GPU type: " << gpu_type_str << std::endl;
+  }
 
   // -----------------------------------------------------------------------------
-  // Build NVSwitch list and GPU->NVSwitch mapping from the topology description
+  // Extract topology information for NVSwitch mapping
   // -----------------------------------------------------------------------------
   std::map<int, int> node2nvswitch; // gpu_id -> nvswitch_id
-  int nvswitch_num = 0;
   try {
     int npus_cnt = 0;
     std::vector<int> nv_ids;
     std::vector<std::tuple<int, int, double, double, double>> dummy_links;
     std::tie(npus_cnt, nvswitch_num, nv_ids, dummy_links) =
-        parse_fat_tree_topology_file(param->net_work_param.topology_file);
+        parse_fat_tree_topology_file(user_param.network_topo);
 
     // Save the NVSwitch IDs globally so that Sys / MockNccl can consume them
-    param->net_work_param.NVswitchs = nv_ids;
+    // param->net_work_param.NVswitchs = nv_ids; // This line was removed as per the new_code
 
     // Basic deterministic mapping: group GPUs by gpus_per_server and assign to NVSwitch
-    int gpus_per_server = param->net_work_param.gpus_per_server > 0
-                              ? param->net_work_param.gpus_per_server
-                              : 1;
+    // gpus_per_server is now a global variable initialized to 8
     for (int gpu = 0; gpu < npus_cnt; ++gpu) {
       int idx = gpu / gpus_per_server;
       // Clamp idx in case of malformed topologies
       if (idx >= static_cast<int>(nv_ids.size())) idx = nv_ids.size() - 1;
       node2nvswitch[gpu] = nv_ids[idx];
     }
+    
+    // Populate global NVswitchs vector (same as NS3)
+    NVswitchs = nv_ids;
   } catch (const std::exception &e) {
     std::cerr << "[FLOWSIM] WARNING: unable to build NVSwitch mapping: " << e.what()
               << std::endl;
   }
 
-  int gpu_num = topology->get_npus_count();
+  // Use GPU count from topology file (same as NS3)
+  int nodes_num = node_num - switch_num;  // Same as NS3: total nodes minus switches
 
   // Create FlowSimNetwork and Sys instances
   std::vector<FlowSimNetWork *> networks;
   std::vector<AstraSim::Sys *> systems;
-  for (uint32_t i = 0; i < topology->get_npus_count(); i++) {
+  for (int i = 0; i < nodes_num; i++) {
     FlowSimNetWork *network = new FlowSimNetWork(i);
     networks.push_back(network);
     AstraSim::Sys *system = new AstraSim::Sys(
@@ -127,48 +185,50 @@ int main(int argc,char *argv[]) {
       i,
       0,
       1,
-      {topology->get_devices_count()},
+      {nodes_num},      // Use nodes_num for physical dimensions (same as NS3)
       {1},
       "",
-      WORKLOAD_PATH + param->workload,
-      param->comm_scale,
+      WORKLOAD_PATH + user_param.workload,
+      1.0, // comm_scale (float)
       1,
       1,
       1,
       0,
-      RESULT_PATH + param->res,
+      RESULT_PATH,
       "FlowSim_test",
       true,
       false,
-      param->net_work_param.gpu_type,
-      param->gpus,
-      param->net_work_param.NVswitchs,
-      param->net_work_param.gpus_per_server
+      gpu_type,
+      {gpu_num}, // all_gpus
+      NVswitchs,
+      gpus_per_server
     );
     system->nvswitch_id = (nvswitch_num > 0 && node2nvswitch.count(i)) ? node2nvswitch[i] : -1;
-    system->num_gpus = topology->get_npus_count();
+    system->num_gpus = nodes_num - nvswitch_num;  // Match NS3's calculation
     systems.push_back(system);
   }
 
-  std::shared_ptr<EventQueue> event_queue = std::make_shared<EventQueue>();
-  FlowSim::Init(event_queue, topology);
-  
   // Initialize routing framework and pre-calculate flow paths (same as NS3)
-  if (!param->net_work_param.topology_file.empty()) {
+  if (!user_param.network_topo.empty()) {
     // Create routing framework instance
     auto routing_framework = std::make_unique<AstraSim::RoutingFramework>();
     
     // First parse the topology file
-    bool parse_result = routing_framework->ParseTopology(param->net_work_param.topology_file);
+    bool parse_result = routing_framework->ParseTopology(user_param.network_topo);
     
     if (parse_result) {
       routing_framework->PrecalculateRoutingTables();
-      routing_framework->PrecalculateFlowPathsForFlowSim(param->net_work_param.topology_file, param->net_work_param.topology_file);
+      routing_framework->PrecalculateFlowPathsForFlowSim(user_param.network_topo, user_param.network_topo);
       
       // Set the routing framework in FlowSim
       FlowSim::SetRoutingFramework(std::move(routing_framework));
     }
   }
+
+  // Initialize FlowSim AFTER routing framework is set up
+  std::shared_ptr<EventQueue> event_queue = std::make_shared<EventQueue>();
+  FlowSim::Init(event_queue, topology);
+  
   for (uint32_t i = 0; i < systems.size(); i++) {
     systems[i]->workload->fire();
   }

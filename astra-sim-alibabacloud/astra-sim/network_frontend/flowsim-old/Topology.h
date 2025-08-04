@@ -31,6 +31,7 @@ class Topology {
   static void set_event_queue(std::shared_ptr<EventQueue> event_queue) noexcept;
   Topology(int device_count, int npus_count) noexcept;
   //[[nodiscard]] virtual Route route(uint32_t flow_id, DeviceId src, DeviceId dest) const noexcept = 0;
+  Route get_route(int src, int dst);
   void send(std::unique_ptr<Chunk> chunk) noexcept;
   [[nodiscard]] int get_npus_count() const noexcept;
   [[nodiscard]] int get_devices_count() const noexcept;
@@ -41,30 +42,28 @@ class Topology {
   std::shared_ptr<Device> get_device(int index);
 
  protected:
-  /// Topology-related member variables
-  int npus_count;
   int devices_count;
+  int npus_count;
   int dims_count;
   std::vector<int> npus_count_per_dim;
-  std::vector<Bandwidth> bandwidth_per_dim;
   std::vector<std::shared_ptr<Device>> devices;
-  std::map<std::pair<DeviceId, DeviceId>, std::shared_ptr<Link>> link_map;
-  std::set<std::pair<DeviceId, DeviceId>> active_links;
-  std::list<std::unique_ptr<Chunk>> active_chunks_ptrs;
-  std::list<Chunk*> active_chunks;
+  std::vector<Bandwidth> bandwidth_per_dim;
 
   static std::shared_ptr<EventQueue> event_queue;
 
+  std::unordered_map<std::pair<DeviceId, DeviceId>, std::shared_ptr<Link>, pair_hash> link_map;
+  std::unordered_set<std::pair<DeviceId, DeviceId>, pair_hash> active_links;
+  std::list<Chunk*> active_chunks;
+  std::vector<std::unique_ptr<Chunk>> active_chunks_ptrs; // Store unique pointers to chunks
+
   //void instantiate_devices() noexcept;
-  void add_chunk_to_links(Chunk* chunk);
   void update_link_states();
-  void reschedule_active_chunks();
-  void cancel_all_events() noexcept;
   double calculate_bottleneck_rate(const std::pair<DeviceId, DeviceId>& link, const std::set<Chunk*>& fixed_chunks);
-  double calculate_path_latency(Chunk* chunk);
-  void schedule_next_completion();
+  void reschedule_active_chunks();
+  void add_chunk_to_links(Chunk* chunk);
   void remove_chunk_from_links(Chunk* chunk);
   static void chunk_completion_callback(void* arg) noexcept;
+  void cancel_all_events() noexcept;
 };
 
 #endif // _TOPOLOGY_

@@ -502,7 +502,7 @@ std::vector<int> RoutingFramework::GetFlowSimPath(const FlowKey& flow_key) const
         buf.u32[1] = flow_key.dst_ip;
         buf.u32[2] = flow_key.src_port | ((uint32_t)flow_key.dst_port << 16);
         
-        uint32_t hash = EcmpHash(buf.u8, 12, src_node);  // Use source node ID as seed
+        uint32_t hash = EcmpHash(buf.u8, 12, flow_key.src_ip);
         uint32_t path_idx = hash % next_hops.size();
         int selected_interface = next_hops[path_idx];
         
@@ -532,7 +532,7 @@ std::vector<int> RoutingFramework::GetFlowSimPath(const FlowKey& flow_key) const
             }
             
             // Use ECMP hash for consistency
-            uint32_t current_hash = EcmpHash(buf.u8, 12, current_node);
+            uint32_t current_hash = EcmpHash(buf.u8, 12, flow_key.src_ip);
             uint32_t current_path_idx = current_hash % current_next_hops.size();
             int current_interface = current_next_hops[current_path_idx];
             
@@ -583,7 +583,7 @@ std::vector<int> RoutingFramework::GetFlowSimPath(const FlowKey& flow_key) const
             buf.u32[1] = flow_key.dst_ip;
             buf.u32[2] = flow_key.src_port | ((uint32_t)flow_key.dst_port << 16);
             
-            uint32_t current_hash = EcmpHash(buf.u8, 12, current_node);
+            uint32_t current_hash = EcmpHash(buf.u8, 12, flow_key.src_ip);
             uint32_t current_path_idx = current_hash % current_next_hops.size();
             int current_interface = current_next_hops[current_path_idx];
             
@@ -605,21 +605,20 @@ std::vector<int> RoutingFramework::GetFlowSimPath(const FlowKey& flow_key) const
 }
 
 std::vector<int> RoutingFramework::GetFlowSimPathByNodeIds(int src_node, int dst_node) const {
-    // Create FlowKey using the same IP format as pre-calculation (TopologyParser::NodeIdToIp)
+    // Construct FlowKey consistent with pre-calculation (includes cur_node)
     FlowKey flow_key;
-    
-    // Use the same IP format as TopologyParser::NodeIdToIp
-    uint32_t src_x = (src_node >> 8) & 0xFF;
-    uint32_t src_y = src_node & 0xFF;
-    flow_key.src_ip = (10 << 24) | (src_x << 16) | (src_y << 8) | 1;
-    
-    uint32_t dst_x = (dst_node >> 8) & 0xFF;
-    uint32_t dst_y = dst_node & 0xFF;
-    flow_key.dst_ip = (10 << 24) | (dst_x << 16) | (dst_y << 8) | 1;
-    
-    flow_key.protocol = 17;  // UDP default
-    flow_key.src_port = 10006;  // Default source port
-    flow_key.dst_port = 100;    // Default destination port
+
+    // Set the current hop to the source node for the first lookup
+    flow_key.cur_node = static_cast<uint16_t>(src_node);
+
+    // Use the exact helper provided by the topology parser to avoid
+    // diverging IP-encoding schemes between FlowSim and NS3 pre-calculation.
+    flow_key.src_ip = topology_.NodeIdToIp(src_node);
+    flow_key.dst_ip = topology_.NodeIdToIp(dst_node);
+
+    flow_key.protocol = 17;        // UDP (fixed to match pre-calculation)
+    flow_key.src_port = 10006;     // Fixed ports used during NS3 path gen
+    flow_key.dst_port = 100;
     
     // Use the existing GetFlowSimPath function
     return GetFlowSimPath(flow_key);

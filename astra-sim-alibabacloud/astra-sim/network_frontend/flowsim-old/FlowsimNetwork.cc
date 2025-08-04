@@ -40,7 +40,6 @@ void FlowSimNetWork::sim_schedule(
     AstraSim::timespec_t delta,
     void (*fun_ptr)(void* fun_arg),
     void* fun_arg) {
-      //std::cout << "[FLOWSIM] Scheduling flow_schedule " << delta.time_val << std::endl;
   FlowSim::Schedule(delta.time_val, fun_ptr, fun_arg);
   return;
 }
@@ -54,23 +53,19 @@ int FlowSimNetWork::sim_send(
     AstraSim::sim_request* request,
     void (*msg_handler)(void* fun_arg),
     void* fun_arg) {
-    FlowSim::Send(this->rank, dst, count, tag, msg_handler, fun_arg);
-    return 0;
+      FlowSim::Send(this->rank, dst, count,msg_handler, fun_arg);
+  return 0;
 }
 
 int FlowSimNetWork::sim_recv(
     void* buffer,
-    uint64_t count,   // use the actual count parameter
-    int /*type*/,
+    uint64_t count,
+    int type,
     int src,
     int tag,
-    AstraSim::sim_request* /*request*/,
+    AstraSim::sim_request* request,
     void (*msg_handler)(void* fun_arg),
     void* fun_arg) {
-    // In network simulation, receiver completes immediately
-    // The sender's flow handles the actual network transmission
-    if (msg_handler != nullptr) {
-        FlowSim::Schedule(0, msg_handler, fun_arg);
-    }
-    return 0;
+      FlowSim::Send(src, this->rank, count, msg_handler, fun_arg);
+      return 0;
 }

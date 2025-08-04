@@ -13,12 +13,7 @@ EventTime EventQueue::get_current_time() const noexcept {
 
 bool EventQueue::finished() const noexcept {
   // Check whether event queue is empty
-  static int finished_count = 0;
-  finished_count++;
-  if (finished_count <= 10) {
-      std::cout << "[EVENTQUEUE] finished() #" << finished_count << ": event_queue.size()=" 
-                << event_queue.size() << ", empty=" << event_queue.empty() << std::endl;
-  }
+  // std::cerr << "Checking if event queue is empty" << std::endl;
   return event_queue.empty();
 }
 
@@ -26,24 +21,30 @@ void EventQueue::proceed() noexcept {
   // To proceed, the next event should exist
   assert(!finished());
 
-  static int proceed_count = 0;
-  proceed_count++;
-  if (proceed_count <= 5) {
-      std::cout << "[EVENTQUEUE] proceed() #" << proceed_count << ": processing events at time " 
-                << event_queue.front().get_event_time() << " (current_time=" << current_time << ")" << std::endl;
-  }
-
   // Proceed to the next event time
   auto& current_event_list = event_queue.front();
 
   // Check the validity and update current time
-  current_time = std::max(current_time, current_event_list.get_event_time());
+  assert(current_event_list.get_event_time() > current_time);
+  current_time = current_event_list.get_event_time();
 
-  // Invoke events - use the original invoke_events() method
-  current_event_list.invoke_events();
+  // Invoke events
+  while (!current_event_list.empty()) {
+    current_event_list.invoke_event();
+  }
+  //current_event_list.invoke_events();
 
   // Drop processed event list
   event_queue.pop_front();
+}
+
+void EventQueue::log_events() {
+    std::cout << "Event lists: " << event_queue.size();
+    int eventCount = 0;
+    for (auto it = event_queue.begin(); it != event_queue.end(); it++) {
+        eventCount += it->num_events();
+    }
+    std::cout << " " << eventCount << "\n";
 }
 
 EventId EventQueue::schedule_event(
@@ -51,15 +52,8 @@ EventId EventQueue::schedule_event(
     const Callback callback,
     const CallbackArg callback_arg) noexcept {
   // Time should be at least larger than current time
-  
-  //assert(event_time >= current_time);
-
-  static int schedule_count = 0;
-  schedule_count++;
-  if (schedule_count <= 5) {
-      std::cout << "[EVENTQUEUE] Scheduling event #" << schedule_count << " at time " << event_time 
-                << " (current_time=" << current_time << ")" << std::endl;
-  }
+  // std::cerr << "Scheduling event time: " << event_time << ", Current time: " << current_time << std::endl;
+  assert(event_time >= current_time);
 
   // Find the entry to insert the event
   auto event_list_it = event_queue.begin();
@@ -91,6 +85,7 @@ EventId EventQueue::schedule_event(
 
   // Store event in map for cancellation
   event_map[event_id] = event_list_it;
+  // std::cerr << "Event scheduled at time " << event_time << " with ID " << event_id << std::endl;
   return event_id;
 }
 

@@ -36,16 +36,10 @@ std::tuple<int, int, std::vector<int>, std::vector<std::tuple<int, int, double, 
         std::string rate_str, delay_str, error_rate_str;
         std::istringstream iss_link(line);
         iss_link >> src >> dst >> rate_str >> delay_str >> error_rate_str;
-        // Parse bandwidth: input is in Gbps, need to convert to Bytes/ns
-        double rate_gbps = std::stod(rate_str.substr(0, rate_str.size() - 3)); // Removing "bps", get Gbps
-        // Convert Gbps to Bytes/ns:
-        // Gbps -> GB/s: divide by 8 (bits to bytes)
-        // GB/s -> Bytes/ns: multiply by 1e9/1e9 = 1 (since 1 GB/s = 1 Byte/ns numerically)
-        rate = rate_gbps / 8.0;  // Convert Gbps to GB/s, which equals Bytes/ns numerically
+        rate = std::stod(rate_str.substr(0, rate_str.size() - 3)); // Removing "bps"
+        rate = bw_GBps_to_Bpns(rate / 8.0);
         
-        // Parse delay: input is in milliseconds (e.g., "0.000025ms"), need to convert to nanoseconds
-        double delay_ms = std::stod(delay_str.substr(0, delay_str.size() - 2)); // Removing "ms"
-        delay = delay_ms * 1e6; // Convert milliseconds to nanoseconds (1 ms = 1e6 ns)
+        delay = std::stod(delay_str.substr(0, delay_str.size() - 2)); // Removing "ns"
         error_rate = std::stod(error_rate_str);
         links.emplace_back(src, dst, rate, delay, error_rate);
     }
@@ -74,11 +68,10 @@ std::shared_ptr<Topology> construct_fat_tree_topology(const std::string& topolog
     return fat_tree_topology;
 }
 
-// Convert bandwidth expressed in Gbps (gigabits per second) to Bytes per nanosecond.
-//   1 Gbit  = 1e9 bits
-//   1 Byte  = 8 bits
-//   1 second= 1e9 nanoseconds
-Bandwidth bw_GBps_to_Bpns(const Bandwidth bw_Gbps) noexcept {
-    assert(bw_Gbps > 0);
-    return bw_Gbps; // Bytes per ns
+Bandwidth bw_GBps_to_Bpns(const Bandwidth bw_GBps) noexcept {
+    assert(bw_GBps > 0);
+
+    // 1 GB is 2^30 B
+    // 1 s is 10^9 ns
+    return bw_GBps / (1'000'000'000);
 }
