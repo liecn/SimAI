@@ -4,8 +4,10 @@ LICENSE file in the root directory of this source tree.
 *******************************************************************************/
 
 #include <unistd.h>
-#include <iostream>
 #include "FlowSim.h"
+#include <cstdlib>
+#include <functional>
+#include <iostream>
 using namespace std;
 
 // Static members
@@ -60,6 +62,25 @@ void FlowSim::Send(int src, int dst, uint64_t size, int tag, Callback callback, 
                   << ", size=" << size << " bytes" << std::endl;
     }
     
+    // Apply AS_SEND_LAT for fair comparison with NS3
+    uint64_t send_latency_ns = 0;
+    const char* send_lat_env = std::getenv("AS_SEND_LAT");
+    if (send_lat_env) {
+        // Convert from microseconds to nanoseconds (same as NS3)
+        send_latency_ns = std::stoi(send_lat_env) * 1000;
+    }
+    
+    // Check AS_NVLS_ENABLE for hardware acceleration simulation
+    bool nvls_enabled = false;
+    const char* nvls_env = std::getenv("AS_NVLS_ENABLE");
+    if (nvls_env && std::stoi(nvls_env) == 1) {
+        nvls_enabled = true;
+        // NVLS reduces effective chunk size for better pipelining (simulating hardware acceleration)
+        if (size < 4096 && size > 0) {
+            size = 4096; // Minimum chunk size with NVLS (same as NS3)
+        }
+    }
+    
     // Get pre-calculated path from routing framework
     std::vector<int> node_path = routing_framework_->GetFlowSimPathByNodeIds(src, dst);
     if (node_path.empty()) return;
@@ -73,9 +94,32 @@ void FlowSim::Send(int src, int dst, uint64_t size, int tag, Callback callback, 
     }
     
     if (route.size() >= 2) {
-        // Create chunk exactly like the old working version
+        // Create chunk
         auto chunk = std::make_unique<Chunk>(size, route, callback, callbackArg);
-        topology->send(std::move(chunk));
+        
+        if (send_latency_ns > 0) {
+            // Schedule the actual send after the send latency (like NS3)
+            auto delayed_send = [chunk_ptr = chunk.release()]() {
+                std::unique_ptr<Chunk> delayed_chunk(chunk_ptr);
+                topology->send_with_batching(std::move(delayed_chunk));
+            };
+            
+            // Store the lambda in a way that can be called by the event system
+            auto* lambda_ptr = new std::function<void()>(delayed_send);
+            
+            event_queue->schedule_event(
+                event_queue->get_current_time() + send_latency_ns,
+                [](void* arg) {
+                    auto* func = static_cast<std::function<void()>*>(arg);
+                    (*func)();
+                    delete func;
+                },
+                lambda_ptr
+            );
+        } else {
+            // Send immediately (original behavior)
+            topology->send_with_batching(std::move(chunk));
+        }
     }
 }
 

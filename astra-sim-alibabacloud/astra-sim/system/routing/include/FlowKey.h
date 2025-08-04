@@ -18,7 +18,7 @@ struct FlowKey {
     uint8_t  protocol;
     uint16_t src_port;
     uint16_t dst_port;
-
+    
     FlowKey() : cur_node(0), src_ip(0), dst_ip(0), protocol(0), src_port(0), dst_port(0) {}
     
     FlowKey(uint32_t src, uint32_t dst, uint8_t proto, uint16_t sport, uint16_t dport)

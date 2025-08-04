@@ -208,7 +208,7 @@ void RoutingFramework::BuildRoutingTablesFromNextHop() {
             }
         }
     }
-
+    
     for (int src_host = 0; src_host < node_count; src_host++) {
         for (int dst_host = 0; dst_host < node_count; dst_host++) {
             if (topology_.GetNodeType(dst_host) != 0) continue;
@@ -408,43 +408,43 @@ std::vector<std::pair<FlowKey, int>> RoutingFramework::PrecalculateFlowPathsWith
     
     for (int src_id = 0; src_id < node_count; src_id++) {
         if (get_node_type(src_id, 0) != 0) continue; // Only hosts
-
+        
         for (int dst_id = 0; dst_id < node_count; dst_id++) {
             if (get_node_type(dst_id, 0) != 0) continue; // Only hosts
             if (src_id == dst_id) continue;
-
+            
             uint32_t src_ip = node_id_to_ip(src_id);
             uint32_t dst_ip = node_id_to_ip(dst_id);
-
+            
             int current = src_id;
             while (current != dst_id) {
                 std::vector<int> interfaces = GetNextHopInterfaces(current, dst_id);
                 if (interfaces.empty()) {
                     break;
                 }
-
+                
                 // Select interface via ECMP hash seed = current node
                 union { uint8_t u8[12]; uint32_t u32[3]; } buf;
                 buf.u32[0] = src_ip;
                 buf.u32[1] = dst_ip;
                 buf.u32[2] = src_port | ((uint32_t)dst_port << 16);
-
+                
                 // Use the same seed NS-3 uses (source IP) so that a
                 // table-generated path chooses exactly the same
                 // interface NS-3 would pick with its on-the-fly ECMP.
                 uint32_t hash = EcmpHash(buf.u8, 12, src_ip);
                 int selected_interface = interfaces[ hash % interfaces.size() ];
-
+                
                 // Store mapping for this hop (host or switch)
-                FlowKey key;
+                    FlowKey key;
                 key.cur_node = current;
-                key.src_ip = src_ip;
-                key.dst_ip = dst_ip;
-                key.protocol = protocol;
-                key.src_port = src_port;
-                key.dst_port = dst_port;
+                    key.src_ip = src_ip;
+                    key.dst_ip = dst_ip;
+                    key.protocol = protocol;
+                    key.src_port = src_port;
+                    key.dst_port = dst_port;
                 flow_paths.push_back({key, static_cast<uint32_t>(selected_interface)});
-
+                
                 int next_node = GetNextNodeFromInterface(current, selected_interface);
                 if (next_node < 0 || next_node == current) {
                     break;
@@ -607,7 +607,7 @@ std::vector<int> RoutingFramework::GetFlowSimPath(const FlowKey& flow_key) const
 std::vector<int> RoutingFramework::GetFlowSimPathByNodeIds(int src_node, int dst_node) const {
     // Construct FlowKey consistent with pre-calculation (includes cur_node)
     FlowKey flow_key;
-
+    
     // Set the current hop to the source node for the first lookup
     flow_key.cur_node = static_cast<uint16_t>(src_node);
 
@@ -615,7 +615,7 @@ std::vector<int> RoutingFramework::GetFlowSimPathByNodeIds(int src_node, int dst
     // diverging IP-encoding schemes between FlowSim and NS3 pre-calculation.
     flow_key.src_ip = topology_.NodeIdToIp(src_node);
     flow_key.dst_ip = topology_.NodeIdToIp(dst_node);
-
+    
     flow_key.protocol = 17;        // UDP (fixed to match pre-calculation)
     flow_key.src_port = 10006;     // Fixed ports used during NS3 path gen
     flow_key.dst_port = 100;

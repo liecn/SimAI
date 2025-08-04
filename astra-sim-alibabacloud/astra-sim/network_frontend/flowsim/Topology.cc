@@ -4,6 +4,7 @@
 #include <limits>
 #include <set>
 #include <cmath> // Required for std::isfinite
+#include <algorithm> // Required for std::find
 
 std::shared_ptr<EventQueue> Topology::event_queue = nullptr;
 
@@ -12,7 +13,9 @@ void Topology::set_event_queue(std::shared_ptr<EventQueue> event_queue) noexcept
     Topology::event_queue = std::move(event_queue);
 }
 
-Topology::Topology(int devices_count, int npus_count) noexcept : npus_count(-1), devices_count(-1), dims_count(-1) {
+Topology::Topology(int devices_count, int npus_count) noexcept 
+    : npus_count(-1), devices_count(-1), dims_count(-1), 
+      last_batch_time_(0), batch_timeout_event_id_(0) {
     npus_count_per_dim = {};
     this->devices_count = devices_count;
     this->npus_count = npus_count;
@@ -20,6 +23,7 @@ Topology::Topology(int devices_count, int npus_count) noexcept : npus_count(-1),
         devices.push_back(std::make_shared<Device>(i));
     }
 }
+
 int Topology::get_devices_count() const noexcept {
     assert(devices_count > 0);
     assert(npus_count > 0);
@@ -52,16 +56,48 @@ std::vector<Bandwidth> Topology::get_bandwidth_per_dim() const noexcept {
 void Topology::send(std::unique_ptr<Chunk> chunk) noexcept {
     assert(chunk != nullptr);
 
-    chunk->set_topology(this);
-    cancel_all_events();
-
+    // Store chunk ownership
     active_chunks_ptrs.push_back(std::move(chunk));
     Chunk* chunk_ptr = active_chunks_ptrs.back().get();
-    active_chunks.push_back(chunk_ptr);
-
+    
+    // Set topology reference and start time
+    chunk_ptr->set_topology(this);
+    chunk_ptr->set_transmission_start_time(event_queue->get_current_time());
+    
+    // Add to simulation (this will calculate rates and schedule completion)
     add_chunk_to_links(chunk_ptr);
-    update_link_states();
-    reschedule_active_chunks();
+}
+
+void Topology::send_with_batching(std::unique_ptr<Chunk> chunk) noexcept {
+    assert(chunk != nullptr);
+    
+    const auto current_time = event_queue->get_current_time();
+    
+    // Store chunk ownership
+    active_chunks_ptrs.push_back(std::move(chunk));
+    Chunk* chunk_ptr = active_chunks_ptrs.back().get();
+    
+    // Add to pending batch
+    pending_chunks_.push_back(chunk_ptr);
+    
+    // If this is the first chunk in a potential batch, schedule timeout
+    if (pending_chunks_.size() == 1) {
+        last_batch_time_ = current_time;
+        
+        // Cancel any existing batch timeout event
+        if (batch_timeout_event_id_ > 0) {
+            event_queue->cancel_event(batch_timeout_event_id_);
+        }
+        
+        batch_timeout_event_id_ = event_queue->schedule_event(
+            current_time + BATCH_TIMEOUT_NS, 
+            batch_timeout_callback, 
+            this
+        );
+    }
+    
+    // Check if we should process immediately (e.g., large batch or timeout)
+    // For now, rely on timeout - could add smarter heuristics later
 }
 
 void Topology::connect(DeviceId src, DeviceId dest, Bandwidth bandwidth, Latency latency, bool bidirectional) noexcept {
@@ -77,48 +113,35 @@ void Topology::connect(DeviceId src, DeviceId dest, Bandwidth bandwidth, Latency
         auto reverse_link = std::make_shared<Link>(bandwidth, latency);
         link_map[std::make_pair(dest, src)] = reverse_link;
     }
-
-    // std::cerr << "Debug: Connecting src: " << src << " dest: " << dest << " with bandwidth: " << bandwidth << std::endl;
-    // if (bidirectional) {
-    //     std::cerr << "Debug: Connecting dest: " << dest << " src: " << src << " with bandwidth: " << bandwidth << std::endl;
-    // }
 }
 
 std::shared_ptr<Device> Topology::get_device(int index) {
     return this->devices.at(index);
 }
 
+// Proven chunk-based simulation methods (from flowsim-old)
+
 void Topology::update_link_states() {
-    // Simple O(1) per-flow rate calculation - MUCH faster!
-    for (Chunk* chunk : active_chunks) {
+    std::set<Chunk*> fixed_chunks;
+    while (fixed_chunks.size() < active_chunks.size()) {
         double bottleneck_rate = std::numeric_limits<double>::max();
-        
-        // Find bottleneck rate along the flow's path
-        const auto& route = chunk->get_route();
-        auto it = route.begin();
-        while (it != route.end()) {
-            auto src_device = (*it)->get_id();
-            ++it;
-            if (it == route.end()) break;
-            auto dest_device = (*it)->get_id();
-            
-            auto link_key = std::make_pair(src_device, dest_device);
-            if (link_map.find(link_key) != link_map.end()) {
-                double link_bandwidth = link_map[link_key]->get_bandwidth();
-                int active_flows_on_link = link_map[link_key]->active_chunks.size();
-                
-                if (active_flows_on_link > 0) {
-                    double fair_share = link_bandwidth / active_flows_on_link;
-                    bottleneck_rate = std::min(bottleneck_rate, fair_share);
-                }
+        std::pair<DeviceId, DeviceId> bottleneck_link;
+        for (const auto& link : active_links) {
+            double fair_rate = calculate_bottleneck_rate(link, fixed_chunks);
+            if (fair_rate < bottleneck_rate) {
+                bottleneck_rate = fair_rate;
+                bottleneck_link = link;
             }
         }
-        
-        // Set the bottleneck rate for this flow
         if (bottleneck_rate < std::numeric_limits<double>::max()) {
-            chunk->set_rate(bottleneck_rate);
+            for (Chunk* chunk : link_map[bottleneck_link]->active_chunks) {
+                if (fixed_chunks.find(chunk) == fixed_chunks.end()) {
+                    chunk->set_rate(bottleneck_rate);
+                    fixed_chunks.insert(chunk);
+                }
+            }
         } else {
-            chunk->set_rate(1.0); // Minimum rate
+            break;
         }
     }
 }
@@ -136,21 +159,6 @@ double Topology::calculate_bottleneck_rate(const std::pair<DeviceId, DeviceId>& 
     }
 
     double fair_rate = active_chunks > 0 ? remaining_bandwidth / active_chunks : std::numeric_limits<double>::max();
-    
-    // Ensure fair_rate is positive and finite
-    if (fair_rate <= 0 || !std::isfinite(fair_rate)) {
-        fair_rate = 1.0; // Set a minimum rate
-    }
-    
-    static int debug_rate_count = 0;
-    debug_rate_count++;
-    if (debug_rate_count <= 10) {
-        std::cout << "[RATE] Link (" << link.first << " -> " << link.second 
-                  << "): bandwidth=" << link_map[link]->get_bandwidth() << " bytes/ns, "
-                  << "active_chunks=" << active_chunks << ", fair_rate=" << fair_rate 
-                  << " bytes/ns (" << (fair_rate * 8.0) << " Gbps)" << std::endl;
-    }
-    
     return fair_rate;
 }
 
@@ -186,7 +194,7 @@ void Topology::schedule_next_completion() {
     Chunk* next_chunk = nullptr;
 
     for (Chunk* chunk : active_chunks) {
-        double remaining_size = chunk->get_remaining_size(); // Use remaining size as SimAI breaks into small flows
+        double remaining_size = chunk->get_remaining_size();
         double new_rate = chunk->get_rate();
         
         // Prevent division by zero
@@ -214,13 +222,44 @@ void Topology::schedule_next_completion() {
 }
 
 void Topology::add_chunk_to_links(Chunk* chunk) {
-    
     // Set topology reference for callback
     chunk->set_topology(this);
     
     // Add to active chunks list
     active_chunks.push_back(chunk);
     
+    // Associate chunk with links
+    associate_chunk_with_links(chunk);
+    
+    // Set initial transmission start time
+    chunk->set_transmission_start_time(event_queue->get_current_time());
+    
+    // Calculate rates for all chunks and schedule completion for this new chunk
+    // This is more efficient than canceling all events
+    update_link_states();
+    
+    // Schedule completion for the new chunk based on its calculated rate
+    const auto current_time = event_queue->get_current_time();
+    double remaining_size = chunk->get_remaining_size();
+    double rate = chunk->get_rate();
+    
+    // Prevent division by zero
+    if (rate <= 0) {
+        rate = 1.0;
+    }
+    
+    // Include both transmission time and path latency
+    double transmission_time = remaining_size / rate;
+    double path_latency = calculate_path_latency(chunk);
+    uint64_t completion_time = current_time + std::max(1.0, transmission_time + path_latency);
+    
+    // Schedule completion event for this chunk
+    auto* chunk_ptr = static_cast<void*>(chunk);
+    int event_id = event_queue->schedule_event(completion_time, chunk_completion_callback, chunk_ptr);
+    chunk->set_completion_event_id(event_id);
+}
+
+void Topology::associate_chunk_with_links(Chunk* chunk) {
     const auto& route = chunk->get_route();
     int hop_count = 0;
     auto it = route.begin();
@@ -245,9 +284,6 @@ void Topology::add_chunk_to_links(Chunk* chunk) {
         
         hop_count++;
     }
-    
-    // Set initial transmission start time
-    chunk->set_transmission_start_time(event_queue->get_current_time());
 }
 
 void Topology::remove_chunk_from_links(Chunk* chunk) {
@@ -272,19 +308,55 @@ void Topology::chunk_completion_callback(void* arg) noexcept {
     Chunk* chunk = static_cast<Chunk*>(arg);
     Topology* topology = chunk->get_topology();
 
-    // Cancel all events (like old working version)
-    topology->cancel_all_events();
+    // 1. Invoke the chunk's callback first (notify ASTRA-Sim)
+    chunk->invoke_callback();
 
-    // Remove completed flow
+    // 2. Remove this chunk from the simulation
     topology->remove_chunk_from_links(chunk);
     topology->active_chunks.remove(chunk);
 
-    // Update link states and reschedule (like old working version)
-    topology->update_link_states();
-    topology->reschedule_active_chunks();
-
-    // Notify completion to ASTRA-Sim
-    chunk->invoke_callback();
+    // 3. If there are still active chunks, update their state
+    if (!topology->active_chunks.empty()) {
+        const auto current_time = topology->event_queue->get_current_time();
+        
+        // Update remaining sizes for all active chunks
+        for (Chunk* active_chunk : topology->active_chunks) {
+            double elapsed_time = current_time - active_chunk->get_transmission_start_time();
+            double transmitted_size = elapsed_time * active_chunk->get_rate();
+            active_chunk->update_remaining_size(transmitted_size);
+            active_chunk->set_transmission_start_time(current_time);
+            
+            // Cancel old completion event
+            if (active_chunk->get_completion_event_id() > 0) {
+                topology->event_queue->cancel_event(active_chunk->get_completion_event_id());
+                active_chunk->set_completion_event_id(0);
+            }
+        }
+        
+        // Recalculate rates for all remaining chunks
+        topology->update_link_states();
+        
+        // Reschedule completion times for all remaining chunks
+        for (Chunk* active_chunk : topology->active_chunks) {
+            double remaining_size = active_chunk->get_remaining_size();
+            double new_rate = active_chunk->get_rate();
+            
+            // Prevent division by zero
+            if (new_rate <= 0) {
+                new_rate = 1.0;
+            }
+            
+            // Calculate new completion time
+            double transmission_time = remaining_size / new_rate;
+            double path_latency = topology->calculate_path_latency(active_chunk);
+            uint64_t completion_time = current_time + std::max(1.0, transmission_time + path_latency);
+            
+            // Schedule new completion event
+            auto* chunk_ptr = static_cast<void*>(active_chunk);
+            int event_id = topology->event_queue->schedule_event(completion_time, chunk_completion_callback, chunk_ptr);
+            active_chunk->set_completion_event_id(event_id);
+        }
+    }
 }
 
 void Topology::cancel_all_events() noexcept {
@@ -293,12 +365,7 @@ void Topology::cancel_all_events() noexcept {
         double elapsed_time = current_time - chunk->get_transmission_start_time();
         double transmitted_size = elapsed_time * chunk->get_rate();
         chunk->update_remaining_size(transmitted_size);
-        
-        // Only cancel valid event IDs (non-zero)
-        int event_id = chunk->get_completion_event_id();
-        if (event_id > 0) {
-            event_queue->cancel_event(event_id);
-        }
+        event_queue->cancel_event(chunk->get_completion_event_id());
         chunk->set_completion_event_id(0);
     }
 }
@@ -332,4 +399,63 @@ void Topology::reschedule_active_chunks() {
         int new_event_id = event_queue->schedule_event(min_completion_time, chunk_completion_callback, chunk_ptr);
         chunk->set_completion_event_id(new_event_id);
     }
+}
+
+// Batching Implementation (Performance Optimization)
+
+void Topology::process_batch_of_chunks() {
+    if (pending_chunks_.empty()) {
+        return;
+    }
+    
+    // Reset the batch timeout event ID since the timeout has fired
+    batch_timeout_event_id_ = 0;
+    
+    // Process all pending chunks as a batch - NO cancel_all_events() to avoid segfaults
+    const auto current_time = event_queue->get_current_time();
+    
+    // Add all pending chunks to the simulation at once
+    for (Chunk* chunk : pending_chunks_) {
+        // Set topology reference and start time
+        chunk->set_topology(this);
+        chunk->set_transmission_start_time(current_time);
+        
+        // Add to active chunks list
+        active_chunks.push_back(chunk);
+        
+        // Associate with links
+        associate_chunk_with_links(chunk);
+    }
+    
+    // Calculate rates for all chunks ONCE for the entire batch
+    update_link_states();
+    
+    // Schedule completion events for all new chunks
+    for (Chunk* chunk : pending_chunks_) {
+        double remaining_size = chunk->get_remaining_size();
+        double rate = chunk->get_rate();
+        
+        // Prevent division by zero
+        if (rate <= 0) {
+            rate = 1.0;
+        }
+        
+        // Calculate completion time
+        double transmission_time = remaining_size / rate;
+        double path_latency = calculate_path_latency(chunk);
+        uint64_t completion_time = current_time + std::max(1.0, transmission_time + path_latency);
+        
+        // Schedule completion event
+        auto* chunk_ptr = static_cast<void*>(chunk);
+        int event_id = event_queue->schedule_event(completion_time, chunk_completion_callback, chunk_ptr);
+        chunk->set_completion_event_id(event_id);
+    }
+    
+    // Clear the batch
+    pending_chunks_.clear();
+}
+
+void Topology::batch_timeout_callback(void* arg) noexcept {
+    Topology* topology = static_cast<Topology*>(arg);
+    topology->process_batch_of_chunks();
 }

@@ -207,7 +207,7 @@ int main(int argc,char *argv[]) {
     system->num_gpus = nodes_num - nvswitch_num;  // Match NS3's calculation
     systems.push_back(system);
   }
-
+  
   // Initialize routing framework and pre-calculate flow paths (same as NS3)
   if (!user_param.network_topo.empty()) {
     // Create routing framework instance
