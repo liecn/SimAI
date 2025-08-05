@@ -50,8 +50,11 @@ class StreamStat : public SharedBusStat, public NetworkStat {
   void take_stream_stats_average() {
     take_bus_stats_average();
     take_network_stat_average();
-    for (auto& tick : queuing_delay) {
-      tick /= stream_stat_counter;
+    // Prevent division by zero - only calculate averages if we have data
+    if (stream_stat_counter > 0) {
+      for (auto& tick : queuing_delay) {
+        tick /= stream_stat_counter;
+      }
     }
   }
 };

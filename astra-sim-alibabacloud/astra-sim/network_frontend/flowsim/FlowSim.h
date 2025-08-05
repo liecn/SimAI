@@ -28,8 +28,8 @@ class FlowSim {
   static bool IsRoutingFrameworkLoaded();
   
   // Cleanup methods
-  static void Stop() {}  // Empty for now
-  static void Destroy() {}  // Empty for now
+  static void Stop();
+  static void Destroy();
 
  private:
   static std::shared_ptr<EventQueue> event_queue;

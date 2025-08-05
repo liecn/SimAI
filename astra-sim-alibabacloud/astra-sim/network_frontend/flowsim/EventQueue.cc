@@ -13,25 +13,12 @@ EventTime EventQueue::get_current_time() const noexcept {
 
 bool EventQueue::finished() const noexcept {
   // Check whether event queue is empty
-  static int finished_count = 0;
-  finished_count++;
-  if (finished_count <= 10) {
-      std::cout << "[EVENTQUEUE] finished() #" << finished_count << ": event_queue.size()=" 
-                << event_queue.size() << ", empty=" << event_queue.empty() << std::endl;
-  }
   return event_queue.empty();
 }
 
 void EventQueue::proceed() noexcept {
   // To proceed, the next event should exist
   assert(!finished());
-
-  static int proceed_count = 0;
-  proceed_count++;
-  if (proceed_count <= 5) {
-      std::cout << "[EVENTQUEUE] proceed() #" << proceed_count << ": processing events at time " 
-                << event_queue.front().get_event_time() << " (current_time=" << current_time << ")" << std::endl;
-  }
 
   // Proceed to the next event time
   auto& current_event_list = event_queue.front();
@@ -51,15 +38,7 @@ EventId EventQueue::schedule_event(
     const Callback callback,
     const CallbackArg callback_arg) noexcept {
   // Time should be at least larger than current time
-  
   //assert(event_time >= current_time);
-
-  static int schedule_count = 0;
-  schedule_count++;
-  if (schedule_count <= 5) {
-      std::cout << "[EVENTQUEUE] Scheduling event #" << schedule_count << " at time " << event_time 
-                << " (current_time=" << current_time << ")" << std::endl;
-  }
 
   // Find the entry to insert the event
   auto event_list_it = event_queue.begin();
@@ -102,4 +81,10 @@ void EventQueue::cancel_event(EventId event_id) noexcept {
     event_list_it->remove_event(event_id);
     event_map.erase(it);
   }
+}
+
+void EventQueue::clear_all_events() noexcept {
+  // Clear all events without processing them
+  event_queue.clear();
+  event_map.clear();
 }

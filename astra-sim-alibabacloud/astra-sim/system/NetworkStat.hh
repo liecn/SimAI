@@ -44,8 +44,11 @@ class NetworkStat {
     net_message_counter++;
   }
   void take_network_stat_average() {
-    for (auto& ml : net_message_latency) {
-      ml /= net_message_counter;
+    // Prevent division by zero - only calculate averages if we have data
+    if (net_message_counter > 0) {
+      for (auto& ml : net_message_latency) {
+        ml /= net_message_counter;
+      }
     }
   }
 };

@@ -27,34 +27,16 @@ void FlowSim::SetRoutingFramework(std::unique_ptr<AstraSim::RoutingFramework> ro
 }
 
 void FlowSim::Run() {
-    std::cout << "[FLOWSIM] Starting FlowSim event loop..." << std::endl;
-    
     int iteration = 0;
-    int empty_queue_count = 0;
-    const int MAX_EMPTY_ITERATIONS = 100000;
     
     while (true) {
         // Process FlowSim events if available
         if (!event_queue->finished()) {
             event_queue->proceed();
             iteration++;
-            empty_queue_count = 0;
-            
-            // Progress reporting
-            if (iteration % 100000 == 0) {
-                std::cout << "[FLOWSIM] Processed " << iteration << " events" << std::endl;
-            }
         } else {
-            // Queue is empty - wait for more events
-            empty_queue_count++;
-            
-            if (empty_queue_count >= MAX_EMPTY_ITERATIONS) {
-                std::cout << "[FLOWSIM] No events for " << MAX_EMPTY_ITERATIONS << " iterations - simulation complete" << std::endl;
-                break;
-            }
-            
-            // Small sleep to prevent busy waiting
-            usleep(1000);
+            // Queue is empty - simulation is complete
+            break;
         }
         
         // Safety limit
@@ -63,8 +45,6 @@ void FlowSim::Run() {
             break;
         }
     }
-    
-    std::cout << "[FLOWSIM] Event loop finished after " << iteration << " iterations" << std::endl;
 }
 
 void FlowSim::Schedule(
@@ -145,4 +125,19 @@ void FlowSim::Send(int src, int dst, uint64_t size, int tag, Callback callback, 
 
 bool FlowSim::IsRoutingFrameworkLoaded() {
     return routing_framework_ != nullptr && routing_framework_->IsTopologyLoaded();
+}
+
+void FlowSim::Stop() {
+    // Clear all remaining events without processing them to prevent callbacks during cleanup
+    // Processing events during cleanup can cause infinite loops or segfaults
+    if (event_queue) {
+        event_queue->clear_all_events();
+    }
+}
+
+void FlowSim::Destroy() {
+    // Clear static resources in proper order
+    routing_framework_.reset();
+    topology.reset();
+    event_queue.reset();
 }

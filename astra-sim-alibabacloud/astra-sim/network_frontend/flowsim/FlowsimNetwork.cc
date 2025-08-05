@@ -64,13 +64,6 @@ int FlowSimNetWork::sim_send(
     static int send_count = 0;
     send_count++;
     
-    // Efficient logging: First 10 sends and every 1000th send
-    if (send_count <= 10 || send_count % 1000 == 0) {
-        std::cout << "[FLOWSIM] SEND #" << send_count << " at time=" << FlowSim::Now() 
-                  << "ns: rank=" << rank << " -> dst=" << dst << ", size=" << count 
-                  << " bytes, tag=" << tag << std::endl;
-    }
-    
     // Store callback using NS3's pattern
     dst += npu_offset;
     task1 t;
@@ -115,19 +108,9 @@ static void flowsim_receiver_callback(void* arg) {
 void FlowSimNetWork::notify_receiver_packet_arrived(int sender_node, int receiver_node, uint64_t message_size, AstraSim::ncclFlowTag flowTag) {
     MockNcclLog* NcclLog = MockNcclLog::getInstance();
     
-    static int receiver_count = 0;
-    receiver_count++;
-    
-    // Efficient logging: First 10 receiver events and every 1000th event
-    if (receiver_count <= 10 || receiver_count % 1000 == 0) {
-        std::cout << "[FLOWSIM] RECV #" << receiver_count << " at time=" << FlowSim::Now() 
-                  << "ns: src=" << sender_node << " -> dst=" << receiver_node << ", size=" << message_size 
-                  << ", tag=" << flowTag.tag_id << ", channel=" << flowTag.channel_id << std::endl;
-    }
-    
     int tag = flowTag.tag_id;
     
-    // Check if receiver is registered for this flow
+    // Check if receiver is registered
     if (expeRecvHash.find(make_pair(tag, make_pair(sender_node, receiver_node))) != expeRecvHash.end()) {
         task1 t = expeRecvHash[make_pair(tag, make_pair(sender_node, receiver_node))];
         
@@ -165,6 +148,7 @@ void FlowSimNetWork::FlowSimSendFlow(int src, int dst, uint64_t count, int tag, 
     // TEMPORARY: Fake timing model for debugging (to be replaced with real FlowSim)
     static uint64_t flow_counter = 0;
     flow_counter++;
+
     
     // Simple fake timing calculation
     uint64_t send_lat = 300; // 0.3μs base latency
@@ -192,8 +176,8 @@ void FlowSimNetWork::notify_sender_sending_finished(int sender_node, int receive
     static int callback_count = 0;
     callback_count++;
     
-    // Efficient logging: First 10 callbacks and every 1000th callback
-    if (callback_count <= 10 || callback_count % 1000 == 0) {
+    // Essential logging: First 5 callbacks and every 10,000th callback
+    if (callback_count <= 5 || callback_count % 10000 == 0) {
         std::cout << "[FLOWSIM] CALLBACK #" << callback_count << " at time=" << FlowSim::Now() 
                   << "ns: src=" << sender_node << " -> dst=" << receiver_node << ", size=" << message_size 
                   << ", tag=" << flowTag.tag_id << std::endl;

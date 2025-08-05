@@ -39,6 +39,12 @@ class EventQueue {
   void proceed() noexcept;
 
   /**
+   * Clear all events from the queue without processing them.
+   * Used during cleanup to prevent callbacks from being called.
+   */
+  void clear_all_events() noexcept;
+
+  /**
    * Schedule an event with a given event time.
    *
    * @param event_time time of event

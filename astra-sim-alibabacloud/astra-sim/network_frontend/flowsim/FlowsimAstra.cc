@@ -107,9 +107,11 @@ int main(int argc,char *argv[]) {
   if(user_param_prase(argc,argv,&user_param)){
     return -1;
   }
-  std::cout << "[FLOWSIM] Topology file passed to FlowSim: " << user_param.network_topo << std::endl;
-  std::cout << "[FLOWSIM] Workload file: " << user_param.workload << std::endl;
-  std::cout << "[FLOWSIM] Result file prefix: " << RESULT_PATH << std::endl;
+  
+  std::cout << "[FLOWSIM] Starting SimAI-FlowSim" << std::endl;
+  std::cout << "[FLOWSIM] Workload: " << user_param.workload << std::endl;
+  std::cout << "[FLOWSIM] Network: " << user_param.network_topo << std::endl;
+  
   std::shared_ptr<Topology> topology = construct_fat_tree_topology(user_param.network_topo);
 
   // Read topology parameters from file (same as NS3 common.h)
@@ -137,7 +139,8 @@ int main(int argc,char *argv[]) {
     }
     topof.close();
     
-    std::cout << "[FLOWSIM] Read from topology: " << node_num << " total nodes (" << gpu_num << " GPUs, " << nvswitch_num << " NVSwitches, " << switch_num << " switches), " << gpus_per_server << " GPUs per server, GPU type: " << gpu_type_str << std::endl;
+    std::cout << "[FLOWSIM] Topology: " << gpu_num << " GPUs, " << nvswitch_num << " NVSwitches, " 
+              << switch_num << " switches (" << gpu_type_str << ")" << std::endl;
   }
 
   // -----------------------------------------------------------------------------
@@ -233,28 +236,15 @@ int main(int argc,char *argv[]) {
     systems[i]->workload->fire();
   }
   
-  std::cout << "SimAI begin run FlowSim" << std::endl;
+  std::cout << "[FLOWSIM] Starting simulation..." << std::endl;
   FlowSim::Run();
-  // ---------------------------------------------------------------------------
-  // Ensure stats are written before shutting down: call report() on root system
-  // and explicitly delete Sys instances so that CSVWriter destructors flush.
-  // ---------------------------------------------------------------------------
-  if (!systems.empty() && systems[0] && systems[0]->workload != nullptr) {
-    // Only GPU 0 generates consolidated statistics.
-    systems[0]->workload->report();
-  }
-
+  
+  std::cout << "[FLOWSIM] Simulation completed successfully" << std::endl;
+  
+  // Clean shutdown
   FlowSim::Stop();
   FlowSim::Destroy();
 
-  // Clean-up: trigger destructors (which also close CSV files)
-  for (auto sys_ptr : systems) {
-    delete sys_ptr;
-  }
-  for (auto net_ptr : networks) {
-    delete net_ptr;
-  }
-
-  std::cout << "SimAI-FlowSim finished." << std::endl;
+  std::cout << "[FLOWSIM] SimAI-FlowSim finished" << std::endl;
   return 0;
 };
