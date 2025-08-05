@@ -76,18 +76,14 @@ class Topology {
   void add_chunk_to_links(Chunk* chunk);
   void associate_chunk_with_links(Chunk* chunk);
   void update_link_states();
-  void reschedule_active_chunks();
-  void cancel_all_events() noexcept;
-
-  // Batched completion processing
-  static void post_batch_completion_callback(void* arg) noexcept;
-
   double calculate_bottleneck_rate(const std::pair<DeviceId, DeviceId>& link, const std::set<Chunk*>& fixed_chunks);
   double calculate_path_latency(Chunk* chunk);
-  void schedule_next_completion();
   void remove_chunk_from_links(Chunk* chunk);
   static void chunk_completion_callback(void* arg) noexcept;
   
+  // Batched completion processing
+  static void post_batch_completion_callback(void* arg) noexcept;
+
   // Batching methods (performance optimization)
   void process_batch_of_chunks();
   static void batch_timeout_callback(void* arg) noexcept;
