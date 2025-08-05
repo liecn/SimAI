@@ -27,8 +27,12 @@ function compile {
     export CC=gcc-9
     export CXX=g++-9
     cd "${BUILD_DIR}" || exit
-    cmake -DUSE_ANALYTICAL=TRUE ..
-    make
+    # Configure with Release flags for maximum runtime performance
+    cmake -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_CXX_FLAGS_RELEASE="-O3 -march=native -flto -DNDEBUG" \
+          -DUSE_ANALYTICAL=TRUE ..
+    # Build in parallel using all available cores
+    make -j$(nproc)
 }
 
 # Main Script

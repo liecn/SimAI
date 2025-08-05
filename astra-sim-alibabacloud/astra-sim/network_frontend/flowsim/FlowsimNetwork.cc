@@ -31,6 +31,19 @@ extern int local_rank;
 // Global instance for callback access (simplified for single-node simulation)
 static FlowSimNetWork* global_flowsim_network = nullptr;
 
+// Callback data structure for FlowSim completion (must appear before sim_send)
+struct FlowSimCallbackData {
+    FlowSimNetWork* network;
+    int src;
+    int dst;
+    uint64_t count;
+    AstraSim::ncclFlowTag flowTag;
+};
+
+// Forward declarations of static callbacks
+static void flowsim_completion_callback(void* arg);
+static void flowsim_receiver_callback(void* arg);
+
 FlowSimNetWork::FlowSimNetWork(int _local_rank) : AstraNetworkAPI(_local_rank) {
     this->npu_offset = 0;
     
@@ -63,7 +76,11 @@ int FlowSimNetWork::sim_send(
     
     static int send_count = 0;
     send_count++;
-    
+    if (send_count <= 5 || send_count % 10000 == 0) {
+        std::cout << "[FLOWSIM] SEND #" << send_count << " at time=" << FlowSim::Now() 
+                  << "ns: src=" << rank << " -> dst=" << dst << ", size=" << count 
+                  << ", tag=" << tag << std::endl;
+    }
     // Store callback using NS3's pattern
     dst += npu_offset;
     task1 t;
@@ -77,19 +94,20 @@ int FlowSimNetWork::sim_send(
     sentHash[make_pair(tag, make_pair(t.src, t.dest))] = t;
     
     // Call FlowSim's network simulation
-    FlowSimSendFlow(rank, dst, count, tag, request);
+    // Prepare callback data for sender completion
+    FlowSimCallbackData* completion_data = new FlowSimCallbackData{this, rank, dst, count, request->flowTag};
+
+    // Prepare callback data for receiver event (immediate)
+    FlowSimCallbackData* receiver_data = new FlowSimCallbackData{this, rank, dst, count, request->flowTag};
+
+    // Invoke real FlowSim
+    FlowSim::Send(rank, dst, count, tag, flowsim_completion_callback, completion_data);
+
+    // Schedule receiver event at the same simulated time 0ns offset
+    FlowSim::Schedule(0, flowsim_receiver_callback, receiver_data);
     
     return 0;
 }
-
-// Callback data structure for FlowSim completion
-struct FlowSimCallbackData {
-    FlowSimNetWork* network;
-    int src;
-    int dst;
-    uint64_t count;
-    AstraSim::ncclFlowTag flowTag;
-};
 
 // Static callback function for FlowSim completion
 static void flowsim_completion_callback(void* arg) {
@@ -143,34 +161,11 @@ void FlowSimNetWork::notify_receiver_packet_arrived(int sender_node, int receive
     }
 }
 
-// TODO: Replace this fake timing with real FlowSim network simulation
-void FlowSimNetWork::FlowSimSendFlow(int src, int dst, uint64_t count, int tag, AstraSim::sim_request* request) {
-    // TEMPORARY: Fake timing model for debugging (to be replaced with real FlowSim)
-    static uint64_t flow_counter = 0;
-    flow_counter++;
-
-    
-    // Simple fake timing calculation
-    uint64_t send_lat = 300; // 0.3μs base latency
-    uint64_t base_transmission_time = count / 1000; // 1000 GB/s bandwidth
-    uint64_t pair_hash = (src * 1000 + dst) % 1000;
-    uint64_t network_variation = pair_hash / 200 + (flow_counter % 100) / 10;
-    uint64_t total_delay = send_lat + base_transmission_time + network_variation;
-    
-    // Create callback data for sender completion
-    FlowSimCallbackData* completion_data = new FlowSimCallbackData{
-        this, src, dst, count, request->flowTag
-    };
-    
-    // Create callback data for receiver event
-    FlowSimCallbackData* receiver_data = new FlowSimCallbackData{
-        this, src, dst, count, request->flowTag
-    };
-
-    // Schedule both sender completion and receiver arrival events
-    FlowSim::Schedule(total_delay, flowsim_completion_callback, completion_data);
-    FlowSim::Schedule(total_delay, flowsim_receiver_callback, receiver_data);
-}
+// TODO: Remove obsolete fake timing helper function below
+// Real FlowSim network simulation - replacing fake timing with actual network modeling
+// void FlowSimNetWork::FlowSimSendFlow(int src, int dst, uint64_t count, int tag, AstraSim::sim_request* request) {
+//     // ... old fake timing code removed ...
+// }
 
 void FlowSimNetWork::notify_sender_sending_finished(int sender_node, int receiver_node, uint64_t message_size, AstraSim::ncclFlowTag flowTag) {
     static int callback_count = 0;

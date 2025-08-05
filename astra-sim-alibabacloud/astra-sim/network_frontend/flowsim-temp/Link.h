@@ -41,11 +41,4 @@ class Link {
   Bandwidth bandwidth;
   Latency latency;
 
-  // Cached fair-share bandwidth (updated each time link states are refreshed)
-  double cached_share = 0.0;
-
- public:
-  void set_cached_share(double val) noexcept { cached_share = val; }
-  double get_cached_share() const noexcept { return cached_share; }
-
 };

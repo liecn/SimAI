@@ -31,13 +31,7 @@ class Topology {
   static void set_event_queue(std::shared_ptr<EventQueue> event_queue) noexcept;
   Topology(int device_count, int npus_count) noexcept;
   //[[nodiscard]] virtual Route route(uint32_t flow_id, DeviceId src, DeviceId dest) const noexcept = 0;
-  
-  // Original individual chunk send
   void send(std::unique_ptr<Chunk> chunk) noexcept;
-  
-  // New batched send - groups chunks from collective operations
-  void send_with_batching(std::unique_ptr<Chunk> chunk) noexcept;
-  
   [[nodiscard]] int get_npus_count() const noexcept;
   [[nodiscard]] int get_devices_count() const noexcept;
   [[nodiscard]] int get_dims_count() const noexcept;
@@ -56,41 +50,21 @@ class Topology {
   std::vector<std::shared_ptr<Device>> devices;
   std::map<std::pair<DeviceId, DeviceId>, std::shared_ptr<Link>> link_map;
   std::set<std::pair<DeviceId, DeviceId>> active_links;
-  
-  // Chunk-based simulation (proven approach)
   std::list<std::unique_ptr<Chunk>> active_chunks_ptrs;
   std::list<Chunk*> active_chunks;
-  
-  // Batching support for collective operations
-  std::vector<Chunk*> pending_chunks_;      // Chunks waiting to be processed as a batch
-  uint64_t last_batch_time_;                // When the current batch started
-  int batch_timeout_event_id_;              // Event ID for batch timeout
-  bool recalc_event_scheduled_ = false;     // Ensure single post-batch processing event
-  static constexpr uint64_t BATCH_TIMEOUT_NS = 1000; // 1 microsecond batching window
 
   static std::shared_ptr<EventQueue> event_queue;
 
   //void instantiate_devices() noexcept;
-  
-  // Proven chunk-based simulation methods
   void add_chunk_to_links(Chunk* chunk);
-  void associate_chunk_with_links(Chunk* chunk);
   void update_link_states();
   void reschedule_active_chunks();
   void cancel_all_events() noexcept;
-
-  // Batched completion processing
-  static void post_batch_completion_callback(void* arg) noexcept;
-
   double calculate_bottleneck_rate(const std::pair<DeviceId, DeviceId>& link, const std::set<Chunk*>& fixed_chunks);
   double calculate_path_latency(Chunk* chunk);
   void schedule_next_completion();
   void remove_chunk_from_links(Chunk* chunk);
   static void chunk_completion_callback(void* arg) noexcept;
-  
-  // Batching methods (performance optimization)
-  void process_batch_of_chunks();
-  static void batch_timeout_callback(void* arg) noexcept;
 };
 
 #endif // _TOPOLOGY_

@@ -13,12 +13,25 @@ EventTime EventQueue::get_current_time() const noexcept {
 
 bool EventQueue::finished() const noexcept {
   // Check whether event queue is empty
+  static int finished_count = 0;
+  finished_count++;
+  if (finished_count <= 10) {
+      std::cout << "[EVENTQUEUE] finished() #" << finished_count << ": event_queue.size()=" 
+                << event_queue.size() << ", empty=" << event_queue.empty() << std::endl;
+  }
   return event_queue.empty();
 }
 
 void EventQueue::proceed() noexcept {
   // To proceed, the next event should exist
   assert(!finished());
+
+  static int proceed_count = 0;
+  proceed_count++;
+  if (proceed_count <= 5) {
+      std::cout << "[EVENTQUEUE] proceed() #" << proceed_count << ": processing events at time " 
+                << event_queue.front().get_event_time() << " (current_time=" << current_time << ")" << std::endl;
+  }
 
   // Proceed to the next event time
   auto& current_event_list = event_queue.front();
@@ -38,37 +51,35 @@ EventId EventQueue::schedule_event(
     const Callback callback,
     const CallbackArg callback_arg) noexcept {
   // Time should be at least larger than current time
+  
   //assert(event_time >= current_time);
 
-  // Fast-path: most events are scheduled in non-decreasing time order.
-  // If the new event occurs **not earlier** than the last event_list, we can
-  // directly push_back (O(1)) instead of an O(n) scan.
+  static int schedule_count = 0;
+  schedule_count++;
+  if (schedule_count <= 5) {
+      std::cout << "[EVENTQUEUE] Scheduling event #" << schedule_count << " at time " << event_time 
+                << " (current_time=" << current_time << ")" << std::endl;
+  }
 
-  std::list<EventList>::iterator event_list_it;
+  // Find the entry to insert the event
+  auto event_list_it = event_queue.begin();
+  while (event_list_it != event_queue.end() &&
+         event_list_it->get_event_time() < event_time) {
+    event_list_it++;
+  }
 
-  if (event_queue.empty()) {
-    // First event — just emplace it.
-    event_queue.emplace_back(event_time);
-    event_list_it = std::prev(event_queue.end());
-  } else if (event_time >= event_queue.back().get_event_time()) {
-    // Append to the tail (either reuse last list if same time, or create new).
-    if (event_time == event_queue.back().get_event_time()) {
-      event_list_it = std::prev(event_queue.end());
-    } else {
-      event_queue.emplace_back(event_time);
-      event_list_it = std::prev(event_queue.end());
-    }
-  } else {
-    // Fallback: need to insert somewhere in the middle — keep original O(n) scan.
-    event_list_it = event_queue.begin();
-    while (event_list_it != event_queue.end() &&
-           event_list_it->get_event_time() < event_time) {
-      ++event_list_it;
-    }
-    if (event_list_it == event_queue.end() ||
-        event_time < event_list_it->get_event_time()) {
-      event_list_it = event_queue.insert(event_list_it, EventList(event_time));
-    }
+  // There can be three scenarios:
+  // (1) Event list matching with event_time is found
+  // (2) There's no event list matching with event_time
+  //   (2-1) The event_time requested is
+  //   larger than the largest event time scheduled
+  //   (2-2) The event_time requested is
+  //   smaller than the largest event time scheduled
+  // For both (2-1) or (2-2), a new event should be created
+  if (event_list_it == event_queue.end() ||
+      event_time < event_list_it->get_event_time()) {
+    // Insert new event_list
+    event_list_it = event_queue.insert(event_list_it, EventList(event_time));
   }
 
   // Generate a new event ID
@@ -91,10 +102,4 @@ void EventQueue::cancel_event(EventId event_id) noexcept {
     event_list_it->remove_event(event_id);
     event_map.erase(it);
   }
-}
-
-void EventQueue::clear_all_events() noexcept {
-  // Clear all events without processing them
-  event_queue.clear();
-  event_map.clear();
 }
