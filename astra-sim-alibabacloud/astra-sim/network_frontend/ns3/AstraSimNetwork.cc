@@ -103,19 +103,40 @@ public:
     Simulator::Schedule(NanoSeconds(t.schTime), t.msg_handler, t.fun_arg);
     return;
   }
-  virtual int sim_send(void *buffer,   
-                       uint64_t count, 
-                       int type,       
-                       int dst,
-                       int tag,                       
-                       AstraSim::sim_request *request, 
+  virtual int sim_send(void *buffer, uint64_t count, int type, int dst, int tag,
+                       AstraSim::sim_request *request,
                        void (*msg_handler)(void *fun_arg), void *fun_arg) {
     static int ns3_send_count = 0;
     ns3_send_count++;
-    if (ns3_send_count <= 10 || ns3_send_count % 1000 == 0) {
-        std::cout << "[NS3] sim_send #" << ns3_send_count << " at time=" << Simulator::Now().GetNanoSeconds() 
-          << "ns: " << rank << " -> " << (dst + npu_offset) << ", size=" << count << " bytes" << std::endl;
+    
+    // Efficient logging: Only log first 20 sends and every 1000th send
+    if (ns3_send_count <= 20 || ns3_send_count % 1000 == 0) {
+        std::cout << "[NS3] SEND #" << ns3_send_count << " at time=" << Simulator::Now().GetNanoSeconds() 
+                  << "ns: rank=" << rank << " -> dst=" << (dst + npu_offset) << ", size=" << count 
+                  << " bytes, tag=" << tag << std::endl;
     }
+    
+    // Track timing patterns for first batch
+    if (ns3_send_count <= 1000) {
+        static uint64_t first_send_time = 0;
+        if (ns3_send_count == 1) {
+            first_send_time = Simulator::Now().GetNanoSeconds();
+        }
+        
+        if (ns3_send_count <= 10 || ns3_send_count % 100 == 0) {
+            uint64_t current_time = Simulator::Now().GetNanoSeconds();
+            std::cout << "[NS3] TIMING: send #" << ns3_send_count 
+                      << " at " << current_time << "ns (+" << (current_time - first_send_time) 
+                      << "ns from first)" << std::endl;
+        }
+    }
+    
+    // Enhanced logging for debugging
+    std::cout << "[NS3] SEND DETAILS #" << ns3_send_count 
+              << " tag=" << tag 
+              << " request->flowTag.tag_id=" << request->flowTag.tag_id
+              << " request->flowTag.current_flow_id=" << request->flowTag.current_flow_id
+              << " request->flowTag.channel_id=" << request->flowTag.channel_id << std::endl;
     
     dst += npu_offset;
     task1 t;
@@ -125,6 +146,11 @@ public:
     t.type = 0;
     t.fun_arg = fun_arg;
     t.msg_handler = msg_handler;
+    
+    std::cout << "[NS3] Storing callback with key: tag=" << tag 
+              << " src=" << t.src << " dst=" << t.dest 
+              << " size=" << t.count << std::endl;
+    
     {
       #ifdef NS3_MTP
       MtpInterface::explicitCriticalSection cs;
@@ -351,5 +377,226 @@ int main(int argc, char *argv[]) {
   #ifdef NS3_MPI
   MpiInterface::Disable ();
   #endif
+  return 0;
+}
+
+// Function definitions moved from entry.h
+void notify_sender_sending_finished(int sender_node, int receiver_node,
+                                    uint64_t message_size, AstraSim::ncclFlowTag flowTag) {
+  MockNcclLog * NcclLog = MockNcclLog::getInstance();
+  
+  static int ns3_callback_count = 0;
+  ns3_callback_count++;
+  
+  // Efficient logging: Only log first 20 callbacks and every 1000th callback
+  if (ns3_callback_count <= 20 || ns3_callback_count % 1000 == 0) {
+      std::cout << "[NS3] CALLBACK #" << ns3_callback_count << " at time=" << Simulator::Now().GetNanoSeconds() 
+                << "ns: src=" << sender_node << " -> dst=" << receiver_node << ", size=" << message_size 
+                << ", tag=" << flowTag.tag_id << std::endl;
+  }
+  
+  // Track callback timing patterns for first batch
+  if (ns3_callback_count <= 1000) {
+      static uint64_t first_callback_time = 0;
+      if (ns3_callback_count == 1) {
+          first_callback_time = Simulator::Now().GetNanoSeconds();
+      }
+      
+      if (ns3_callback_count <= 10 || ns3_callback_count % 100 == 0) {
+          uint64_t current_time = Simulator::Now().GetNanoSeconds();
+          std::cout << "[NS3] CALLBACK_TIMING: #" << ns3_callback_count 
+                    << " at " << current_time << "ns (+" << (current_time - first_callback_time) 
+                    << "ns from first callback)" << std::endl;
+      }
+  }
+  
+  // Enhanced logging for debugging
+  std::cout << "[NS3] CALLBACK DETAILS #" << ns3_callback_count 
+            << " at time=" << Simulator::Now().GetNanoSeconds() << "ns"
+            << " src=" << sender_node << " dst=" << receiver_node 
+            << " size=" << message_size 
+            << " flowTag.tag_id=" << flowTag.tag_id
+            << " flowTag.current_flow_id=" << flowTag.current_flow_id
+            << " flowTag.channel_id=" << flowTag.channel_id << std::endl;
+  
+  #ifdef NS3_MTP
+  MtpInterface::explicitCriticalSection cs;
+  #endif    
+  int tag = flowTag.tag_id;        
+  
+  std::cout << "[NS3] Looking for callback key: tag=" << tag 
+            << " src=" << sender_node << " dst=" << receiver_node 
+            << " sentHash.size()=" << sentHash.size() << std::endl;
+  
+  if (sentHash.find(make_pair(tag, make_pair(sender_node, receiver_node))) !=
+    sentHash.end()) {
+    task1 t2 = sentHash[make_pair(tag, make_pair(sender_node, receiver_node))];
+    AstraSim::SendPacketEventHandlerData* ehd = (AstraSim::SendPacketEventHandlerData*) t2.fun_arg;
+    ehd->flowTag=flowTag;   
+    
+    std::cout << "[NS3] Found callback! Expected size=" << t2.count 
+              << " actual size=" << message_size << std::endl;
+    
+    if (t2.count == message_size) {
+      sentHash.erase(make_pair(tag, make_pair(sender_node, receiver_node)));
+      if (nodeHash.find(make_pair(sender_node, 0)) == nodeHash.end()) {
+        nodeHash[make_pair(sender_node, 0)] = message_size;
+      } else {
+        nodeHash[make_pair(sender_node, 0)] += message_size;
+      }
+      #ifdef NS3_MTP
+      cs.ExitSection();
+      #endif
+      
+      std::cout << "[NS3] Calling callback handler - this should trigger more sends!" << std::endl;
+      
+      t2.msg_handler(t2.fun_arg);
+      
+      std::cout << "[NS3] Callback handler completed" << std::endl;
+      goto sender_end_1st_section;
+    }else{
+      NcclLog->writeLog(NcclLogLevel::ERROR,"sentHash msg size != sender_node %d receiver_node %d message_size %lu flow_id ",sender_node,receiver_node,message_size);
+    }
+  }else{
+    std::cout << "[NS3] ERROR: Callback not found for tag=" << tag << " src=" << sender_node << " dst=" << receiver_node << std::endl;
+    std::cout << "[NS3] Available keys in sentHash:" << std::endl;
+    for (const auto& entry : sentHash) {
+        std::cout << "[NS3]   tag=" << entry.first.first 
+                  << " src=" << entry.first.second.first 
+                  << " dst=" << entry.first.second.second 
+                  << " size=" << entry.second.count << std::endl;
+    }
+    NcclLog->writeLog(NcclLogLevel::ERROR,"sentHash cann't find sender_node %d receiver_node %d message_size %lu",sender_node,receiver_node,message_size);
+  }       
+  #ifdef NS3_MTP
+  cs.ExitSection();
+  #endif
+
+sender_end_1st_section:
+  return;
+}
+
+void notify_sender_packet_arrivered_receiver(int sender_node, int receiver_node,
+                                    uint64_t message_size, AstraSim::ncclFlowTag flowTag) {
+  int tag = flowTag.channel_id;
+  if (sentHash.find(make_pair(tag, make_pair(sender_node, receiver_node))) !=
+      sentHash.end()) {
+    task1 t2 = sentHash[make_pair(tag, make_pair(sender_node, receiver_node))];
+    AstraSim::SendPacketEventHandlerData* ehd = (AstraSim::SendPacketEventHandlerData*) t2.fun_arg;
+    ehd->flowTag=flowTag;
+    if (t2.count == message_size) {
+      sentHash.erase(make_pair(tag, make_pair(sender_node, receiver_node)));
+      if (nodeHash.find(make_pair(sender_node, 0)) == nodeHash.end()) {
+        nodeHash[make_pair(sender_node, 0)] = message_size;
+      } else {
+        nodeHash[make_pair(sender_node, 0)] += message_size;
+      }
+      t2.msg_handler(t2.fun_arg);
+    }
+  }
+}
+
+void qp_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
+  uint32_t sid = ip_to_node_id(q->sip), did = ip_to_node_id(q->dip);
+  uint64_t base_rtt = pairRtt[sid][did], b = pairBw[sid][did];
+  uint32_t total_bytes =
+      q->m_size +
+      ((q->m_size - 1) / packet_payload_size + 1) *
+          (CustomHeader::GetStaticWholeHeaderSize() -
+           IntHeader::GetStaticSize()); 
+  uint64_t standalone_fct = base_rtt + total_bytes * 8000000000lu / b;
+  fprintf(fout, "%08x %08x %u %u %lu %lu %lu %lu\n", q->sip.Get(), q->dip.Get(),
+          q->sport, q->dport, q->m_size, q->startTime.GetTimeStep(),
+          (Simulator::Now() - q->startTime).GetTimeStep(), standalone_fct);
+  fflush(fout);
+
+  AstraSim::ncclFlowTag flowTag;
+  uint64_t notify_size;
+  {
+    #ifdef NS3_MTP
+    MtpInterface::explicitCriticalSection cs;
+    #endif
+    Ptr<Node> dstNode = n.Get(did);
+    Ptr<RdmaDriver> rdma = dstNode->GetObject<RdmaDriver>();
+    rdma->m_rdma->DeleteRxQp(q->sip.Get(), q->m_pg, q->sport);
+    MockNcclLog* NcclLog = MockNcclLog::getInstance();
+    NcclLog->writeLog(NcclLogLevel::DEBUG,"qp finish, src:  %d did:  %d port:  %d total bytes:  %d at the tick:  %d",sid,did,q->sport,q->m_size,AstraSim::Sys::boostedTick());
+    if (sender_src_port_map.find(make_pair(q->sport, make_pair(sid, did))) ==
+        sender_src_port_map.end()) {
+      NcclLog->writeLog(NcclLogLevel::ERROR,"could not find the tag, there must be something wrong");
+      exit(-1);
+    }
+    flowTag = sender_src_port_map[make_pair(q->sport, make_pair(sid, did))];
+    sender_src_port_map.erase(make_pair(q->sport, make_pair(sid, did)));
+    received_chunksize[std::make_pair(flowTag.current_flow_id,std::make_pair(sid,did))]+=q->m_size;
+    if(!is_receive_finished(sid,did,flowTag)) {
+      #ifdef NS3_MTP
+      cs.ExitSection();
+      #endif
+      return; 
+    }
+    notify_size = received_chunksize[std::make_pair(flowTag.current_flow_id,std::make_pair(sid,did))];
+    received_chunksize.erase(std::make_pair(flowTag.current_flow_id,std::make_pair(sid,did)));    
+    #ifdef NS3_MTP
+    cs.ExitSection();
+    #endif
+  }
+  notify_receiver_receive_data(sid, did, notify_size, flowTag);
+}
+
+void send_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
+  uint32_t sid = ip_to_node_id(q->sip), did = ip_to_node_id(q->dip);
+  AstraSim::ncclFlowTag flowTag;
+  MockNcclLog* NcclLog = MockNcclLog::getInstance();
+  NcclLog->writeLog(NcclLogLevel::DEBUG,"数据包出发送网卡 send finish, src:  %d did:  %d port:  %d srcip  %d dstip  %d total bytes:  %d at the tick:  %d",sid,did,q->sport,q->sip,q->dip,q->m_size,AstraSim::Sys::boostedTick());
+  int all_sent_chunksize;
+  {
+    #ifdef NS3_MTP
+    MtpInterface::explicitCriticalSection cs;
+    #endif
+    flowTag = sender_src_port_map[make_pair(q->sport, make_pair(sid, did))];
+    sent_chunksize[std::make_pair(flowTag.current_flow_id,std::make_pair(sid,did))]+=q->m_size;
+    if(!is_sending_finished(sid,did,flowTag)) {
+      #ifdef NS3_MTP
+      cs.ExitSection();
+      #endif
+      return;
+    }
+    all_sent_chunksize = sent_chunksize[std::make_pair(flowTag.current_flow_id,std::make_pair(sid,did))];
+    sent_chunksize.erase(std::make_pair(flowTag.current_flow_id,std::make_pair(sid,did)));
+    #ifdef NS3_MTP
+    cs.ExitSection();
+    #endif
+  }
+  notify_sender_sending_finished(sid, did, all_sent_chunksize, flowTag);
+}
+
+int main1(string network_topo,string network_conf, bool use_custom_routing) {
+  // Set random seed BEFORE any other NS3 operations for maximum determinism
+  Config::SetGlobal("RngSeed", UintegerValue(12345));
+  Config::SetGlobal("RngRun", UintegerValue(1));
+  
+  clock_t begint, endt;
+  begint = clock();
+
+  if (!ReadConf(network_topo,network_conf))
+    return -1;
+  SetConfig();
+  
+  // Set the custom routing flag - SetupNetwork will handle the actual enabling
+  EnableCustomRouting(use_custom_routing);
+  if (use_custom_routing) {
+    cout << "[CUSTOM ROUTING] Custom routing enabled via command line argument" << endl;
+  } else {
+    cout << "[CUSTOM ROUTING] Using default NS3 ECMP routing" << endl;
+  }
+  
+  SetupNetwork(qp_finish,send_finish);
+
+std::cout << "Running Simulation.\n";
+  fflush(stdout);
+  NS_LOG_INFO("Run Simulation.");
+
+  endt = clock();
   return 0;
 }

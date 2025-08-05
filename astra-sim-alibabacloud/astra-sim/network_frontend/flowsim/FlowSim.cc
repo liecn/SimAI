@@ -8,6 +8,7 @@ LICENSE file in the root directory of this source tree.
 #include <cstdlib>
 #include <functional>
 #include <iostream>
+
 using namespace std;
 
 // Static members
@@ -26,42 +27,61 @@ void FlowSim::SetRoutingFramework(std::unique_ptr<AstraSim::RoutingFramework> ro
 }
 
 void FlowSim::Run() {
+    std::cout << "[FLOWSIM] Starting FlowSim event loop..." << std::endl;
+    
     int iteration = 0;
-    while (!event_queue->finished()) {
-        event_queue->proceed();
+    int empty_queue_count = 0;
+    const int MAX_EMPTY_ITERATIONS = 100000;
+    
+    while (true) {
+        // Process FlowSim events if available
+        if (!event_queue->finished()) {
+            event_queue->proceed();
+            iteration++;
+            empty_queue_count = 0;
+            
+            // Progress reporting
+            if (iteration % 100000 == 0) {
+                std::cout << "[FLOWSIM] Processed " << iteration << " events" << std::endl;
+            }
+        } else {
+            // Queue is empty - wait for more events
+            empty_queue_count++;
+            
+            if (empty_queue_count >= MAX_EMPTY_ITERATIONS) {
+                std::cout << "[FLOWSIM] No events for " << MAX_EMPTY_ITERATIONS << " iterations - simulation complete" << std::endl;
+                break;
+            }
+            
+            // Small sleep to prevent busy waiting
+            usleep(1000);
+        }
         
-        iteration++;
-        if (iteration > 100000) {
-            std::cerr << "[FLOWSIM] ERROR: Too many iterations!" << std::endl;
+        // Safety limit
+        if (iteration > 100000000) {
+            std::cout << "[FLOWSIM] Reached maximum iterations - stopping" << std::endl;
             break;
         }
     }
+    
+    std::cout << "[FLOWSIM] Event loop finished after " << iteration << " iterations" << std::endl;
 }
 
 void FlowSim::Schedule(
     uint64_t delay,
     void (*fun_ptr)(void* fun_arg),
     void* fun_arg) {
+    // Use FlowSim's event queue
     uint64_t time = event_queue->get_current_time() + delay;
     event_queue->schedule_event(time, fun_ptr, fun_arg);
 }
 
 double FlowSim::Now(){
+    // Use FlowSim's event queue time
     return event_queue->get_current_time();
 }
 
 void FlowSim::Send(int src, int dst, uint64_t size, int tag, Callback callback, CallbackArg callbackArg) {
-    static int flowsim_send_count = 0;
-    flowsim_send_count++;
-    
-    // Log send events (like NS3 does)
-    if (flowsim_send_count % 10 == 0) {
-        std::cout << "[FLOWSIM] send #" << flowsim_send_count 
-                  << " at time=" << event_queue->get_current_time() 
-                  << "ns: " << src << " -> " << dst 
-                  << ", size=" << size << " bytes" << std::endl;
-    }
-    
     // Apply AS_SEND_LAT for fair comparison with NS3
     uint64_t send_latency_ns = 0;
     const char* send_lat_env = std::getenv("AS_SEND_LAT");
@@ -75,9 +95,9 @@ void FlowSim::Send(int src, int dst, uint64_t size, int tag, Callback callback, 
     const char* nvls_env = std::getenv("AS_NVLS_ENABLE");
     if (nvls_env && std::stoi(nvls_env) == 1) {
         nvls_enabled = true;
-        // NVLS reduces effective chunk size for better pipelining (simulating hardware acceleration)
+        // NVLS reduces effective chunk size for better pipelining
         if (size < 4096 && size > 0) {
-            size = 4096; // Minimum chunk size with NVLS (same as NS3)
+            size = 4096; // Minimum chunk size with NVLS
         }
     }
     
@@ -98,13 +118,13 @@ void FlowSim::Send(int src, int dst, uint64_t size, int tag, Callback callback, 
         auto chunk = std::make_unique<Chunk>(size, route, callback, callbackArg);
         
         if (send_latency_ns > 0) {
-            // Schedule the actual send after the send latency (like NS3)
+            // Schedule the actual send after the send latency
             auto delayed_send = [chunk_ptr = chunk.release()]() {
                 std::unique_ptr<Chunk> delayed_chunk(chunk_ptr);
                 topology->send_with_batching(std::move(delayed_chunk));
             };
             
-            // Store the lambda in a way that can be called by the event system
+            // Store the lambda for the event system
             auto* lambda_ptr = new std::function<void()>(delayed_send);
             
             event_queue->schedule_event(
@@ -117,7 +137,7 @@ void FlowSim::Send(int src, int dst, uint64_t size, int tag, Callback callback, 
                 lambda_ptr
             );
         } else {
-            // Send immediately (original behavior)
+            // Send immediately
             topology->send_with_batching(std::move(chunk));
         }
     }

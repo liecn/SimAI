@@ -80,24 +80,8 @@ void Topology::send_with_batching(std::unique_ptr<Chunk> chunk) noexcept {
     // Add to pending batch
     pending_chunks_.push_back(chunk_ptr);
     
-    // If this is the first chunk in a potential batch, schedule timeout
-    if (pending_chunks_.size() == 1) {
-        last_batch_time_ = current_time;
-        
-        // Cancel any existing batch timeout event
-        if (batch_timeout_event_id_ > 0) {
-            event_queue->cancel_event(batch_timeout_event_id_);
-        }
-        
-        batch_timeout_event_id_ = event_queue->schedule_event(
-            current_time + BATCH_TIMEOUT_NS, 
-            batch_timeout_callback, 
-            this
-        );
-    }
-    
-    // Check if we should process immediately (e.g., large batch or timeout)
-    // For now, rely on timeout - could add smarter heuristics later
+    // Process batch immediately for optimal performance
+    process_batch_of_chunks();
 }
 
 void Topology::connect(DeviceId src, DeviceId dest, Bandwidth bandwidth, Latency latency, bool bidirectional) noexcept {
@@ -308,14 +292,14 @@ void Topology::chunk_completion_callback(void* arg) noexcept {
     Chunk* chunk = static_cast<Chunk*>(arg);
     Topology* topology = chunk->get_topology();
 
-    // 1. Invoke the chunk's callback first (notify ASTRA-Sim)
+    // Call ASTRA-Sim callback
     chunk->invoke_callback();
 
-    // 2. Remove this chunk from the simulation
+    // Remove this chunk from the simulation
     topology->remove_chunk_from_links(chunk);
     topology->active_chunks.remove(chunk);
 
-    // 3. If there are still active chunks, update their state
+    // Reschedule remaining chunks if any exist
     if (!topology->active_chunks.empty()) {
         const auto current_time = topology->event_queue->get_current_time();
         
@@ -408,13 +392,13 @@ void Topology::process_batch_of_chunks() {
         return;
     }
     
-    // Reset the batch timeout event ID since the timeout has fired
+    // Reset the batch timeout event ID
     batch_timeout_event_id_ = 0;
     
-    // Process all pending chunks as a batch - NO cancel_all_events() to avoid segfaults
+    // Process all pending chunks as a batch
     const auto current_time = event_queue->get_current_time();
     
-    // Add all pending chunks to the simulation at once
+    // Add all pending chunks to the simulation
     for (Chunk* chunk : pending_chunks_) {
         // Set topology reference and start time
         chunk->set_topology(this);
@@ -427,13 +411,22 @@ void Topology::process_batch_of_chunks() {
         associate_chunk_with_links(chunk);
     }
     
-    // Calculate rates for all chunks ONCE for the entire batch
+    // Calculate rates for all chunks
     update_link_states();
     
     // Schedule completion events for all new chunks
     for (Chunk* chunk : pending_chunks_) {
         double remaining_size = chunk->get_remaining_size();
         double rate = chunk->get_rate();
+        
+        // Consider flow finished if remaining size < 1 byte
+        if (remaining_size < 1.0) {
+            // Flow is complete - schedule immediate callback
+            auto* chunk_ptr = static_cast<void*>(chunk);
+            int event_id = event_queue->schedule_event(current_time + 1, chunk_completion_callback, chunk_ptr);
+            chunk->set_completion_event_id(event_id);
+            continue;
+        }
         
         // Prevent division by zero
         if (rate <= 0) {

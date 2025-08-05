@@ -17,8 +17,21 @@
 #define __SIMAIFLOW_NETWORK_HH__
 
 #include"astra-sim/system/AstraNetworkAPI.hh"
+#include <map>
+#include <utility>
 
 using namespace std;
+
+// Copy NS3's task1 struct for callback management
+struct task1 {
+  int src;
+  int dest;
+  uint64_t count;
+  int type;
+  void* fun_arg;
+  void (*msg_handler)(void* fun_arg);
+  uint64_t schTime;
+};
 
 /**
  * FlowSim Network Interface
@@ -27,6 +40,9 @@ using namespace std;
 class FlowSimNetWork: public AstraSim::AstraNetworkAPI {
 private:
   int npu_offset;
+  
+  // Copy NS3's sentHash pattern for callback storage
+  std::map<std::pair<int, std::pair<int, int>>, task1> sentHash;
 
 public:
     FlowSimNetWork(int _local_rank);
@@ -80,6 +96,15 @@ public:
         AstraSim::sim_request* request,
         void (*msg_handler)(void* fun_arg),
         void* fun_arg);
+        
+    // Sender completion notification callback
+    void notify_sender_sending_finished(int sender_node, int receiver_node, uint64_t message_size, AstraSim::ncclFlowTag flowTag);
+    
+    // Receiver packet arrival notification callback  
+    void notify_receiver_packet_arrived(int sender_node, int receiver_node, uint64_t message_size, AstraSim::ncclFlowTag flowTag);
+    
+    // TODO: Replace with real FlowSim network simulation
+    void FlowSimSendFlow(int src, int dst, uint64_t count, int tag, AstraSim::sim_request* request);
 };
 
 #endif // __SIMAIFLOW_NETWORK_HH__

@@ -24,6 +24,8 @@ function setup {
 }
 
 function compile {
+    export CC=gcc-9
+    export CXX=g++-9
     cd "${BUILD_DIR}" || exit
     cmake -DUSE_ANALYTICAL=TRUE ..
     make

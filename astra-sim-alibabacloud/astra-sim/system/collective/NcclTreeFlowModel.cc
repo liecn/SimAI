@@ -166,7 +166,9 @@ void NcclTreeFlowModel::run(EventType event, CallData* data) {
     }
     assert(flow_exist == true);
     NcclTreeFlowModel::FlowCriticalSection cs;
+    
     free_packets[std::make_pair(channel_id, flowTag.sender_node)]--;
+    
     bool tag = true;
     for (int i = 0; i < m_channels; i++) {
       if (_stream_count[i] != 0) {
@@ -401,12 +403,15 @@ void NcclTreeFlowModel::process_stream_count(int channel_id) {
     send_packets--;
   #else
   NcclTreeFlowModel::FlowCriticalSection cs;
+  
   if (_stream_count[channel_id] > 0) {
     _stream_count[channel_id]--;
   }
+  
   NcclLog->writeLog(NcclLogLevel::DEBUG,"NcclTreeFlowModel::process_stream_count channel_id %d _stream_count %d",channel_id,_stream_count[channel_id]);
-  if (_stream_count[channel_id] == 0 && stream->state != StreamState::Dead) 
+  if (_stream_count[channel_id] == 0 && stream->state != StreamState::Dead) {
     stream->changeState(StreamState::Zombie);
+  }
   cs.ExitSection();
   #endif
 }
@@ -424,16 +429,22 @@ bool NcclTreeFlowModel::iteratable(int channel_id) {
   MockNcclLog* NcclLog = MockNcclLog::getInstance();
   bool all_channel_finished = true, all_packets_freed = true;
   NcclTreeFlowModel::FlowCriticalSection cs;
+  
   for(int i = 0; i < m_channels; ++ i) {
-    if(_stream_count.count(i) != 0 && _stream_count[i] != 0) all_channel_finished = false;
+    if(_stream_count.count(i) != 0 && _stream_count[i] != 0) {
+      all_channel_finished = false;
+    }
   }
+  
   for (auto it = free_packets.begin(); it != free_packets.end(); it++) {
     if (it->second != 0) {
       all_packets_freed = false;
       break;
     }
   }
+  
   cs.ExitSection();
+  
   if (all_channel_finished == true &&
       all_packets_freed == true) {
     exit();

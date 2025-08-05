@@ -58,13 +58,6 @@ void Chunk::set_rate(double rate) noexcept {
     this->rate = rate;
 }
 
-void Chunk::invoke_callback() noexcept {
-    // std::cerr << "Debug: Invoking callback for chunk ID: " << completion_event_id_ << std::endl;
-    
-    (*callback)(callback_arg);
-
-    // std::cerr << "Debug: Callback invoked for chunk ID: " << completion_event_id_ << std::endl;
-}
 
 void Chunk::set_transmission_start_time(EventTime start_time) noexcept {
     transmission_start_time = start_time;
