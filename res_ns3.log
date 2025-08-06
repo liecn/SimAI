@@ -1,0 +1,380 @@
+(py39) lichenni@tardy:~/projects/SimAI$ time AS_SEND_LAT=3 AS_NVLS_ENABLE=1 ./bin/SimAI_simulator -t 8 -w ./example/microAllReduce_16gpus.txt -n ./Spectrum-X_128g_8gps_100Gbps_A100 -c astra-sim-alibabacloud/inputs/config/SimAI.conf -r
+[NS3] Starting SimAI-NS3
+[NS3] Workload: ./example/microAllReduce_16gpus.txt
+[NS3] Network: ./Spectrum-X_128g_8gps_100Gbps_A100
+[CUSTOM ROUTING] Custom routing enabled via command line argument
+[SYSTEM ROUTING] Routing framework initialized with topology: ./Spectrum-X_128g_8gps_100Gbps_A100
+[SYSTEM ROUTING] Topology has 216 nodes
+[ROUTING] Synced 59392 pre-calculated flow paths with backend using routing framework
+maxRtt=5800 maxBdp=72500
+[NS3] Topology: 128 GPUs, 16 NVSwitches, 72 switches (A100)
+The final active chunks per dimension 1 after allocating to queues is: 1
+ring of node 0, id: 0 dimension: local total nodes in ring: 144 index in ring: 0 offset: 1total nodes in ring: 144
+ring of node 0, id: 0 dimension: local total nodes in ring: 144 index in ring: 0 offset: 1total nodes in ring: 144
+ring of node 0, id: 0 dimension: local total nodes in ring: 144 index in ring: 0 offset: 1total nodes in ring: 144
+ring of node 0, id: 0 dimension: local total nodes in ring: 144 index in ring: 0 offset: 1total nodes in ring: 144
+total nodes: 144
+Success in opening workload file
+model_parallel_NPU_group is 16
+checkpoints layers are: 
+layers initiating fwd_in_bckwd are: 
+ring of node 0, id: 0 dimension: local total nodes in ring: 16 index in ring: 0 offset: 1total nodes in ring: 16
+ring of node 0, id: 0 dimension: local total nodes in ring: 9 index in ring: 0 offset: 16total nodes in ring: 9
+ring of node 0, id: 0 dimension: local total nodes in ring: 16 index in ring: 0 offset: 1total nodes in ring: 16
+ring of node 0, id: 0 dimension: local total nodes in ring: 9 index in ring: 0 offset: 16total nodes in ring: 9
+ring of node 0, id: 0 dimension: local total nodes in ring: 16 index in ring: 0 offset: 1total nodes in ring: 16
+ring of node 0, id: 0 dimension: local total nodes in ring: 9 index in ring: 0 offset: 16total nodes in ring: 9
+ring of node 0, id: 0 dimension: local total nodes in ring: 16 index in ring: 0 offset: 1total nodes in ring: 16
+ring of node 0, id: 0 dimension: local total nodes in ring: 9 index in ring: 0 offset: 16total nodes in ring: 9
+pp_commize:0
+id: embedding_layer , depen: -1 , wg_comp_time: 1
+id: embedding_layer , depen: -1 , wg_comp_time: 1
+type: HYBRID_TRANSFORMER_FWD_IN_BCKWD ,num passes: 1 ,lines: 2 compute scale: 1 ,comm scale: 1
+stat path: ./simai_ns3_ ,total rows: 1 ,stat row: 0
+CSV path and filename: ./simai_ns3_detailed_144.csv
+CSV path and filename: ./simai_ns3_EndToEnd.csv
+[NS3] Running Simulation.
+chunk size is: 16777216 , size is: 16777216 , layer_num is: 0 , node: 0
+info: all-reduce forward pass collective issued for layer: embedding_layer, involved dimensions:  1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+[NS3] SEND #1 at time=556010ns: src=0 -> dst=1, size=131072, tag=0
+[NS3] SEND #2 at time=556010ns: src=0 -> dst=9, size=131072, tag=30
+[NS3] SEND #3 at time=556010ns: src=0 -> dst=1, size=131072, tag=60
+[NS3] SEND #4 at time=556010ns: src=0 -> dst=1, size=131072, tag=90
+[NS3] SEND #5 at time=556010ns: src=0 -> dst=1, size=131072, tag=120
+[NS3] CALLBACK #1 at time=561967ns: src=83 -> dst=84, size=131072, tag=210
+[NS3] CALLBACK #2 at time=561967ns: src=115 -> dst=116, size=131072, tag=210
+[NS3] CALLBACK #4 at time=561967ns: src=82 -> dst=83, size=[NS3] CALLBACK #131072, tag=210
+4 at time=561967ns: src=59 -> dst=60, size=131072, tag=210
+[NS3] CALLBACK #5 at time=561967ns: src=80 -> dst=81, size=131072, tag=0
+[NS3] SEND #10000 at time=1277726ns: src=113 -> dst=114, size=131072, tag=35
+[NS3] CALLBACK #10000 at time=1294252ns: src=100 -> dst=109, size=131072, tag=151
+[NS3] SEND #20000 at time=1736513ns: src=91 -> dst=92, size=131072, tag=74
+[NS3] CALLBACK #20000 at time=1774417ns: src=110 -> dst=103, size=131072, tag=230
+[NS3] SEND #30000 at time=2164155ns: src=70 -> dst=71, size=131072, tag=142
+[NS3] CALLBACK #30000 at time=2173832ns: src=77 -> dst=78, size=131072, tag=233
+***** info: fwd pass comm collective for layer: embedding_layer is finished************
+chunk size is: 67108864 , size is: 67108864 , layer_num is: 1 , node: 0
+info: all-reduce forward pass collective issued for layer: embedding_layer, involved dimensions:  1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+[NS3] SEND #40000 at time=4429184ns: src=42 -> dst=43, size=524288, tag=615
+[NS3] CALLBACK #40000 at time=4518814ns: src=14 -> dst=15, size=524288, tag=668
+[NS3] SEND #50000 at time=6103689ns: src=62 -> dst=63, size=524288, tag=650
+[NS3] CALLBACK #50000 at time=6187268ns: src=88 -> dst=81, size=524288, tag=521
+[NS3] SEND #60000 at time=7800454ns: src=88 -> dst=89, size=524288, tag=658
+[NS3] CALLBACK #60000 at time=7825716ns: src=47 -> dst=40, size=524288, tag=715
+***** info: fwd pass comm collective for layer: embedding_layer is finished************
+info: no input grad collective for layer: embedding_layer
+info: no weight grad collective for layer: embedding_layer
+info: no input grad collective for layer: embedding_layer
+info: no weight grad collective for layer: embedding_layer
+pass: 0 finished at time: 8072038
+workload stats for the job scheduled at NPU offset: 0
+*******************
+Layer id: embedding_layer
+Total collectives issued for this layer: 1
+*************************  Workload stats  ************************* embedding_layer
+id: embedding_layer ,Total cycles spent on fwd pass compute: 556000
+id: embedding_layer ,Total cycles spent on weight grad compute: 1
+id: embedding_layer ,Total cycles spent on input grad compute: 1
+id: embedding_layer ,Total cycles spent idle waiting for fwd finish: 1683276
+id: embedding_layer ,Total cycles spent idle waiting for weight grad finish: 0
+id: embedding_layer ,Total cycles spent idle waiting for input grad finish: 0
+id: embedding_layer ,Total cycles spent on fwd pass comm: 1683276
+id: embedding_layer ,Total cycles spent on weight grad comm: 0
+id: embedding_layer ,Total cycles spent on input grad comm: 0
+*******************
+Layer id: embedding_layer
+Total collectives issued for this layer: 1
+*************************  Workload stats  ************************* embedding_layer
+id: embedding_layer ,Total cycles spent on fwd pass compute: 556000
+id: embedding_layer ,Total cycles spent on weight grad compute: 1
+id: embedding_layer ,Total cycles spent on input grad compute: 1
+id: embedding_layer ,Total cycles spent idle waiting for fwd finish: 5276753
+id: embedding_layer ,Total cycles spent idle waiting for weight grad finish: 0
+id: embedding_layer ,Total cycles spent idle waiting for input grad finish: 0
+id: embedding_layer ,Total cycles spent on fwd pass comm: 5276753
+id: embedding_layer ,Total cycles spent on weight grad comm: 0
+id: embedding_layer ,Total cycles spent on input grad comm: 0
+*************************
+all passes finished at time: 8072039, id of first layer: embedding_layer
+path to create csvs is: ./simai_ns3_
+success in openning file
+*****
+Time to exit: Tue Aug  5 22:06:46 2025
+all-reduce Collective implementation: NcclFlowModel
+reduce-scatter Collective implementation: NcclFlowModel
+all-gather Collective implementation: NcclFlowModel
+all-to-all Collective implementation: NcclFlowModel
+Collective optimization: baseline
+Total sim duration: 0:0 hours
+Total streams injected: 2
+Total streams finished: 2
+Percentage of finished streams: 100 %
+*****
+All data sent from node 0 is 157286400
+All data received by node 0 is 157286400
+All data sent from node 1 is 157286400
+All data received by node 1 is 157286400
+All data sent from node 2 is 157286400
+All data received by node 2 is 157286400
+All data sent from node 3 is 157286400
+All data received by node 3 is 157286400
+All data sent from node 4 is 157286400
+All data received by node 4 is 157286400
+All data sent from node 5 is 157286400
+All data received by node 5 is 157286400
+All data sent from node 6 is 157286400
+All data received by node 6 is 157286400
+All data sent from node 7 is 157286400
+All data received by node 7 is 157286400
+All data sent from node 8 is 157286400
+All data received by node 8 is 157286400
+All data sent from node 9 is 157286400
+All data received by node 9 is 157286400
+All data sent from node 10 is 157286400
+All data received by node 10 is 157286400
+All data sent from node 11 is 157286400
+All data received by node 11 is 157286400
+All data sent from node 12 is 157286400
+All data received by node 12 is 157286400
+All data sent from node 13 is 157286400
+All data received by node 13 is 157286400
+All data sent from node 14 is 157286400
+All data received by node 14 is 157286400
+All data sent from node 15 is 157286400
+All data received by node 15 is 157286400
+All data sent from node 16 is 157286400
+All data received by node 16 is 157286400
+All data sent from node 17 is 157286400
+All data received by node 17 is 157286400
+All data sent from node 18 is 157286400
+All data received by node 18 is 157286400
+All data sent from node 19 is 157286400
+All data received by node 19 is 157286400
+All data sent from node 20 is 157286400
+All data received by node 20 is 157286400
+All data sent from node 21 is 157286400
+All data received by node 21 is 157286400
+All data sent from node 22 is 157286400
+All data received by node 22 is 157286400
+All data sent from node 23 is 157286400
+All data received by node 23 is 157286400
+All data sent from node 24 is 157286400
+All data received by node 24 is 157286400
+All data sent from node 25 is 157286400
+All data received by node 25 is 157286400
+All data sent from node 26 is 157286400
+All data received by node 26 is 157286400
+All data sent from node 27 is 157286400
+All data received by node 27 is 157286400
+All data sent from node 28 is 157286400
+All data received by node 28 is 157286400
+All data sent from node 29 is 157286400
+All data received by node 29 is 157286400
+All data sent from node 30 is 157286400
+All data received by node 30 is 157286400
+All data sent from node 31 is 157286400
+All data received by node 31 is 157286400
+All data sent from node 32 is 157286400
+All data received by node 32 is 157286400
+All data sent from node 33 is 157286400
+All data received by node 33 is 157286400
+All data sent from node 34 is 157286400
+All data received by node 34 is 157286400
+All data sent from node 35 is 157286400
+All data received by node 35 is 157286400
+All data sent from node 36 is 157286400
+All data received by node 36 is 157286400
+All data sent from node 37 is 157286400
+All data received by node 37 is 157286400
+All data sent from node 38 is 157286400
+All data received by node 38 is 157286400
+All data sent from node 39 is 157286400
+All data received by node 39 is 157286400
+All data sent from node 40 is 157286400
+All data received by node 40 is 157286400
+All data sent from node 41 is 157286400
+All data received by node 41 is 157286400
+All data sent from node 42 is 157286400
+All data received by node 42 is 157286400
+All data sent from node 43 is 157286400
+All data received by node 43 is 157286400
+All data sent from node 44 is 157286400
+All data received by node 44 is 157286400
+All data sent from node 45 is 157286400
+All data received by node 45 is 157286400
+All data sent from node 46 is 157286400
+All data received by node 46 is 157286400
+All data sent from node 47 is 157286400
+All data received by node 47 is 157286400
+All data sent from node 48 is 157286400
+All data received by node 48 is 157286400
+All data sent from node 49 is 157286400
+All data received by node 49 is 157286400
+All data sent from node 50 is 157286400
+All data received by node 50 is 157286400
+All data sent from node 51 is 157286400
+All data received by node 51 is 157286400
+All data sent from node 52 is 157286400
+All data received by node 52 is 157286400
+All data sent from node 53 is 157286400
+All data received by node 53 is 157286400
+All data sent from node 54 is 157286400
+All data received by node 54 is 157286400
+All data sent from node 55 is 157286400
+All data received by node 55 is 157286400
+All data sent from node 56 is 157286400
+All data received by node 56 is 157286400
+All data sent from node 57 is 157286400
+All data received by node 57 is 157286400
+All data sent from node 58 is 157286400
+All data received by node 58 is 157286400
+All data sent from node 59 is 157286400
+All data received by node 59 is 157286400
+All data sent from node 60 is 157286400
+All data received by node 60 is 157286400
+All data sent from node 61 is 157286400
+All data received by node 61 is 157286400
+All data sent from node 62 is 157286400
+All data received by node 62 is 157286400
+All data sent from node 63 is 157286400
+All data received by node 63 is 157286400
+All data sent from node 64 is 157286400
+All data received by node 64 is 157286400
+All data sent from node 65 is 157286400
+All data received by node 65 is 157286400
+All data sent from node 66 is 157286400
+All data received by node 66 is 157286400
+All data sent from node 67 is 157286400
+All data received by node 67 is 157286400
+All data sent from node 68 is 157286400
+All data received by node 68 is 157286400
+All data sent from node 69 is 157286400
+All data received by node 69 is 157286400
+All data sent from node 70 is 157286400
+All data received by node 70 is 157286400
+All data sent from node 71 is 157286400
+All data received by node 71 is 157286400
+All data sent from node 72 is 157286400
+All data received by node 72 is 157286400
+All data sent from node 73 is 157286400
+All data received by node 73 is 157286400
+All data sent from node 74 is 157286400
+All data received by node 74 is 157286400
+All data sent from node 75 is 157286400
+All data received by node 75 is 157286400
+All data sent from node 76 is 157286400
+All data received by node 76 is 157286400
+All data sent from node 77 is 157286400
+All data received by node 77 is 157286400
+All data sent from node 78 is 157286400
+All data received by node 78 is 157286400
+All data sent from node 79 is 157286400
+All data received by node 79 is 157286400
+All data sent from node 80 is 157286400
+All data received by node 80 is 157286400
+All data sent from node 81 is 157286400
+All data received by node 81 is 157286400
+All data sent from node 82 is 157286400
+All data received by node 82 is 157286400
+All data sent from node 83 is 157286400
+All data received by node 83 is 157286400
+All data sent from node 84 is 157286400
+All data received by node 84 is 157286400
+All data sent from node 85 is 157286400
+All data received by node 85 is 157286400
+All data sent from node 86 is 157286400
+All data received by node 86 is 157286400
+All data sent from node 87 is 157286400
+All data received by node 87 is 157286400
+All data sent from node 88 is 157286400
+All data received by node 88 is 157286400
+All data sent from node 89 is 157286400
+All data received by node 89 is 157286400
+All data sent from node 90 is 157286400
+All data received by node 90 is 157286400
+All data sent from node 91 is 157286400
+All data received by node 91 is 157286400
+All data sent from node 92 is 157286400
+All data received by node 92 is 157286400
+All data sent from node 93 is 157286400
+All data received by node 93 is 157286400
+All data sent from node 94 is 157286400
+All data received by node 94 is 157286400
+All data sent from node 95 is 157286400
+All data received by node 95 is 157286400
+All data sent from node 96 is 157286400
+All data received by node 96 is 157286400
+All data sent from node 97 is 157286400
+All data received by node 97 is 157286400
+All data sent from node 98 is 157286400
+All data received by node 98 is 157286400
+All data sent from node 99 is 157286400
+All data received by node 99 is 157286400
+All data sent from node 100 is 157286400
+All data received by node 100 is 157286400
+All data sent from node 101 is 157286400
+All data received by node 101 is 157286400
+All data sent from node 102 is 157286400
+All data received by node 102 is 157286400
+All data sent from node 103 is 157286400
+All data received by node 103 is 157286400
+All data sent from node 104 is 157286400
+All data received by node 104 is 157286400
+All data sent from node 105 is 157286400
+All data received by node 105 is 157286400
+All data sent from node 106 is 157286400
+All data received by node 106 is 157286400
+All data sent from node 107 is 157286400
+All data received by node 107 is 157286400
+All data sent from node 108 is 157286400
+All data received by node 108 is 157286400
+All data sent from node 109 is 157286400
+All data received by node 109 is 157286400
+All data sent from node 110 is 157286400
+All data received by node 110 is 157286400
+All data sent from node 111 is 157286400
+All data received by node 111 is 157286400
+All data sent from node 112 is 157286400
+All data received by node 112 is 157286400
+All data sent from node 113 is 157286400
+All data received by node 113 is 157286400
+All data sent from node 114 is 157286400
+All data received by node 114 is 157286400
+All data sent from node 115 is 157286400
+All data received by node 115 is 157286400
+All data sent from node 116 is 157286400
+All data received by node 116 is 157286400
+All data sent from node 117 is 157286400
+All data received by node 117 is 157286400
+All data sent from node 118 is 157286400
+All data received by node 118 is 157286400
+All data sent from node 119 is 157286400
+All data received by node 119 is 157286400
+All data sent from node 120 is 157286400
+All data received by node 120 is 157286400
+All data sent from node 121 is 157286400
+All data received by node 121 is 157286400
+All data sent from node 122 is 157286400
+All data received by node 122 is 157286400
+All data sent from node 123 is 157286400
+All data received by node 123 is 157286400
+All data sent from node 124 is 157286400
+All data received by node 124 is 157286400
+All data sent from node 125 is 157286400
+All data received by node 125 is 157286400
+All data sent from node 126 is 157286400
+All data received by node 126 is 157286400
+All data sent from node 127 is 157286400
+All data received by node 127 is 157286400
+
+[SIMULATION COMPLETE] Printing routing statistics...
+[CUSTOM ROUTING STATS] Total lookups: 5680803
+[CUSTOM ROUTING STATS] Custom routing hits: 5659818
+[CUSTOM ROUTING STATS] Custom routing misses: 0
+[CUSTOM ROUTING STATS] Custom routing hit rate: 99.6306%
+[ROUTING] Routing framework cleaned up.
+[NS3] SimAI-NS3 finished
+
+real    0m56.303s
+user    6m31.607s
+sys     0m3.027s

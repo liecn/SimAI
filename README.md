@@ -17,15 +17,15 @@ git submodule update --init --recursive
 
 ## ⚡ FlowSim (Fast)
 ```bash
-AS_SEND_LAT=3 AS_NVLS_ENABLE=1 ./bin/SimAI_flowsim -t 8 -w ./example/microAllReduce_16gpus.txt -n ./Spectrum-X_128g_8gps_100Gbps_A100
+time AS_SEND_LAT=3 AS_NVLS_ENABLE=1 ./bin/SimAI_flowsim -t 8 -w ./example/microAllReduce_16gpus.txt -n ./Spectrum-X_128g_8gps_100Gbps_A100
 ```
 
 ## 🔬 NS3 (Detailed)  
 ```bash
-AS_SEND_LAT=3 AS_NVLS_ENABLE=1 ./bin/SimAI_simulator -t 8 -w ./example/microAllReduce_16gpus.txt -n ./Spectrum-X_128g_8gps_100Gbps_A100 -c astra-sim-alibabacloud/inputs/config/SimAI.conf -r
+time AS_SEND_LAT=3 AS_NVLS_ENABLE=1 ./bin/SimAI_simulator -t 8 -w ./example/microAllReduce_16gpus.txt -n ./Spectrum-X_128g_8gps_100Gbps_A100 -c astra-sim-alibabacloud/inputs/config/SimAI.conf -r
 ```
 
 ## 📊 Results
 - **FlowSim**: ~11s execution, 7415 cycles simulation time
-- **NS3**: ~56s execution, 8230 cycles simulation time  
+- **NS3**: ~56s execution, 8072 cycles simulation time  
 - **Trade-off**: FlowSim 5x faster execution, NS3 more accurate modeling
