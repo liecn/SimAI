@@ -11,3 +11,4 @@ test/log/
 .cur*
 .DS_Store
 command.sh
+deprecated/

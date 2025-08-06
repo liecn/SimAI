@@ -54,6 +54,18 @@ FlowSimNetWork::FlowSimNetWork(int _local_rank) : AstraNetworkAPI(_local_rank) {
 FlowSimNetWork::~FlowSimNetWork() {
 }
 
+int FlowSimNetWork::sim_finish() {
+    for (auto it = nodeHash.begin(); it != nodeHash.end(); it++) {
+        std::pair<int, int> p = it->first;
+        if (p.second == 0) {
+            std::cout << "All data sent from node " << p.first << " is " << it->second << "\n";
+        } else {
+            std::cout << "All data received by node " << p.first << " is " << it->second << "\n";
+        }
+    }
+    return 0;
+}
+
 AstraSim::timespec_t FlowSimNetWork::sim_get_time() {
   AstraSim::timespec_t timeSpec;
   timeSpec.time_val = FlowSim::Now();
@@ -138,10 +150,10 @@ void FlowSimNetWork::notify_receiver_packet_arrived(int sender_node, int receive
             recvHash.erase(make_pair(tag, make_pair(sender_node, receiver_node)));
             
             // Update nodeHash
-            if (nodeHash.find(make_pair(receiver_node, 0)) == nodeHash.end()) {
-                nodeHash[make_pair(receiver_node, 0)] = message_size;
+            if (nodeHash.find(make_pair(receiver_node, 1)) == nodeHash.end()) {
+                nodeHash[make_pair(receiver_node, 1)] = message_size;
             } else {
-                nodeHash[make_pair(receiver_node, 0)] += message_size;
+                nodeHash[make_pair(receiver_node, 1)] += message_size;
             }
             
             // Set the flowTag in the event handler data
@@ -160,12 +172,6 @@ void FlowSimNetWork::notify_receiver_packet_arrived(int sender_node, int receive
         NcclLog->writeLog(NcclLogLevel::DEBUG,"FlowSim receiver not found for tag=%d src=%d dst=%d", tag, sender_node, receiver_node);
     }
 }
-
-// TODO: Remove obsolete fake timing helper function below
-// Real FlowSim network simulation - replacing fake timing with actual network modeling
-// void FlowSimNetWork::FlowSimSendFlow(int src, int dst, uint64_t count, int tag, AstraSim::sim_request* request) {
-//     // ... old fake timing code removed ...
-// }
 
 void FlowSimNetWork::notify_sender_sending_finished(int sender_node, int receiver_node, uint64_t message_size, AstraSim::ncclFlowTag flowTag) {
     static int callback_count = 0;

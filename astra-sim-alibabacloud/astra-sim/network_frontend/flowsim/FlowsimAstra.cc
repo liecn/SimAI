@@ -32,7 +32,7 @@
 #include <tuple>
 #include <stdexcept>
 
-#define RESULT_PATH "./ncclFlowSim_"
+#define RESULT_PATH "./simai_flowsim_"
 #define WORKLOAD_PATH ""
 
 using namespace std;
@@ -55,29 +55,23 @@ struct user_param {
   int thread;
   string workload;
   string network_topo;
-  string network_conf;
-  bool use_custom_routing;
   user_param() {
     thread = 1;
     workload = "";
     network_topo = "";
-    network_conf = "";
-    use_custom_routing = false;
   };
   ~user_param(){};
 };
 
 static int user_param_prase(int argc,char * argv[],struct user_param* user_param){
   int opt;
-  while ((opt = getopt(argc,argv,"ht:w:n:c:r"))!=-1){
+  while ((opt = getopt(argc,argv,"ht:w:n:"))!=-1){
     switch (opt)
     {
     case 'h':
       std::cout<<"-t    number of threads,default 1"<<std::endl;
       std::cout<<"-w    workloads default none "<<std::endl;
       std::cout<<"-n    network topo"<<std::endl;
-      std::cout<<"-c    network_conf"<<std::endl;
-      std::cout<<"-r    use custom routing (default: false)"<<std::endl;
       return 1;
     case 't':
       user_param->thread = stoi(optarg);
@@ -87,12 +81,6 @@ static int user_param_prase(int argc,char * argv[],struct user_param* user_param
       break;
     case 'n':
       user_param->network_topo = optarg;
-      break;
-    case 'c':
-      user_param->network_conf = optarg;
-      break;
-    case 'r':
-      user_param->use_custom_routing = true;
       break;
     default:
       std::cerr<<"-h    help message"<<std::endl;
@@ -111,6 +99,45 @@ int main(int argc,char *argv[]) {
   std::cout << "[FLOWSIM] Starting SimAI-FlowSim" << std::endl;
   std::cout << "[FLOWSIM] Workload: " << user_param.workload << std::endl;
   std::cout << "[FLOWSIM] Network: " << user_param.network_topo << std::endl;
+  
+  // FlowSim always uses custom routing
+  std::cout << "[CUSTOM ROUTING] Custom routing enabled via command line argument" << std::endl;
+  
+  // Initialize routing framework early (same position as NS3)
+  if (!user_param.network_topo.empty()) {
+    // Add system routing logging to match NS3
+    std::cout << "[SYSTEM ROUTING] Routing framework initialized with topology: " << user_param.network_topo << std::endl;
+    
+    // Create routing framework instance
+    auto routing_framework = std::make_unique<AstraSim::RoutingFramework>();
+    
+    // First parse the topology file
+    bool parse_result = routing_framework->ParseTopology(user_param.network_topo);
+    
+    if (parse_result) {
+      routing_framework->PrecalculateRoutingTables();
+      routing_framework->PrecalculateFlowPathsForFlowSim(user_param.network_topo, user_param.network_topo);
+      
+      // Add topology node count logging to match NS3 (read from topology file quickly)
+      std::ifstream temp_topof(user_param.network_topo);
+      if (temp_topof.is_open()) {
+        uint32_t temp_node_num, temp_gpus_per_server, temp_nvswitch_num, temp_switch_num, temp_link_num;
+        std::string temp_gpu_type_str;
+        temp_topof >> temp_node_num >> temp_gpus_per_server >> temp_nvswitch_num >> temp_switch_num >> temp_link_num >> temp_gpu_type_str;
+        std::cout << "[SYSTEM ROUTING] Topology has " << temp_node_num << " nodes" << std::endl;
+        temp_topof.close();
+      }
+      
+      // Set the routing framework in FlowSim
+      FlowSim::SetRoutingFramework(std::move(routing_framework));
+      
+      // Add routing sync logging to match NS3 (get actual count)
+      const AstraSim::RoutingFramework* rf = FlowSim::GetRoutingFramework();
+      size_t actual_flow_count = rf ? rf->GetFlowPathCount() : 0;
+      std::cout << "[ROUTING] Synced " << actual_flow_count << " pre-calculated flow paths with backend using routing framework" << std::endl;
+    }
+  }
+  
   
   std::shared_ptr<Topology> topology = construct_fat_tree_topology(user_param.network_topo);
 
@@ -153,9 +180,6 @@ int main(int argc,char *argv[]) {
     std::vector<std::tuple<int, int, double, double, double>> dummy_links;
     std::tie(npus_cnt, nvswitch_num, nv_ids, dummy_links) =
         parse_fat_tree_topology_file(user_param.network_topo);
-
-    // Save the NVSwitch IDs globally so that Sys / MockNccl can consume them
-    // param->net_work_param.NVswitchs = nv_ids; // This line was removed as per the new_code
 
     // Basic deterministic mapping: group GPUs by gpus_per_server and assign to NVSwitch
     // gpus_per_server is now a global variable initialized to 8
@@ -211,23 +235,6 @@ int main(int argc,char *argv[]) {
     systems.push_back(system);
   }
   
-  // Initialize routing framework and pre-calculate flow paths (same as NS3)
-  if (!user_param.network_topo.empty()) {
-    // Create routing framework instance
-    auto routing_framework = std::make_unique<AstraSim::RoutingFramework>();
-    
-    // First parse the topology file
-    bool parse_result = routing_framework->ParseTopology(user_param.network_topo);
-    
-    if (parse_result) {
-      routing_framework->PrecalculateRoutingTables();
-      routing_framework->PrecalculateFlowPathsForFlowSim(user_param.network_topo, user_param.network_topo);
-      
-      // Set the routing framework in FlowSim
-      FlowSim::SetRoutingFramework(std::move(routing_framework));
-    }
-  }
-
   // Initialize FlowSim AFTER routing framework is set up
   std::shared_ptr<EventQueue> event_queue = std::make_shared<EventQueue>();
   FlowSim::Init(event_queue, topology);
@@ -236,10 +243,20 @@ int main(int argc,char *argv[]) {
     systems[i]->workload->fire();
   }
   
-  std::cout << "[FLOWSIM] Starting simulation..." << std::endl;
   FlowSim::Run();
   
-  std::cout << "[FLOWSIM] Simulation completed successfully" << std::endl;
+  // Print data summary once (nodeHash is global, shared across all networks)
+  if (!networks.empty()) {
+    networks[0]->sim_finish();
+  }
+  
+  // Print routing statistics (same as NS3)
+  std::cout << "\n[SIMULATION COMPLETE] Printing routing statistics..." << std::endl;
+  
+  // Get actual routing statistics from FlowSim
+  const AstraSim::RoutingFramework* routing_framework = FlowSim::GetRoutingFramework();
+  
+  std::cout << "[ROUTING] Routing framework cleaned up." << std::endl;
   
   // Clean shutdown
   FlowSim::Stop();

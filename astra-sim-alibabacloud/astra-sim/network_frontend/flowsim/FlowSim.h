@@ -27,6 +27,9 @@ class FlowSim {
   static void Send(int src, int dst, uint64_t size, int tag, Callback callback, CallbackArg callbackArg);
   static bool IsRoutingFrameworkLoaded();
   
+  // Get routing framework for statistics access
+  static const AstraSim::RoutingFramework* GetRoutingFramework();
+  
   // Cleanup methods
   static void Stop();
   static void Destroy();

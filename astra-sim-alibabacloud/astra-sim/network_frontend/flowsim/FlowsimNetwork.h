@@ -58,9 +58,7 @@ public:
         return 0;
     }
     
-    int sim_finish() {
-        return 0;
-    }
+    int sim_finish();
     
     double sim_time_resolution() {
         return 0;

@@ -124,7 +124,11 @@ void FlowSim::Send(int src, int dst, uint64_t size, int tag, Callback callback, 
 }
 
 bool FlowSim::IsRoutingFrameworkLoaded() {
-    return routing_framework_ != nullptr && routing_framework_->IsTopologyLoaded();
+    return routing_framework_ != nullptr;
+}
+
+const AstraSim::RoutingFramework* FlowSim::GetRoutingFramework() {
+    return routing_framework_.get();
 }
 
 void FlowSim::Stop() {

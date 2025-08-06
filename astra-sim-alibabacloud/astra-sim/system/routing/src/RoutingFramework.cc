@@ -665,9 +665,6 @@ bool RoutingFramework::PrecalculateFlowPathsForFlowSim(const std::string& topolo
         flow_to_path_map_[pair.first] = pair.second;
     }
     
-    std::cout << "[ROUTING] FlowSim paths pre-calculated successfully" << std::endl;
-    std::cout << "[ROUTING] Total flows: " << flow_to_path_map_.size() << std::endl;
-    
     return true;
 }
 

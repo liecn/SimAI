@@ -1,0 +1,7 @@
+File name, Expose DP comm, Expose DP_EP comm, Expose TP comm, Expose_EP_comm, Expose_PP_comm, bubble time, total comp, total exposed comm, Total time
+FlowSim_test, 0 (0.00%), 0 (0.00%), 6303 (85.00%), 0 (0.00%), 0 (0.00%), 0 (0.00%), 1112 (15.00%), 6303 (85.00%), 7415
+layer_name,FlowSim_test,fwd compute,wg compute,ig compute,fwd exposed comm,wg exposed comm,ig exposed comm,fwd total comm,algbw,busbw,wg total comm,algbw,busbw,ig total comm,algbw,busbw,workload finished at
+embedding_layer,FlowSim_test,556.000000,0.001000,0.001000,1264.308000,0.000000,0.000000,1264.308000,12.358540,23.172262,0.000000,-nan,0.000000,0.000000,-nan,0.000000,7415.499000
+embedding_layer,FlowSim_test,556.000000,0.001000,0.001000,5039.181000,0.000000,0.000000,5039.181000,12.402809,23.255268,0.000000,-nan,0.000000,0.000000,-nan,0.000000,7415.499000
+SUM,FlowSim_test,1112.000000,0.002000,0.002000,6303.489000,0.000000,0.000000,6303.489000,NONE,NONE,0.000000,NONE,NONE,0.000000,NONE,NONE
+total exposed comm,6303.495000,total comp,1112.004000,total time,7415.499000
