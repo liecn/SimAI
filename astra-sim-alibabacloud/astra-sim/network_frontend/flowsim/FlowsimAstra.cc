@@ -198,7 +198,7 @@ int main(int argc,char *argv[]) {
   }
 
   // Use GPU count from topology file (same as NS3)
-  int nodes_num = node_num - switch_num;  // Same as NS3: total nodes minus switches
+  int nodes_num = gpu_num;  // Same as NS3: total nodes minus switches
 
   // Create FlowSimNetwork and Sys instances
   std::vector<FlowSimNetWork *> networks;
