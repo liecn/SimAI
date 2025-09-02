@@ -5,7 +5,6 @@ astra-sim-alibabacloud/build/simai_flowsim/build/
 astra-sim-alibabacloud/astra-sim/system/routing/build/
 astra-sim-alibabacloud/extern/
 bin/
-results/
 test/log/
 *.log
 .cur*

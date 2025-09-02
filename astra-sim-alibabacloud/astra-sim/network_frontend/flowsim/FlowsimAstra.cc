@@ -31,9 +31,11 @@
 #include "Type.h"
 #include <tuple>
 #include <stdexcept>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 #define RESULT_PATH "./simai_flowsim_"
-#define WORKLOAD_PATH ""
+// WORKLOAD_PATH removed - using direct workload path like NS-3
 
 using namespace std;
 
@@ -55,23 +57,26 @@ struct user_param {
   int thread;
   string workload;
   string network_topo;
+  string result_dir;
   user_param() {
     thread = 1;
     workload = "";
     network_topo = "";
+    result_dir = "results/flowsim/";
   };
   ~user_param(){};
 };
 
 static int user_param_prase(int argc,char * argv[],struct user_param* user_param){
   int opt;
-  while ((opt = getopt(argc,argv,"ht:w:n:"))!=-1){
+  while ((opt = getopt(argc,argv,"ht:w:n:o:"))!=-1){
     switch (opt)
     {
     case 'h':
       std::cout<<"-t    number of threads,default 1"<<std::endl;
       std::cout<<"-w    workloads default none "<<std::endl;
       std::cout<<"-n    network topo"<<std::endl;
+      std::cout<<"-o    output/result directory (default: results/flowsim/)"<<std::endl;
       return 1;
     case 't':
       user_param->thread = stoi(optarg);
@@ -81,6 +86,13 @@ static int user_param_prase(int argc,char * argv[],struct user_param* user_param
       break;
     case 'n':
       user_param->network_topo = optarg;
+      break;
+    case 'o':
+      user_param->result_dir = optarg;
+      // Ensure the directory ends with a slash
+      if (user_param->result_dir.back() != '/') {
+        user_param->result_dir += '/';
+      }
       break;
     default:
       std::cerr<<"-h    help message"<<std::endl;
@@ -96,9 +108,17 @@ int main(int argc,char *argv[]) {
     return -1;
   }
   
+  // Create result directory once at startup
+  std::string mkdir_cmd = "mkdir -p " + user_param.result_dir;
+  int result = system(mkdir_cmd.c_str());
+  if (result != 0) {
+    std::cerr << "[FLOWSIM] Warning: Could not create result directory: " << user_param.result_dir << std::endl;
+  }
+  
   std::cout << "[FLOWSIM] Starting SimAI-FlowSim" << std::endl;
   std::cout << "[FLOWSIM] Workload: " << user_param.workload << std::endl;
   std::cout << "[FLOWSIM] Network: " << user_param.network_topo << std::endl;
+  std::cout << "[FLOWSIM] Results: " << user_param.result_dir << std::endl;
   
   // FlowSim always uses custom routing
   std::cout << "[CUSTOM ROUTING] Custom routing enabled via command line argument" << std::endl;
@@ -215,14 +235,14 @@ int main(int argc,char *argv[]) {
       {nodes_num},      // Use nodes_num for physical dimensions (same as NS3)
       {1},
       "",
-      WORKLOAD_PATH + user_param.workload,
-      1.0, // comm_scale (float)
+      user_param.workload,  // SYNCHRONIZED: Use direct workload path like NS-3
+      1,                    // SYNCHRONIZED: Use integer comm_scale like NS-3
       1,
       1,
       1,
       0,
-      RESULT_PATH,
-      "FlowSim_test",
+      user_param.result_dir,
+      "test1",             // SYNCHRONIZED: Use same test name as NS-3
       true,
       false,
       gpu_type,
@@ -235,11 +255,13 @@ int main(int argc,char *argv[]) {
     systems.push_back(system);
   }
   
+  // FlowSim will write FCT data to the current directory
+  
   // Initialize FlowSim AFTER routing framework is set up
   std::shared_ptr<EventQueue> event_queue = std::make_shared<EventQueue>();
   FlowSim::Init(event_queue, topology);
   
-  for (uint32_t i = 0; i < systems.size(); i++) {
+  for (int i = 0; i < nodes_num; i++) {  // SYNCHRONIZED: Use same loop pattern as NS-3
     systems[i]->workload->fire();
   }
   

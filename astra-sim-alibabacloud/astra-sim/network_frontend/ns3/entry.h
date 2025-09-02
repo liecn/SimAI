@@ -247,6 +247,6 @@ void qp_finish(FILE *fout, Ptr<RdmaQueuePair> q);
 
 void send_finish(FILE *fout, Ptr<RdmaQueuePair> q);
 
-int main1(string network_topo, string network_conf, bool use_custom_routing = false);
+int main1(string network_topo, string network_conf, bool use_custom_routing = false, string result_dir = "results/ns3/");
 
 #endif

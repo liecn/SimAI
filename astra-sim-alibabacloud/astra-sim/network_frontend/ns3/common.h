@@ -689,7 +689,7 @@ void SetConfig() {
   }
 }
 
-void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_finish)(FILE *, Ptr<RdmaQueuePair>)) {
+void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_finish)(FILE *, Ptr<RdmaQueuePair>), const std::string& result_dir = "results/ns3/") {
 
   topof.open(topology_file.c_str());
   flowf.open(flow_file.c_str());
@@ -903,9 +903,14 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
 		}
   }
 
+#define ENABLE_QP 1
 #if ENABLE_QP
-  FILE *fct_output = fopen(fct_output_file.c_str(), "w");
-  FILE *send_output = fopen(send_output_file.c_str(), "w");
+  // Create organized output file paths using the provided result directory
+  std::string ns3_fct_path = result_dir + "ns3_fct.txt";
+  std::string ns3_send_path = result_dir + "ns3_send.txt";
+  
+  FILE *fct_output = fopen(ns3_fct_path.c_str(), "w");
+  FILE *send_output = fopen(ns3_send_path.c_str(), "w");
   for (uint32_t i = 0; i < node_num; i++) {
     if (n.Get(i)->GetNodeType() == 0 || n.Get(i)->GetNodeType() == 2) { 
       Ptr<RdmaHw> rdmaHw = CreateObject<RdmaHw>();

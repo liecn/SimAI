@@ -5,6 +5,7 @@
 #include <set>
 #include <cmath> // Required for std::isfinite
 #include <algorithm> // Required for std::find
+#include <iomanip> // Required for std::fixed and std::setprecision
 
 std::shared_ptr<EventQueue> Topology::event_queue = nullptr;
 
@@ -68,25 +69,6 @@ void Topology::send(std::unique_ptr<Chunk> chunk) noexcept {
     add_chunk_to_links(chunk_ptr);
 }
 
-void Topology::send_with_batching(std::unique_ptr<Chunk> chunk) noexcept {
-    assert(chunk != nullptr);
-    
-    const auto current_time = event_queue->get_current_time();
-    
-    // Store chunk ownership
-    active_chunks_ptrs.push_back(std::move(chunk));
-    Chunk* chunk_ptr = active_chunks_ptrs.back().get();
-    
-    // Add to pending batch
-    pending_chunks_.push_back(chunk_ptr);
-
-    // If no batch processing event is scheduled, start a new batching window
-    if (batch_timeout_event_id_ == 0) {
-        last_batch_time_ = current_time;
-        uint64_t schedule_time = current_time + BATCH_TIMEOUT_NS;
-        batch_timeout_event_id_ = event_queue->schedule_event(schedule_time, batch_timeout_callback, this);
-    }
-}
 
 void Topology::connect(DeviceId src, DeviceId dest, Bandwidth bandwidth, Latency latency, bool bidirectional) noexcept {
     assert(0 <= src && src < devices_count);
@@ -120,12 +102,27 @@ void Topology::update_link_states() {
         std::pair<DeviceId, DeviceId> bottleneck_link;
 
         // 1) Locate link whose fair share is the minimum among all links
+        // DEBUG: Track bottleneck identification
+        static int bottleneck_debug_count = 0;
+        if (bottleneck_debug_count < 5) {
+            std::cerr << "[BOTTLENECK SEARCH] Round " << bottleneck_debug_count+1 << ":" << std::endl;
+        }
+        
         for (const auto& link_key : active_links) {
             double fair_rate = calculate_bottleneck_rate(link_key, fixed_chunks);
+            if (bottleneck_debug_count < 5) {
+                std::cerr << "  Link " << link_key.first << "->" << link_key.second 
+                          << " rate=" << fair_rate << (fair_rate < bottleneck_rate ? " <- NEW BOTTLENECK" : "") << std::endl;
+            }
             if (fair_rate < bottleneck_rate) {
                 bottleneck_rate = fair_rate;
                 bottleneck_link = link_key;
             }
+        }
+        if (bottleneck_debug_count < 5) {
+            std::cerr << "  FINAL BOTTLENECK: " << bottleneck_link.first << "->" << bottleneck_link.second 
+                      << " rate=" << bottleneck_rate << std::endl;
+            bottleneck_debug_count++;
         }
 
         // No progress – should not happen, but guard against division issues
@@ -137,6 +134,15 @@ void Topology::update_link_states() {
         for (Chunk* chunk : link_map[bottleneck_link]->active_chunks) {
             if (fixed_chunks.insert(chunk).second) { // newly inserted
                 chunk->set_rate(bottleneck_rate);
+                
+                // DEBUG: Show rate assignment for first few chunks
+                static int rate_debug_count = 0;
+                if (rate_debug_count < 10) {
+                    std::cerr << "[RATE ASSIGNMENT] Chunk " << rate_debug_count+1 
+                              << " on bottleneck link " << bottleneck_link.first << "->" << bottleneck_link.second
+                              << " assigned rate=" << bottleneck_rate << " bytes/ns" << std::endl;
+                    rate_debug_count++;
+                }
             }
         }
     }
@@ -152,9 +158,21 @@ double Topology::calculate_bottleneck_rate(const std::pair<DeviceId, DeviceId>& 
         if (fixed_chunks.find(chunk) == fixed_chunks.end()) {
             ++active_chunks;
         } else {
-            // This flow’s rate is already fixed; subtract its share.
+            // This flow's rate is already fixed; subtract its share.
             remaining_bandwidth -= chunk->get_rate();
         }
+    }
+
+    // DEBUG: Reduced rate calculation output
+    static int debug_count = 0;
+    
+    // DEBUG: Show key bottleneck updates only when active chunks change significantly
+    static int last_active_chunks = -1;
+    if (link.first == 144 && link.second == 152 && active_chunks != last_active_chunks && active_chunks > 0) {
+        std::cerr << "[BOTTLENECK] Link 144->152: " << active_chunks << " flows, rate=" 
+                  << std::fixed << std::setprecision(3) 
+                  << (active_chunks > 0 ? remaining_bandwidth / active_chunks : 0) << " Gbps" << std::endl;
+        last_active_chunks = active_chunks;
     }
 
     return active_chunks > 0 ? remaining_bandwidth / active_chunks : std::numeric_limits<double>::max();
@@ -185,6 +203,7 @@ double Topology::calculate_path_latency(Chunk* chunk) {
 }
 
 void Topology::add_chunk_to_links(Chunk* chunk) {
+    
     // Set topology reference for callback
     chunk->set_topology(this);
     
@@ -227,6 +246,9 @@ void Topology::associate_chunk_with_links(Chunk* chunk) {
     int hop_count = 0;
     auto it = route.begin();
     
+    // DEBUG: Track additions to bottleneck link
+    static int chunks_added_to_144_152 = 0;
+    
     while (it != route.end()) {
         auto src_device = (*it)->get_id();
         ++it;
@@ -238,7 +260,22 @@ void Topology::associate_chunk_with_links(Chunk* chunk) {
         
         // Add chunk to link's active chunks
         if (link_map.find(link_key) != link_map.end()) {
-            link_map[link_key]->active_chunks.push_back(chunk);
+            // DEBUG: Track bottleneck link before/after addition
+            if (src_device == 144 && dest_device == 152) {
+                int before_count = link_map[link_key]->active_chunks.size();
+                link_map[link_key]->active_chunks.push_back(chunk);
+                int after_count = link_map[link_key]->active_chunks.size();
+                
+                chunks_added_to_144_152++;
+                if (chunks_added_to_144_152 <= 10) {
+                    std::cerr << "[ADD #" << chunks_added_to_144_152 
+                              << "] Link 144->152: " << before_count << " -> " << after_count 
+                              << " flows (added: " << (after_count - before_count) << ")" << std::endl;
+                }
+            } else {
+                link_map[link_key]->active_chunks.push_back(chunk);
+            }
+            
             active_links.insert(link_key);
             
             // Track link for efficient removal
@@ -265,28 +302,12 @@ void Topology::remove_chunk_from_links(Chunk* chunk) {
             }
         }
     }
+    
+    // NOTE: Rate updates happen at batch level in post_batch_completion_callback(),
+    // not per individual completion for efficiency with massive NCCL flows
 }
 
-void Topology::chunk_completion_callback(void* arg) noexcept {
-    Chunk* chunk = static_cast<Chunk*>(arg);
-    Topology* topology = chunk->get_topology();
 
-    // Call ASTRA-Sim callback
-    chunk->invoke_callback();
-
-    // Remove this chunk from the simulation
-    topology->remove_chunk_from_links(chunk);
-    topology->active_chunks.remove(chunk);
-
-    // Schedule a single post-batch completion handler to process all remaining
-    // active flows only once for this event_time.
-    if (!topology->recalc_event_scheduled_ && !topology->active_chunks.empty()) {
-        topology->recalc_event_scheduled_ = true;
-        auto* topo_ptr = static_cast<void*>(topology);
-        uint64_t now = topology->event_queue->get_current_time();
-        topology->event_queue->schedule_event(now + 1, post_batch_completion_callback, topo_ptr);
-    }
-}
 
 // This callback is invoked once after all chunk completions that occurred at the
 // same simulated time. It updates remaining sizes, recalculates rates, and
@@ -296,6 +317,14 @@ void Topology::post_batch_completion_callback(void* arg) noexcept {
     topology->recalc_event_scheduled_ = false;
 
     const auto current_time = topology->event_queue->get_current_time();
+    
+    // BANDWIDTH LEAK DEBUG: Track rate recalculation after completions
+    static int recalc_count = 0;
+    if (++recalc_count <= 10) {
+        std::cerr << "[RECALC #" << recalc_count << "] Rate recalculation triggered at " 
+                  << current_time << "ns, active chunks: " << topology->active_chunks.size() 
+                  << ", flag reset to FALSE" << std::endl;
+    }
 
     // Update remaining sizes for all active chunks and cancel existing events
     for (Chunk* active_chunk : topology->active_chunks) {
@@ -321,6 +350,16 @@ void Topology::post_batch_completion_callback(void* arg) noexcept {
         double transmission_time = remaining_size / new_rate;
         double path_latency = topology->calculate_path_latency(active_chunk);
         uint64_t completion_time = current_time + std::max(1.0, transmission_time + path_latency);
+        
+        // DEBUG: Show completion calculation for first few chunks (reduced)
+        static int completion_debug_count = 0;
+        if (completion_debug_count < 3) {
+            std::cerr << "[CHUNK #" << (completion_debug_count+1) 
+                      << "] size=" << (int)(remaining_size/1024) << "KB, rate=" 
+                      << std::fixed << std::setprecision(1) << new_rate << "Gbps, time=" 
+                      << (completion_time/1000000.0) << "ms" << std::endl;
+            completion_debug_count++;
+        }
         auto* chunk_ptr = static_cast<void*>(active_chunk);
         int event_id = topology->event_queue->schedule_event(completion_time, chunk_completion_callback, chunk_ptr);
         active_chunk->set_completion_event_id(event_id);
@@ -341,7 +380,14 @@ void Topology::process_batch_of_chunks() {
     // Process all pending chunks as a batch
     const auto current_time = event_queue->get_current_time();
     
-    // Add all pending chunks to the simulation
+    // Process all pending chunks in this temporal batch
+    // DEBUG: Show temporal batch processing info (minimal)
+    static int batch_debug_count = 0;
+    if (++batch_debug_count <= 3) {
+        std::cerr << "[BATCH #" << batch_debug_count << "] " << pending_chunks_.size() 
+                  << " flows (active: " << active_chunks.size() << ")" << std::endl;
+    }
+    
     for (Chunk* chunk : pending_chunks_) {
         // Set topology reference and start time
         chunk->set_topology(this);
@@ -357,19 +403,16 @@ void Topology::process_batch_of_chunks() {
     // Calculate rates for all chunks
     update_link_states();
     
-    // Schedule completion events for all new chunks
-    for (Chunk* chunk : pending_chunks_) {
+    // Store chunks for completion event scheduling before clearing pending list
+    std::vector<Chunk*> newly_added_chunks = pending_chunks_;
+    
+    // Clear pending chunks since they're now active
+    pending_chunks_.clear();
+    
+    // Schedule completion events for all newly processed chunks
+    for (Chunk* chunk : newly_added_chunks) {
         double remaining_size = chunk->get_remaining_size();
         double rate = chunk->get_rate();
-        
-        // Consider flow finished if remaining size < 1 byte
-        if (remaining_size < 1.0) {
-            // Flow is complete - schedule immediate callback
-            auto* chunk_ptr = static_cast<void*>(chunk);
-            int event_id = event_queue->schedule_event(current_time + 1, chunk_completion_callback, chunk_ptr);
-            chunk->set_completion_event_id(event_id);
-            continue;
-        }
         
         // Prevent division by zero
         if (rate <= 0) {
@@ -395,3 +438,62 @@ void Topology::batch_timeout_callback(void* arg) noexcept {
     Topology* topology = static_cast<Topology*>(arg);
     topology->process_batch_of_chunks();
 }
+
+// RESTORED: Working temporal batching that gave correct ~3μs FCT results
+void Topology::send_with_batching(std::unique_ptr<Chunk> chunk) noexcept {
+    assert(chunk != nullptr);
+    
+    const auto current_time = event_queue->get_current_time();
+    
+    // Store chunk ownership
+    active_chunks_ptrs.push_back(std::move(chunk));
+    Chunk* chunk_ptr = active_chunks_ptrs.back().get();
+    
+    // Add to pending batch (temporal batching)
+    pending_chunks_.push_back(chunk_ptr);
+
+    // If no batch processing event is scheduled, start a new batching window
+    if (batch_timeout_event_id_ == 0) {
+        last_batch_time_ = current_time;
+        uint64_t schedule_time = current_time + BATCH_TIMEOUT_NS;
+        batch_timeout_event_id_ = event_queue->schedule_event(schedule_time, batch_timeout_callback, this);
+    }
+}
+
+// RESTORED: Original working chunk completion callback
+void Topology::chunk_completion_callback(void* arg) noexcept {
+    Chunk* chunk = static_cast<Chunk*>(arg);
+    Topology* topology = chunk->get_topology();
+
+    // Call ASTRA-Sim callback FIRST (this is critical!)
+    chunk->invoke_callback();
+
+    // Remove this chunk from the simulation
+    topology->remove_chunk_from_links(chunk);
+    topology->active_chunks.remove(chunk);  // Use .remove() not .erase() for std::list
+
+    // Schedule a single post-batch completion handler to process all remaining
+    // active flows only once for this event_time.
+    if (!topology->recalc_event_scheduled_ && !topology->active_chunks.empty()) {
+        topology->recalc_event_scheduled_ = true;
+        auto* topo_ptr = static_cast<void*>(topology);
+        uint64_t now = topology->event_queue->get_current_time();
+        
+        // BANDWIDTH LEAK DEBUG: Track why rate recalculations stop happening
+        static int recalc_schedule_count = 0;
+        if (++recalc_schedule_count <= 10) {
+            std::cerr << "[RECALC SCHEDULE #" << recalc_schedule_count << "] Scheduling rate recalc at " 
+                      << now << "ns, active chunks: " << topology->active_chunks.size() << std::endl;
+        }
+        
+        topology->event_queue->schedule_event(now, post_batch_completion_callback, topo_ptr);
+    } else if (topology->recalc_event_scheduled_) {
+        // DEBUG: Track when recalculations are skipped due to flag
+        static int skip_count = 0;
+        if (++skip_count <= 10) {
+            std::cerr << "[RECALC SKIP #" << skip_count << "] Rate recalc already scheduled, active chunks: " 
+                      << topology->active_chunks.size() << std::endl;
+        }
+    }
+}
+

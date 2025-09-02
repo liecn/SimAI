@@ -19,6 +19,7 @@
 #include"astra-sim/system/RecvPacketEventHadndlerData.hh"
 #include"astra-sim/system/MockNcclLog.h"
 #include"astra-sim/system/SharedBusStat.hh"
+#include <iomanip>
 
 // Global variable definitions needed for receiver-side event handling (like NS3)
 std::map<std::pair<std::pair<int, int>,int>, AstraSim::ncclFlowTag> receiver_pending_queue;
@@ -26,6 +27,7 @@ std::map<std::pair<int, std::pair<int, int>>, struct task1> expeRecvHash;
 std::map<std::pair<int, std::pair<int, int>>, int> recvHash;
 std::map<std::pair<int, int>, int64_t> nodeHash;
 std::map<std::pair<int, std::pair<int, int>>, struct task1> sentHash;
+std::map<std::pair<int, std::pair<int, int>>, uint64_t> flow_start_times; // Track flow start times
 extern int local_rank;
 
 // Global instance for callback access (simplified for single-node simulation)
@@ -38,6 +40,7 @@ struct FlowSimCallbackData {
     int dst;
     uint64_t count;
     AstraSim::ncclFlowTag flowTag;
+    uint64_t actual_completion_time;  // Store the scheduled completion time
 };
 
 // Forward declarations of static callbacks
@@ -89,8 +92,18 @@ int FlowSimNetWork::sim_send(
     static int send_count = 0;
     send_count++;
     if (send_count <= 5 || send_count % 10000 == 0) {
-        std::cout << "[FLOWSIM] SEND #" << send_count << " at time=" << FlowSim::Now() 
-                  << "ns: src=" << rank << " -> dst=" << dst << ", size=" << count 
+        // Apply same send latency adjustment as used in FlowSim::Send for accurate timing display
+        uint64_t send_latency_ns = 0;
+        const char* send_lat_env = std::getenv("AS_SEND_LAT");
+        if (send_lat_env) {
+            send_latency_ns = std::stoi(send_lat_env) * 1000;  // Convert μs to ns
+        }
+        
+        // Calculate group ID based on model_parallel_NPU_group=16
+        int src_group = rank / 16;
+        int dst_group = dst / 16;
+        std::cout << "[FLOWSIM] SEND #" << send_count << " at time=" << (FlowSim::Now() + send_latency_ns)
+                  << "ns: src=" << rank << " (group=" << src_group << ") -> dst=" << dst << " (group=" << dst_group << "), size=" << count 
                   << ", tag=" << tag << std::endl;
     }
     // Store callback using NS3's pattern
@@ -105,13 +118,23 @@ int FlowSimNetWork::sim_send(
     
     sentHash[make_pair(tag, make_pair(t.src, t.dest))] = t;
     
+    // Track flow start time for accurate FCT calculation (after send latency for fair NS-3 comparison)
+    uint64_t send_latency_ns = 0;
+    const char* send_lat_env = std::getenv("AS_SEND_LAT");
+    if (send_lat_env) {
+        send_latency_ns = std::stoi(send_lat_env) * 1000;  // Convert μs to ns
+    }
+    flow_start_times[make_pair(request->flowTag.tag_id, make_pair(rank, dst))] = FlowSim::Now() + send_latency_ns;
+    
     // Call FlowSim's network simulation
-    // Prepare callback data for sender completion
-    FlowSimCallbackData* completion_data = new FlowSimCallbackData{this, rank, dst, count, request->flowTag};
+    // Prepare callback data for sender completion  
+    FlowSimCallbackData* completion_data = new FlowSimCallbackData{this, rank, dst, count, request->flowTag, 0};
 
     // Prepare callback data for receiver event (immediate)
-    FlowSimCallbackData* receiver_data = new FlowSimCallbackData{this, rank, dst, count, request->flowTag};
+    FlowSimCallbackData* receiver_data = new FlowSimCallbackData{this, rank, dst, count, request->flowTag, 0};
 
+
+    
     // Invoke real FlowSim
     FlowSim::Send(rank, dst, count, tag, flowsim_completion_callback, completion_data);
 
@@ -124,6 +147,8 @@ int FlowSimNetWork::sim_send(
 // Static callback function for FlowSim completion
 static void flowsim_completion_callback(void* arg) {
     FlowSimCallbackData* data = static_cast<FlowSimCallbackData*>(arg);
+    // Record the actual completion time when callback is triggered
+    data->actual_completion_time = FlowSim::Now();
     data->network->notify_sender_sending_finished(data->src, data->dst, data->count, data->flowTag);
     delete data;
 }
@@ -176,6 +201,46 @@ void FlowSimNetWork::notify_receiver_packet_arrived(int sender_node, int receive
 void FlowSimNetWork::notify_sender_sending_finished(int sender_node, int receiver_node, uint64_t message_size, AstraSim::ncclFlowTag flowTag) {
     static int callback_count = 0;
     callback_count++;
+    
+    // Export per-flow FCT data to file (matching NS-3 format)
+    static FILE* fct_output_file = nullptr;
+    if (fct_output_file == nullptr) {
+        fct_output_file = fopen("results/flowsim/flowsim_fct.txt", "w");
+    }
+    
+    if (fct_output_file) {
+        // Use the recorded completion time from callback data
+        uint64_t completion_time = FlowSim::Now();  // This should be individual flow completion time
+        uint64_t start_time = 0;
+        uint64_t fct_ns = 0;
+        
+        // Look up actual start time
+        auto flow_key = make_pair(flowTag.tag_id, make_pair(sender_node, receiver_node));
+        auto start_time_it = flow_start_times.find(flow_key);
+        if (start_time_it != flow_start_times.end()) {
+            start_time = start_time_it->second;
+            fct_ns = completion_time - start_time;
+            
+            // DEBUG: Check if completion times are actually different (reduced)
+            if (callback_count <= 3) {
+                std::cerr << "[FCT #" << callback_count << "] " << sender_node << "->" << receiver_node
+                          << " FCT=" << std::fixed << std::setprecision(1) << (fct_ns/1000.0) << "μs" << std::endl;
+            }
+            
+            flow_start_times.erase(start_time_it);
+        } else {
+            // ERROR: This should not happen with correct key matching
+            std::cerr << "[FLOWSIM FCT ERROR] Flow start time not found for tag=" << flowTag.tag_id 
+                      << " src=" << sender_node << " dst=" << receiver_node << std::endl;
+            return; // Skip this FCT entry rather than output bad data
+        }
+        
+        // Match NS-3 format: src_node dst_node src_port dst_port msg_size start_time fct_ns standalone_fct
+        fprintf(fct_output_file, "%08x %08x %u %u %lu %lu %lu %lu\n", 
+                sender_node, receiver_node, flowTag.tag_id, 0, 
+                message_size, start_time, fct_ns, fct_ns);
+        fflush(fct_output_file);
+    }
     
     // Essential logging: First 5 callbacks and every 10,000th callback
     if (callback_count <= 5 || callback_count % 10000 == 0) {

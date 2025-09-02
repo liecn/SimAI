@@ -35,7 +35,7 @@ class Topology {
   // Original individual chunk send
   void send(std::unique_ptr<Chunk> chunk) noexcept;
   
-  // New batched send - groups chunks from collective operations
+  // Temporal batching flow management (public interface)  
   void send_with_batching(std::unique_ptr<Chunk> chunk) noexcept;
   
   [[nodiscard]] int get_npus_count() const noexcept;
@@ -66,7 +66,10 @@ class Topology {
   uint64_t last_batch_time_;                // When the current batch started
   int batch_timeout_event_id_;              // Event ID for batch timeout
   bool recalc_event_scheduled_ = false;     // Ensure single post-batch processing event
-  static constexpr uint64_t BATCH_TIMEOUT_NS = 1000; // 1 microseconds batching window
+  static constexpr uint64_t BATCH_TIMEOUT_NS = 5; // 5 nanoseconds batching window - targeting NS-3's ~3μs FCT
+  
+  // Batch-centric tracking for NCCL operations
+
 
   static std::shared_ptr<EventQueue> event_queue;
 

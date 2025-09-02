@@ -33,6 +33,8 @@
 #include <thread>
 #include <unistd.h>
 #include <vector>
+#include <sys/stat.h>
+#include <sys/types.h>
 #ifdef NS3_MTP
 #include "ns3/mtp-interface.h"
 #endif
@@ -41,7 +43,7 @@
 #include <mpi.h>
 #endif
 
-#define RESULT_PATH "./simai_ns3_"
+// RESULT_PATH will be set dynamically based on command line argument
 
 using namespace std;
 using namespace ns3;
@@ -111,9 +113,12 @@ public:
 
     // Match FlowSim: log first 5 sends and every 10,000th afterwards
     if (send_count <= 5 || send_count % 10000 == 0) {
+      // Calculate group ID based on model_parallel_NPU_group=16  
+      int src_group = rank / 16;
+      int dst_group = (dst + npu_offset) / 16;
       std::cout << "[NS3] SEND #" << send_count
                 << " at time=" << Simulator::Now().GetNanoSeconds() << "ns: src=" << rank
-                << " -> dst=" << (dst + npu_offset) << ", size=" << count << ", tag=" << tag
+                << " (group=" << src_group << ") -> dst=" << (dst + npu_offset) << " (group=" << dst_group << "), size=" << count << ", tag=" << tag
                 << std::endl;
     }
     
@@ -222,12 +227,14 @@ struct user_param {
   string workload;
   string network_topo;
   string network_conf;
+  string result_dir;
   bool use_custom_routing;
   user_param() {
     thread = 1;
     workload = "";
     network_topo = "";
     network_conf = "";
+    result_dir = "results/ns3/";
     use_custom_routing = false;
   };
   ~user_param(){};
@@ -235,7 +242,7 @@ struct user_param {
 
 static int user_param_prase(int argc,char * argv[],struct user_param* user_param){
   int opt;
-  while ((opt = getopt(argc,argv,"ht:w:g:s:n:c:r"))!=-1){
+  while ((opt = getopt(argc,argv,"ht:w:g:s:n:c:o:r"))!=-1){
     switch (opt)
     {
     case 'h':
@@ -244,6 +251,7 @@ static int user_param_prase(int argc,char * argv[],struct user_param* user_param
       std::cout<<"-w    workloads default none "<<std::endl;
       std::cout<<"-n    network topo"<<std::endl;
       std::cout<<"-c    network_conf"<<std::endl;
+      std::cout<<"-o    output/result directory (default: results/ns3/)"<<std::endl;
       std::cout<<"-r    use custom routing (default: false)"<<std::endl;
       return 1;
       break;
@@ -258,6 +266,13 @@ static int user_param_prase(int argc,char * argv[],struct user_param* user_param
       break;
     case 'c':
       user_param->network_conf = optarg;
+      break;
+    case 'o':
+      user_param->result_dir = optarg;
+      // Ensure the directory ends with a slash
+      if (user_param->result_dir.back() != '/') {
+        user_param->result_dir += '/';
+      }
       break;
     case 'r':
       user_param->use_custom_routing = true;
@@ -282,12 +297,20 @@ int main(int argc, char *argv[]) {
   MtpInterface::Enable(user_param.thread);
   #endif
   
+  // Create result directory once at startup
+  std::string mkdir_cmd = "mkdir -p " + user_param.result_dir;
+  int result = system(mkdir_cmd.c_str());
+  if (result != 0) {
+    std::cerr << "[NS3] Warning: Could not create result directory: " << user_param.result_dir << std::endl;
+  }
+  
   // Add initial setup messages to match FlowSim
   std::cout << "[NS3] Starting SimAI-NS3" << std::endl;
   std::cout << "[NS3] Workload: " << user_param.workload << std::endl;
   std::cout << "[NS3] Network: " << user_param.network_topo << std::endl;
+  std::cout << "[NS3] Results: " << user_param.result_dir << std::endl;
   
-  main1(user_param.network_topo,user_param.network_conf,user_param.use_custom_routing);
+  main1(user_param.network_topo,user_param.network_conf,user_param.use_custom_routing,user_param.result_dir);
   int nodes_num = node_num - switch_num;
   int gpu_num = node_num - nvswitch_num - switch_num;
 
@@ -330,7 +353,7 @@ int main(int argc, char *argv[]) {
         1,          
         1,
         0,                 
-        RESULT_PATH, 
+        user_param.result_dir, 
         "test1",            
         true,               
         false,               
@@ -519,7 +542,7 @@ void send_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
   notify_sender_sending_finished(sid, did, all_sent_chunksize, flowTag);
 }
 
-int main1(string network_topo,string network_conf, bool use_custom_routing) {
+int main1(string network_topo,string network_conf, bool use_custom_routing, string result_dir) {
   // Set random seed BEFORE any other NS3 operations for maximum determinism
   Config::SetGlobal("RngSeed", UintegerValue(12345));
   Config::SetGlobal("RngRun", UintegerValue(1));
@@ -539,7 +562,7 @@ int main1(string network_topo,string network_conf, bool use_custom_routing) {
     cout << "[CUSTOM ROUTING] Using default NS3 ECMP routing" << endl;
   }
   
-  SetupNetwork(qp_finish,send_finish);
+  SetupNetwork(qp_finish,send_finish,result_dir);
 
   fflush(stdout);
   NS_LOG_INFO("Run Simulation.");

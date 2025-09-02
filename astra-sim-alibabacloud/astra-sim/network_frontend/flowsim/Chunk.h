@@ -53,6 +53,8 @@ class Chunk {
   // Methods for efficient link management
   void add_active_link_key(const std::pair<DeviceId, DeviceId>& link_key) noexcept;
   [[nodiscard]] const std::vector<std::pair<DeviceId, DeviceId>>& get_active_link_keys() const noexcept;
+  
+
 
  private:
   ChunkSize chunk_size;
