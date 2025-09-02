@@ -28,24 +28,84 @@ std::map<std::pair<int, std::pair<int, int>>, int> recvHash;
 std::map<std::pair<int, int>, int64_t> nodeHash;
 std::map<std::pair<int, std::pair<int, int>>, struct task1> sentHash;
 std::map<std::pair<int, std::pair<int, int>>, uint64_t> flow_start_times; // Track flow start times
+
+// COPY NS-3's EXACT BATCH DEPENDENCY COUNTERS (from entry.h lines 71-72)
+std::map<std::pair<int,std::pair<int,int>>,int> waiting_to_sent_callback;  
+std::map<std::pair<int,std::pair<int,int>>,int> waiting_to_notify_receiver;
+
+
 extern int local_rank;
+
+// FlowSim callback data structure 
+struct FlowSimCallbackData {
+    FlowSimNetWork* network;
+    int src;
+    int dst; 
+    uint64_t count;
+    AstraSim::ncclFlowTag flowTag;
+    uint64_t actual_completion_time;
+    FlowSimCallbackData* receiver_data = nullptr; // For chaining receiver callback
+};
+
+// DEPENDENCY CHECKING WITH SAFETY CHECKS AND CORRUPTION DETECTION
+bool is_sending_finished(int src, int dst, AstraSim::ncclFlowTag flowTag) {
+    int tag_id = flowTag.current_flow_id;
+    auto key = std::make_pair(tag_id, std::make_pair(src, dst));
+    
+    auto it = waiting_to_sent_callback.find(key);
+    if (it != waiting_to_sent_callback.end()) {
+        // SAFETY CHECK: Prevent underflow corruption
+        if (it->second <= 0) {
+            std::cerr << "[DEPENDENCY ERROR] Sender counter already at " << it->second 
+                      << " for tag=" << tag_id << " src=" << src << " dst=" << dst 
+                      << " at time=" << FlowSim::Now() << "ns" << std::endl;
+            waiting_to_sent_callback.erase(it);
+            return true; // Force completion to avoid deadlock
+        }
+        
+        // Decrement counter
+        it->second--;
+        
+
+        
+        if (it->second == 0) {
+            waiting_to_sent_callback.erase(it);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool is_receive_finished(int src, int dst, AstraSim::ncclFlowTag flowTag) {
+    int tag_id = flowTag.current_flow_id;
+    auto key = std::make_pair(tag_id, std::make_pair(src, dst));
+    
+    auto it = waiting_to_notify_receiver.find(key);
+    if (it != waiting_to_notify_receiver.end()) {
+        // Prevent underflow corruption  
+        if (it->second <= 0) {
+            waiting_to_notify_receiver.erase(it);
+            return true; // Force completion
+        }
+        
+        // Decrement counter
+        it->second--;
+        
+        if (it->second == 0) {
+            waiting_to_notify_receiver.erase(it);
+            return true;
+        }
+    }
+    return false;
+}
 
 // Global instance for callback access (simplified for single-node simulation)
 static FlowSimNetWork* global_flowsim_network = nullptr;
 
-// Callback data structure for FlowSim completion (must appear before sim_send)
-struct FlowSimCallbackData {
-    FlowSimNetWork* network;
-    int src;
-    int dst;
-    uint64_t count;
-    AstraSim::ncclFlowTag flowTag;
-    uint64_t actual_completion_time;  // Store the scheduled completion time
-};
+// (FlowSimCallbackData struct already defined above with receiver_data field)
 
 // Forward declarations of static callbacks
 static void flowsim_completion_callback(void* arg);
-static void flowsim_receiver_callback(void* arg);
 
 FlowSimNetWork::FlowSimNetWork(int _local_rank) : AstraNetworkAPI(_local_rank) {
     this->npu_offset = 0;
@@ -99,12 +159,7 @@ int FlowSimNetWork::sim_send(
             send_latency_ns = std::stoi(send_lat_env) * 1000;  // Convert μs to ns
         }
         
-        // Calculate group ID based on model_parallel_NPU_group=16
-        int src_group = rank / 16;
-        int dst_group = dst / 16;
-        std::cout << "[FLOWSIM] SEND #" << send_count << " at time=" << (FlowSim::Now() + send_latency_ns)
-                  << "ns: src=" << rank << " (group=" << src_group << ") -> dst=" << dst << " (group=" << dst_group << "), size=" << count 
-                  << ", tag=" << tag << std::endl;
+
     }
     // Store callback using NS3's pattern
     dst += npu_offset;
@@ -126,37 +181,60 @@ int FlowSimNetWork::sim_send(
     }
     flow_start_times[make_pair(request->flowTag.tag_id, make_pair(rank, dst))] = FlowSim::Now() + send_latency_ns;
     
-    // Call FlowSim's network simulation
+    // IMPLEMENT NS-3's EXACT DEPENDENCY LOGIC: Use completion counters and realistic transmission delays
+    
     // Prepare callback data for sender completion  
     FlowSimCallbackData* completion_data = new FlowSimCallbackData{this, rank, dst, count, request->flowTag, 0};
 
-    // Prepare callback data for receiver event (immediate)
+    // Prepare callback data for receiver event
     FlowSimCallbackData* receiver_data = new FlowSimCallbackData{this, rank, dst, count, request->flowTag, 0};
 
-
+    // COPY NS-3's EXACT DEPENDENCY COUNTER LOGIC (from SendFlow lines 156-157)
+    // This creates batch dependencies - flows won't complete until all in batch finish
+    waiting_to_sent_callback[std::make_pair(request->flowTag.current_flow_id, std::make_pair(rank, dst))]++;
+    waiting_to_notify_receiver[std::make_pair(request->flowTag.current_flow_id, std::make_pair(rank, dst))]++;
     
-    // Invoke real FlowSim
+    // CRITICAL FIX: Store receiver data in completion data so receiver notification happens AFTER completion
+    completion_data->receiver_data = receiver_data;
+    
+    // FlowSim Send creates the flow - completion_callback triggers when sender completes
     FlowSim::Send(rank, dst, count, tag, flowsim_completion_callback, completion_data);
-
-    // Schedule receiver event at the same simulated time 0ns offset
-    FlowSim::Schedule(0, flowsim_receiver_callback, receiver_data);
     
     return 0;
 }
 
+
+
 // Static callback function for FlowSim completion
 static void flowsim_completion_callback(void* arg) {
     FlowSimCallbackData* data = static_cast<FlowSimCallbackData*>(arg);
+    
     // Record the actual completion time when callback is triggered
     data->actual_completion_time = FlowSim::Now();
-    data->network->notify_sender_sending_finished(data->src, data->dst, data->count, data->flowTag);
+    
+    // CRITICAL FIX: Handle both sender and receiver notifications in proper sequence
+    // 1. Check if sending is finished and notify sender
+    if (is_sending_finished(data->src, data->dst, data->flowTag)) {
+        data->network->notify_sender_sending_finished(data->src, data->dst, data->count, data->flowTag);
+    }
+    
+    // 2. Check if receiving is finished and notify receiver (triggers NCCL dependency chain)
+    if (data->receiver_data && is_receive_finished(data->src, data->dst, data->flowTag)) {
+        data->network->notify_receiver_packet_arrived(data->src, data->dst, data->count, data->flowTag);
+        delete data->receiver_data;  // Clean up receiver data
+    }
+    
     delete data;
 }
 
 // Static callback function for FlowSim receiver events
 static void flowsim_receiver_callback(void* arg) {
     FlowSimCallbackData* data = static_cast<FlowSimCallbackData*>(arg);
-    data->network->notify_receiver_packet_arrived(data->src, data->dst, data->count, data->flowTag);
+    
+    // COPY NS-3's EXACT DEPENDENCY LOGIC: Only notify receiver if all flows in batch are ready
+    if (is_receive_finished(data->src, data->dst, data->flowTag)) {
+        data->network->notify_receiver_packet_arrived(data->src, data->dst, data->count, data->flowTag);
+    }
     delete data;
 }
 
@@ -221,12 +299,6 @@ void FlowSimNetWork::notify_sender_sending_finished(int sender_node, int receive
             start_time = start_time_it->second;
             fct_ns = completion_time - start_time;
             
-            // DEBUG: Check if completion times are actually different (reduced)
-            if (callback_count <= 3) {
-                std::cerr << "[FCT #" << callback_count << "] " << sender_node << "->" << receiver_node
-                          << " FCT=" << std::fixed << std::setprecision(1) << (fct_ns/1000.0) << "μs" << std::endl;
-            }
-            
             flow_start_times.erase(start_time_it);
         } else {
             // ERROR: This should not happen with correct key matching
@@ -242,12 +314,7 @@ void FlowSimNetWork::notify_sender_sending_finished(int sender_node, int receive
         fflush(fct_output_file);
     }
     
-    // Essential logging: First 5 callbacks and every 10,000th callback
-    if (callback_count <= 5 || callback_count % 10000 == 0) {
-        std::cout << "[FLOWSIM] CALLBACK #" << callback_count << " at time=" << FlowSim::Now() 
-                  << "ns: src=" << sender_node << " -> dst=" << receiver_node << ", size=" << message_size 
-                  << ", tag=" << flowTag.tag_id << std::endl;
-    }
+
     
     int tag = flowTag.tag_id;        
     

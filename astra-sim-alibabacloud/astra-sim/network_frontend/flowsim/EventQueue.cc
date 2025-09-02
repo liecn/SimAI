@@ -26,8 +26,11 @@ void EventQueue::proceed() noexcept {
   // Check the validity and update current time
   current_time = std::max(current_time, current_event_list.get_event_time());
 
-  // Invoke events - use the original invoke_events() method
-  current_event_list.invoke_events();
+  // CRITICAL FIX: Process events sequentially like NS-3 instead of all at once
+  // This creates natural dependencies between flows instead of parallel processing
+  while (!current_event_list.empty()) {
+    current_event_list.invoke_event();  // Process ONE event at a time
+  }
 
   // Drop processed event list
   event_queue.pop_front();
