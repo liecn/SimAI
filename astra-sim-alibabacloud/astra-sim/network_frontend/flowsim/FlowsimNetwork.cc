@@ -177,14 +177,12 @@ int FlowSimNetWork::sim_send(
     static int send_count = 0;
     send_count++;
     if (send_count <= 5 || send_count % 10000 == 0) {
-        // Apply same send latency adjustment as used in FlowSim::Send for accurate timing display
-        uint64_t send_latency_ns = 0;
-        const char* send_lat_env = std::getenv("AS_SEND_LAT");
-        if (send_lat_env) {
-            send_latency_ns = std::stoi(send_lat_env) * 1000;  // Convert μs to ns
-        }
-        
-
+        // CRITICAL FIX: Log at current time (before delay) to match NS3 exactly
+        uint64_t current_time = FlowSim::Now();
+        std::cout << "[FLOWSIM] SEND #" << send_count << " at time=" << current_time << "ns: "
+                  << "src=" << rank << " (group=" << (rank / 16) << ") -> "
+                  << "dst=" << dst << " (group=" << (dst / 16) << "), "
+                  << "size=" << count << ", tag=" << request->flowTag.tag_id << std::endl;
     }
     // Store callback using NS3's pattern
     dst += npu_offset;
@@ -230,12 +228,15 @@ int FlowSimNetWork::sim_send(
     }
     send_lat *= 1000;  // Convert μs to ns, exactly like NS3
 
+    // CRITICAL FIX: Match NS3's exact logging timing
+    // NS3 logs SEND time BEFORE applying send_lat delay, then schedules the actual flow
+    // Note: send_count is already declared at the top of this function
+    
     // Schedule the send with delay, matching NS3's appCon.Start(Time(send_lat))
     completion_data->receiver_data = receiver_data; // receiver gated on completion
     completion_data->start_time = start + send_lat;  // Record actual start time after delay
     completion_data->msg_handler = msg_handler;
     completion_data->fun_arg = fun_arg;
-    // Send with delay (no logging needed for performance)
     
     // Schedule FlowSim::Send with the same delay as NS3
     FlowSim::Schedule(send_lat, [](void* arg) {
@@ -244,16 +245,6 @@ int FlowSimNetWork::sim_send(
         uint64_t actual_start = FlowSim::Now();
         auto flow_key = std::make_tuple(data->flowTag.tag_id, data->flowTag.current_flow_id, data->src, data->dst);
         flow_start_times[flow_key] = actual_start;  // Update with actual start time
-        
-        // Add SEND logging to match NS3 pattern (first 5 + every 10000th)
-        static int send_count = 0;
-        send_count++;
-        if (send_count <= 5 || send_count % 10000 == 0) {
-            std::cout << "[FLOWSIM] SEND #" << send_count << " at time=" << actual_start << "ns: "
-                      << "src=" << data->src << " (group=" << (data->src / 16) << ") -> "
-                      << "dst=" << data->dst << " (group=" << (data->dst / 16) << "), "
-                      << "size=" << data->count << ", tag=" << data->flowTag.tag_id << std::endl;
-        }
         
         FlowSim::Send(data->src, data->dst, data->count, data->flowTag.tag_id, flowsim_completion_callback, data);
     }, completion_data);
