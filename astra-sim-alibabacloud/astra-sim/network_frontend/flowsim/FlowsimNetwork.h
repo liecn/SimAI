@@ -40,9 +40,6 @@ struct task1 {
 class FlowSimNetWork: public AstraSim::AstraNetworkAPI {
 private:
   int npu_offset;
-  
-  // Copy NS3's sentHash pattern for callback storage
-  std::map<std::pair<int, std::pair<int, int>>, task1> sentHash;
 
 public:
     FlowSimNetWork(int _local_rank);

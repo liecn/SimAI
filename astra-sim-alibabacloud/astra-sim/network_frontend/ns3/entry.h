@@ -50,6 +50,14 @@
 using namespace ns3;
 using namespace std;
 
+// Concise dependency tracing controls
+static bool ns3_trace_deps = [](){
+  const char* v = std::getenv("NS3_TRACE_DEPS");
+  return v && std::strcmp(v, "0") != 0;
+}();
+static long ns3_log_dep_send_cnt = 0;
+static long ns3_log_dep_recv_cnt = 0;
+
 
 std::map<std::pair<std::pair<int, int>,int>, AstraSim::ncclFlowTag> receiver_pending_queue;
 
@@ -74,13 +82,23 @@ map<std::pair<int,std::pair<int,int>>,uint64_t>received_chunksize;
 map<std::pair<int,std::pair<int,int>>,uint64_t>sent_chunksize;  
 bool is_sending_finished(int src,int dst,AstraSim::ncclFlowTag flowTag){
   int tag_id = flowTag.current_flow_id;
-  if (waiting_to_sent_callback.count(
-          std::make_pair(tag_id, std::make_pair(src, dst)))) {
-    if (--waiting_to_sent_callback[std::make_pair(
-            tag_id, std::make_pair(src, dst))] == 0) {
-      waiting_to_sent_callback.erase(
-          std::make_pair(tag_id, std::make_pair(src, dst)));
+  auto key = std::make_pair(tag_id, std::make_pair(src, dst));
+  if (waiting_to_sent_callback.count(key)) {
+    if (++ns3_log_dep_send_cnt <= 10 || (ns3_log_dep_send_cnt % 5000 == 0 && ns3_trace_deps)) {
+      std::cout << "[NS3] DEP SEND-DEC before cur_id=" << tag_id << " src=" << src << " dst=" << dst
+                << " val=" << waiting_to_sent_callback[key] << " time=" << Simulator::Now().GetNanoSeconds() << "ns" << std::endl;
+    }
+    if (--waiting_to_sent_callback[key] == 0) {
+      waiting_to_sent_callback.erase(key);
+      if (ns3_log_dep_send_cnt <= 10 || (ns3_log_dep_send_cnt % 5000 == 0 && ns3_trace_deps)) {
+        std::cout << "[NS3] DEP SEND-ZERO cur_id=" << tag_id << " src=" << src << " dst=" << dst << std::endl;
+      }
       return true;
+    } else {
+      if (ns3_log_dep_send_cnt <= 10 || (ns3_log_dep_send_cnt % 5000 == 0 && ns3_trace_deps)) {
+        std::cout << "[NS3] DEP SEND-DEC after  cur_id=" << tag_id << " src=" << src << " dst=" << dst
+                  << " val=" << waiting_to_sent_callback[key] << std::endl;
+      }
     }
   }
   return false;
@@ -88,17 +106,23 @@ bool is_sending_finished(int src,int dst,AstraSim::ncclFlowTag flowTag){
 
 bool is_receive_finished(int src,int dst,AstraSim::ncclFlowTag flowTag){
   int tag_id = flowTag.current_flow_id;
-  map<std::pair<int,std::pair<int,int>>,int>::iterator it;
-  MockNcclLog* NcclLog = MockNcclLog::getInstance();
-  if (waiting_to_notify_receiver.count(
-          std::make_pair(tag_id, std::make_pair(src, dst)))) {
-    NcclLog->writeLog(NcclLogLevel::DEBUG," is_receive_finished waiting_to_notify_receiver  tag_id  %d src  %d dst  %d count  %d",tag_id,src,dst,waiting_to_notify_receiver[std::make_pair(
-                     tag_id, std::make_pair(src, dst))]);
-    if (--waiting_to_notify_receiver[std::make_pair(
-            tag_id, std::make_pair(src, dst))] == 0) {
-      waiting_to_notify_receiver.erase(
-          std::make_pair(tag_id, std::make_pair(src, dst)));
+  auto key = std::make_pair(tag_id, std::make_pair(src, dst));
+  if (waiting_to_notify_receiver.count(key)) {
+    if (++ns3_log_dep_recv_cnt <= 10 || (ns3_log_dep_recv_cnt % 5000 == 0 && ns3_trace_deps)) {
+      std::cout << "[NS3] DEP RECV-DEC before cur_id=" << tag_id << " src=" << src << " dst=" << dst
+                << " val=" << waiting_to_notify_receiver[key] << " time=" << Simulator::Now().GetNanoSeconds() << "ns" << std::endl;
+    }
+    if (--waiting_to_notify_receiver[key] == 0) {
+      waiting_to_notify_receiver.erase(key);
+      if (ns3_log_dep_recv_cnt <= 10 || (ns3_log_dep_recv_cnt % 5000 == 0 && ns3_trace_deps)) {
+        std::cout << "[NS3] DEP RECV-ZERO cur_id=" << tag_id << " src=" << src << " dst=" << dst << std::endl;
+      }
       return true;
+    } else {
+      if (ns3_log_dep_recv_cnt <= 10 || (ns3_log_dep_recv_cnt % 5000 == 0 && ns3_trace_deps)) {
+        std::cout << "[NS3] DEP RECV-DEC after  cur_id=" << tag_id << " src=" << src << " dst=" << dst
+                  << " val=" << waiting_to_notify_receiver[key] << std::endl;
+      }
     }
   }
   return false;
@@ -153,8 +177,15 @@ void SendFlow(int src, int dst, uint64_t maxPacketCount,
     #endif
     ApplicationContainer appCon = clientHelper.Install(n.Get(src));
     appCon.Start(Time(send_lat));
-    waiting_to_sent_callback[std::make_pair(request->flowTag.current_flow_id,std::make_pair(src,dst))]++;
-    waiting_to_notify_receiver[std::make_pair(request->flowTag.current_flow_id,std::make_pair(src,dst))]++;
+    auto dep_key = std::make_pair(request->flowTag.current_flow_id,std::make_pair(src,dst));
+    waiting_to_sent_callback[dep_key]++;
+    waiting_to_notify_receiver[dep_key]++;
+    if (++ns3_log_dep_send_cnt <= 10 || (ns3_log_dep_send_cnt % 5000 == 0 && ns3_trace_deps)) {
+      std::cout << "[NS3] COUNTER INIT cur_id=" << request->flowTag.current_flow_id << " src=" << src << " dst=" << dst
+                << " send_cnt=" << waiting_to_sent_callback[dep_key]
+                << " recv_cnt=" << waiting_to_notify_receiver[dep_key]
+                << std::endl;
+    }
     #ifdef NS3_MTP
     cs.ExitSection();
     #endif
