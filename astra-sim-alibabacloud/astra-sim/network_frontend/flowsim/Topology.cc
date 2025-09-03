@@ -129,18 +129,18 @@ void Topology::update_link_states() {
 double Topology::calculate_bottleneck_rate(const std::pair<DeviceId, DeviceId>& link,
                                            const std::set<Chunk*>& fixed_chunks) {
     double remaining_bandwidth = link_map[link]->get_bandwidth();
-    int active_chunks = 0;
+    int unfixed_chunks_count = 0;  // Fixed: renamed to avoid variable shadowing
 
     for (Chunk* chunk : link_map[link]->active_chunks) {
         if (fixed_chunks.find(chunk) == fixed_chunks.end()) {
-            ++active_chunks;
+            ++unfixed_chunks_count;  // Fixed: use the renamed variable
         } else {
             // This flow's rate is already fixed; subtract its share.
             remaining_bandwidth -= chunk->get_rate();
         }
     }
 
-    return active_chunks > 0 ? remaining_bandwidth / active_chunks : std::numeric_limits<double>::max();
+    return unfixed_chunks_count > 0 ? remaining_bandwidth / unfixed_chunks_count : std::numeric_limits<double>::max();
 }
 
 double Topology::calculate_path_latency(Chunk* chunk) {
