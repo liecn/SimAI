@@ -344,7 +344,7 @@ void Topology::process_batch_of_chunks() {
             rate = 1.0;
         }
         
-        // Calculate completion time
+        // Calculate completion time with small timing variation to mimic NS3's natural staggering
         double transmission_time = remaining_size / rate;
         double path_latency = calculate_path_latency(chunk);
         uint64_t completion_time = current_time + std::max(1.0, transmission_time + path_latency);

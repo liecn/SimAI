@@ -66,7 +66,7 @@ class Topology {
   uint64_t last_batch_time_;                // When the current batch started
   int batch_timeout_event_id_;              // Event ID for batch timeout
   bool recalc_event_scheduled_ = false;     // Ensure single post-batch processing event
-  static constexpr uint64_t BATCH_TIMEOUT_NS = 0; // process batches immediately (no artificial spacing)
+  static constexpr uint64_t BATCH_TIMEOUT_NS = 1; // minimal batching with individual flow timing variation
   
   // Batch-centric tracking for NCCL operations
 

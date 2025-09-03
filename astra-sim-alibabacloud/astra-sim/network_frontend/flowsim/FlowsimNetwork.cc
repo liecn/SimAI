@@ -54,10 +54,7 @@ static long log_hash_cnt = 0;
 // FCT summary counter
 static uint64_t g_fct_lines_written = 0;
 
-// Batch-level gating: track outstanding sends per tag (batch)
-static std::map<int,long> g_tag_outstanding_sends;
-// Store one representative handler per tag to trigger workload continuation at batch end
-static std::map<int, task1> g_tag_handler;
+// NS3-style: no batch-level gating, individual flow handlers trigger workload continuation
 
 
 extern int local_rank;
@@ -226,10 +223,6 @@ int FlowSimNetWork::sim_send(
     // Store using NS3 key (tag_id, (src,dst))
     auto sh_key = make_pair(request->flowTag.tag_id, make_pair(t.src, t.dest));
     sentHash[sh_key] = t;
-    // Record representative handler for this tag (once)
-    if (g_tag_handler.find(request->flowTag.tag_id) == g_tag_handler.end()) {
-        g_tag_handler[request->flowTag.tag_id] = t;
-    }
     if (++log_store_cnt <= 10 || (log_store_cnt % 5000 == 0 && fs_trace_deps)) {
         std::cout << "[STORE] tag_id=" << request->flowTag.tag_id 
                   << " cur_id=" << request->flowTag.current_flow_id
@@ -240,9 +233,8 @@ int FlowSimNetWork::sim_send(
                   << ",src=" << t.src << ",dst=" << t.dest << ") cur=" << request->flowTag.current_flow_id << std::endl;
     }
     
-    // Track flow start time exactly when the chunk is created/sent
+    // Track initial request time (will be updated to actual start time after delay)
     uint64_t start = FlowSim::Now();
-    flow_start_times[std::make_tuple(request->flowTag.tag_id, request->flowTag.current_flow_id, rank, dst)] = start;
     
     // IMPLEMENT NS-3's EXACT DEPENDENCY LOGIC: Use completion counters and realistic transmission delays
     
@@ -257,8 +249,6 @@ int FlowSimNetWork::sim_send(
     auto dep_key = std::make_pair(dep_cur_id, std::make_pair(rank, dst));
     waiting_to_sent_callback[dep_key]++;
     waiting_to_notify_receiver[dep_key]++;
-    // Increment batch (tag) outstanding send counter once per send
-    g_tag_outstanding_sends[request->flowTag.tag_id]++;
     if (++log_counter_init_cnt <= 10 || (log_counter_init_cnt % 5000 == 0 && fs_trace_deps)) {
         std::cout << "[COUNTER INIT] cur_id=" << dep_cur_id << " src=" << rank << " dst=" << dst
                   << " send_cnt=" << waiting_to_sent_callback[dep_key]
@@ -266,17 +256,40 @@ int FlowSimNetWork::sim_send(
                   << std::endl;
     }
 
-    // Send immediately; completion will gate AstraSim callback via counters
+    // Apply send latency delay like NS3 does
+    int send_lat = 3;  // Default 6μs like NS3
+    const char* send_lat_env = std::getenv("AS_SEND_LAT");
+    if (send_lat_env) {
+        try {
+            send_lat = std::stoi(send_lat_env);
+        } catch (const std::invalid_argument& e) {
+            std::cerr << "[FLOWSIM] AS_SEND_LAT parse error" << std::endl;
+            send_lat = 3;  // fallback to default
+        }
+    }
+    send_lat *= 1000;  // Convert μs to ns, exactly like NS3
+
+    // Schedule the send with delay, matching NS3's appCon.Start(Time(send_lat))
     completion_data->receiver_data = receiver_data; // receiver gated on completion
-    completion_data->start_time = start;
+    completion_data->start_time = start + send_lat;  // Record actual start time after delay
     completion_data->msg_handler = msg_handler;
     completion_data->fun_arg = fun_arg;
     uint64_t now = FlowSim::Now();
     if (++log_send_cnt <= 10 || (log_send_cnt % 5000 == 0 && fs_trace_deps)) {
         std::cout << "[SEND CALL] time=" << now << "ns src=" << rank << " dst=" << dst
-                  << " size=" << count << " tag=" << tag << std::endl;
+                  << " size=" << count << " tag=" << tag << " delay=" << send_lat << "ns" << std::endl;
     }
-    FlowSim::Send(rank, dst, count, tag, flowsim_completion_callback, completion_data);
+    
+    // Schedule FlowSim::Send with the same delay as NS3
+    FlowSim::Schedule(send_lat, [](void* arg) {
+        FlowSimCallbackData* data = static_cast<FlowSimCallbackData*>(arg);
+        // Update flow start time to actual send time (after delay)
+        uint64_t actual_start = FlowSim::Now();
+        auto flow_key = std::make_tuple(data->flowTag.tag_id, data->flowTag.current_flow_id, data->src, data->dst);
+        flow_start_times[flow_key] = actual_start;  // Update with actual start time
+        
+        FlowSim::Send(data->src, data->dst, data->count, data->flowTag.tag_id, flowsim_completion_callback, data);
+    }, completion_data);
     
     return 0;
 }
@@ -294,33 +307,17 @@ static void flowsim_completion_callback(void* arg) {
     // 1. Check if sending is finished and notify sender
     bool sender_done = is_sending_finished(data->src, data->dst, data->flowTag);
     if (sender_done) {
-        // Write FCT and sender-side accounting
+        // Write FCT and sender-side accounting, trigger workload continuation per flow (NS3-style)
         data->network->notify_sender_sending_finished(data->src, data->dst, data->count, data->flowTag);
-        // Decrement batch outstanding sends and only trigger workload continuation when the whole batch completes
-        int tag = data->flowTag.tag_id;
-        auto it = g_tag_outstanding_sends.find(tag);
-        if (it != g_tag_outstanding_sends.end()) {
-            it->second--;
-            if (it->second == 0) {
-                g_tag_outstanding_sends.erase(it);
-                if (++log_handler_cnt <= 20 || (log_handler_cnt % 5000 == 0 && fs_trace_deps)) {
-                    std::cout << "[BATCH DONE] tag_id=" << tag << " time=" << FlowSim::Now() << "ns" << std::endl;
-                }
-                // Trigger the stored representative handler for this tag
-                auto h = g_tag_handler.find(tag);
-                if (h != g_tag_handler.end()) {
-                    task1 tt = h->second;
-                    tt.msg_handler(tt.fun_arg);
-                }
-            }
-        }
     }
     
     // 2. Check if receiving is finished and notify receiver (triggers NCCL dependency chain)
-    bool receiver_done = (data->receiver_data && is_receive_finished(data->src, data->dst, data->flowTag));
+    bool receiver_done = is_receive_finished(data->src, data->dst, data->flowTag);
     if (receiver_done) {
         data->network->notify_receiver_packet_arrived(data->src, data->dst, data->count, data->flowTag);
-        delete data->receiver_data;  // Clean up receiver data
+        if (data->receiver_data) {
+            delete data->receiver_data;  // Clean up receiver data
+        }
     }
 
     // 3. No NI-level batch queue: gating is solely via dependency counters (NS3-style)
@@ -358,11 +355,6 @@ void FlowSimNetWork::notify_receiver_packet_arrived(int sender_node, int receive
         if (t.count == message_size) {
             // Remove from receiver hash
             expeRecvHash.erase(recv_key);
-            recvHash.erase(recv_key);
-            if (++log_hash_cnt <= 20 || (log_hash_cnt % 10000 == 0 && fs_trace_deps)) {
-                std::cout << "[HASH ERASE RECV] key=(tag=" << tag << ",src=" << sender_node
-                          << ",dst=" << receiver_node << ")" << std::endl;
-            }
             
             // Update nodeHash
             if (nodeHash.find(make_pair(receiver_node, 1)) == nodeHash.end()) {
@@ -371,11 +363,19 @@ void FlowSimNetWork::notify_receiver_packet_arrived(int sender_node, int receive
                 nodeHash[make_pair(receiver_node, 1)] += message_size;
             }
             
-            // Set the flowTag in the event handler data
+            // Set the flowTag in the event handler data - CRITICAL for flow continuity
             AstraSim::RecvPacketEventHadndlerData* ehd = (AstraSim::RecvPacketEventHadndlerData*) t.fun_arg;
-            ehd->flowTag = flowTag;
+            // MATCH NS3: Check for pending flowTag and restore it
+            assert(ehd->flowTag.current_flow_id == -1 && ehd->flowTag.child_flow_id == -1);
+            if(receiver_pending_queue.count(std::make_pair(std::make_pair(receiver_node, sender_node),tag))!= 0) {
+                AstraSim::ncclFlowTag pending_tag = receiver_pending_queue[std::make_pair(std::make_pair(receiver_node, sender_node),tag)];
+                receiver_pending_queue.erase(std::make_pair(std::make_pair(receiver_node,sender_node),tag));
+                ehd->flowTag = pending_tag;
+            } else {
+                ehd->flowTag = flowTag;
+            }
             
-            NcclLog->writeLog(NcclLogLevel::DEBUG,"FlowSim triggering PacketReceived event for receiver");
+            NcclLog->writeLog(NcclLogLevel::DEBUG,"FlowSim triggering PacketReceived event for receiver cur_id=%d", ehd->flowTag.current_flow_id);
             
             // Call receiver handler directly (NS3-style) to continue AstraSim chain
             t.msg_handler(t.fun_arg);
@@ -461,7 +461,13 @@ void FlowSimNetWork::notify_sender_sending_finished(int sender_node, int receive
                     << " time=" << FlowSim::Now() << "ns" << std::endl;
         }
         // Call sender handler directly (NS3-style) to continue AstraSim chain
+        if (log_handler_cnt <= 5 && fs_trace_deps) {
+          std::cout << "[HANDLER DEBUG] About to call t2.msg_handler for tag_id=" << flowTag.tag_id << std::endl;
+        }
         t2.msg_handler(t2.fun_arg);
+        if (log_handler_cnt <= 5 && fs_trace_deps) {
+          std::cout << "[HANDLER DEBUG] Completed t2.msg_handler for tag_id=" << flowTag.tag_id << std::endl;
+        }
         
         goto sender_end_1st_section;
       } else {
@@ -507,21 +513,51 @@ int FlowSimNetWork::sim_recv(
     
     NcclLog->writeLog(NcclLogLevel::DEBUG,"FlowSim sim_recv on rank %d tag_id %d channel_id %d",rank,tag,ehd->flowTag.channel_id);
     
-    // Store in recvHash like NS3 does
+    // EXACTLY MATCH NS3's sim_recv logic
     auto key = make_pair(tag, make_pair(t.src, t.dest));
     if (recvHash.find(key) != recvHash.end()) {
+        // Data already arrived - immediate callback like NS3
         uint64_t existing_count = recvHash[key];
-        NcclLog->writeLog(NcclLogLevel::DEBUG,"FlowSim sim_recv found existing receiver");
+        if (existing_count == t.count) {
+            recvHash.erase(key);
+            // Restore pending flowTag like NS3
+            if(receiver_pending_queue.count(std::make_pair(std::make_pair(rank, src),tag))!= 0) {
+                AstraSim::ncclFlowTag pending_tag = receiver_pending_queue[std::make_pair(std::make_pair(rank, src),tag)];
+                receiver_pending_queue.erase(std::make_pair(std::make_pair(rank,src),tag));
+                ehd->flowTag = pending_tag;
+            }
+            // Immediate callback
+            t.msg_handler(t.fun_arg);
+            NcclLog->writeLog(NcclLogLevel::DEBUG,"FlowSim sim_recv immediate callback - data already arrived");
+            return 0;
+        } else if (existing_count > t.count) {
+            recvHash[key] = existing_count - t.count;
+            // Restore pending flowTag like NS3
+            if(receiver_pending_queue.count(std::make_pair(std::make_pair(rank, src),tag))!= 0) {
+                AstraSim::ncclFlowTag pending_tag = receiver_pending_queue[std::make_pair(std::make_pair(rank, src),tag)];
+                receiver_pending_queue.erase(std::make_pair(std::make_pair(rank,src),tag));
+                ehd->flowTag = pending_tag;
+            }
+            // Immediate callback
+            t.msg_handler(t.fun_arg);
+            NcclLog->writeLog(NcclLogLevel::DEBUG,"FlowSim sim_recv partial immediate callback");
+            return 0;
+        } else {
+            recvHash.erase(key);
+            t.count -= existing_count;
+            expeRecvHash[key] = t;
+        }
     } else {
-        // Register new receiver
-        recvHash[key] = count;
-        expeRecvHash[key] = t;
-        
-        // Store in receiver_pending_queue like NS3 does
-        receiver_pending_queue[make_pair(make_pair(t.src, t.dest), tag)] = flowTag;
-        
-        NcclLog->writeLog(NcclLogLevel::DEBUG,"FlowSim sim_recv registered new receiver src=%d dst=%d tag=%d count=%lu",
-                         t.src, t.dest, tag, count);
+        // Register expected receive like NS3
+        if (expeRecvHash.find(key) == expeRecvHash.end()) {
+            expeRecvHash[key] = t;
+            NcclLog->writeLog(NcclLogLevel::DEBUG,"FlowSim sim_recv registered new receiver src=%d dst=%d tag=%d count=%lu",
+                             t.src, t.dest, tag, count);
+        } else {
+            // Multiple recv calls for same key - should not happen in normal flow
+            NcclLog->writeLog(NcclLogLevel::ERROR,"FlowSim sim_recv duplicate registration src=%d dst=%d tag=%d",
+                             t.src, t.dest, tag);
+        }
     }
     
     return 0;

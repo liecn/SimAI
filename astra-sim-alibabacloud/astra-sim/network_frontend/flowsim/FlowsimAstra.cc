@@ -217,8 +217,8 @@ int main(int argc,char *argv[]) {
               << std::endl;
   }
 
-  // Use GPU count from topology file (same as NS3)
-  int nodes_num = gpu_num;  // Same as NS3: total nodes minus switches
+  // Use NS3's exact node calculation: include NVSwitches in AstraSim node count
+  int nodes_num = node_num - switch_num;  // NS3 formula: includes NVSwitches (144 nodes)
 
   // Create FlowSimNetwork and Sys instances
   std::vector<FlowSimNetWork *> networks;
