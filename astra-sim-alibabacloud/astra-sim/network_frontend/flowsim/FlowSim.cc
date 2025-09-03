@@ -62,13 +62,7 @@ double FlowSim::Now(){
 }
 
 void FlowSim::Send(int src, int dst, uint64_t size, int tag, Callback callback, CallbackArg callbackArg) {
-    // Apply AS_SEND_LAT for fair comparison with NS3
-    uint64_t send_latency_ns = 0;
-    const char* send_lat_env = std::getenv("AS_SEND_LAT");
-    if (send_lat_env) {
-        // Convert from microseconds to nanoseconds (same as NS3)
-        send_latency_ns = std::stoi(send_lat_env) * 1000;
-    }
+    // Send latency is now handled at FlowsimNetwork.cc level for consistency with NS3
     
     // Check AS_NVLS_ENABLE for hardware acceleration simulation
     bool nvls_enabled = false;
@@ -97,29 +91,8 @@ void FlowSim::Send(int src, int dst, uint64_t size, int tag, Callback callback, 
         // Create chunk
         auto chunk = std::make_unique<Chunk>(size, route, callback, callbackArg);
         
-        if (send_latency_ns > 0) {
-            // Schedule the actual send after the send latency
-            auto delayed_send = [chunk_ptr = chunk.release()]() {
-                std::unique_ptr<Chunk> delayed_chunk(chunk_ptr);
-                topology->send_with_batching(std::move(delayed_chunk));
-            };
-            
-            // Store the lambda for the event system
-            auto* lambda_ptr = new std::function<void()>(delayed_send);
-            
-            event_queue->schedule_event(
-                event_queue->get_current_time() + send_latency_ns,
-                [](void* arg) {
-                    auto* func = static_cast<std::function<void()>*>(arg);
-                    (*func)();
-                    delete func;
-                },
-                lambda_ptr
-            );
-        } else {
-            // Send immediately
-            topology->send_with_batching(std::move(chunk));
-        }
+        // Send immediately - latency handled at higher level
+        topology->send_with_batching(std::move(chunk));
     }
 }
 

@@ -476,11 +476,6 @@ void qp_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
           (CustomHeader::GetStaticWholeHeaderSize() -
            IntHeader::GetStaticSize()); 
   uint64_t standalone_fct = base_rtt + total_bytes * 8000000000lu / b;
-  fprintf(fout, "%08x %08x %u %u %lu %lu %lu %lu\n", q->sip.Get(), q->dip.Get(),
-          q->sport, q->dport, q->m_size, q->startTime.GetTimeStep(),
-          (Simulator::Now() - q->startTime).GetTimeStep(), standalone_fct);
-  fflush(fout);
-
   AstraSim::ncclFlowTag flowTag;
   uint64_t notify_size;
   {
@@ -498,6 +493,12 @@ void qp_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
       exit(-1);
     }
     flowTag = sender_src_port_map[make_pair(q->sport, make_pair(sid, did))];
+    
+    // Write FCT with flow_id (moved here to access flowTag)
+    fprintf(fout, "%08x %08x %u %u %lu %lu %lu %lu %d\n", q->sip.Get(), q->dip.Get(),
+            q->sport, q->dport, q->m_size, q->startTime.GetTimeStep(),
+            (Simulator::Now() - q->startTime).GetTimeStep(), standalone_fct, flowTag.current_flow_id);
+    fflush(fout);
     sender_src_port_map.erase(make_pair(q->sport, make_pair(sid, did)));
     received_chunksize[std::make_pair(flowTag.current_flow_id,std::make_pair(sid,did))]+=q->m_size;
     if(!is_receive_finished(sid,did,flowTag)) {

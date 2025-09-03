@@ -38,18 +38,11 @@ static std::map<std::tuple<int,int,int,int>, uint64_t> flow_start_times;
 // NS3-style dependency counters keyed by (current_flow_id, (src,dst))
 std::map<std::pair<int,std::pair<int,int>>,int> waiting_to_sent_callback;  
 std::map<std::pair<int,std::pair<int,int>>,int> waiting_to_notify_receiver;
-// Concise logging controls
+// Minimal logging for debugging (controlled by FS_TRACE_DEPS)
 static bool fs_trace_deps = [](){
     const char* v = std::getenv("FS_TRACE_DEPS");
     return v && std::strcmp(v, "0") != 0;
 }();
-static long log_store_cnt = 0;
-static long log_send_cnt = 0;
-static long log_counter_init_cnt = 0;
-static long log_dep_send_cnt = 0;
-static long log_dep_recv_cnt = 0;
-static long log_handler_cnt = 0;
-static long log_hash_cnt = 0;
 
 // FCT summary counter
 static uint64_t g_fct_lines_written = 0;
@@ -90,18 +83,10 @@ bool is_sending_finished(int src, int dst, AstraSim::ncclFlowTag flowTag) {
             return true; // Force completion to avoid deadlock
         }
         
-        if (++log_dep_send_cnt <= 10 || (log_dep_send_cnt % 5000 == 0 && fs_trace_deps)) {
-            std::cout << "[DEP SEND-DEC] before cur_id=" << cur_id << " src=" << src << " dst=" << dst 
-                      << " val=" << it->second << " time=" << FlowSim::Now() << "ns" << std::endl;
-        }
         // Decrement counter
         it->second--;
-        if (log_dep_send_cnt <= 10 || (log_dep_send_cnt % 5000 == 0 && fs_trace_deps)) {
-            std::cout << "[DEP SEND-DEC] after  cur_id=" << cur_id << " src=" << src << " dst=" << dst 
-                      << " val=" << it->second << std::endl;
-        }
         if (it->second == 0) {
-            if (log_dep_send_cnt <= 10 || (log_dep_send_cnt % 5000 == 0 && fs_trace_deps)) {
+            if (fs_trace_deps) {
                 std::cout << "[DEP SEND-ZERO] cur_id=" << cur_id << " src=" << src << " dst=" << dst << std::endl;
             }
             waiting_to_sent_callback.erase(it);
@@ -124,19 +109,10 @@ bool is_receive_finished(int src, int dst, AstraSim::ncclFlowTag flowTag) {
             return true; // Force completion
         }
         
-        if (++log_dep_recv_cnt <= 10 || (log_dep_recv_cnt % 5000 == 0 && fs_trace_deps)) {
-            std::cout << "[DEP RECV-DEC] before cur_id=" << cur_id << " src=" << src << " dst=" << dst 
-                      << " val=" << it->second << " time=" << FlowSim::Now() << "ns" << std::endl;
-        }
         // Decrement counter
         it->second--;
-        
-        if (log_dep_recv_cnt <= 10 || (log_dep_recv_cnt % 5000 == 0 && fs_trace_deps)) {
-            std::cout << "[DEP RECV-DEC] after  cur_id=" << cur_id << " src=" << src << " dst=" << dst 
-                      << " val=" << it->second << std::endl;
-        }
         if (it->second == 0) {
-            if (log_dep_recv_cnt <= 10 || (log_dep_recv_cnt % 5000 == 0 && fs_trace_deps)) {
+            if (fs_trace_deps) {
                 std::cout << "[DEP RECV-ZERO] cur_id=" << cur_id << " src=" << src << " dst=" << dst << std::endl;
             }
             waiting_to_notify_receiver.erase(it);
@@ -223,15 +199,7 @@ int FlowSimNetWork::sim_send(
     // Store using NS3 key (tag_id, (src,dst))
     auto sh_key = make_pair(request->flowTag.tag_id, make_pair(t.src, t.dest));
     sentHash[sh_key] = t;
-    if (++log_store_cnt <= 10 || (log_store_cnt % 5000 == 0 && fs_trace_deps)) {
-        std::cout << "[STORE] tag_id=" << request->flowTag.tag_id 
-                  << " cur_id=" << request->flowTag.current_flow_id
-                  << " src=" << t.src << " dst=" << t.dest << std::endl;
-    }
-    if (++log_hash_cnt <= 20 || (log_hash_cnt % 10000 == 0 && fs_trace_deps)) {
-        std::cout << "[HASH STORE SENT] key=(tag=" << request->flowTag.tag_id
-                  << ",src=" << t.src << ",dst=" << t.dest << ") cur=" << request->flowTag.current_flow_id << std::endl;
-    }
+    // Store for callback lookup (no logging needed)
     
     // Track initial request time (will be updated to actual start time after delay)
     uint64_t start = FlowSim::Now();
@@ -249,22 +217,15 @@ int FlowSimNetWork::sim_send(
     auto dep_key = std::make_pair(dep_cur_id, std::make_pair(rank, dst));
     waiting_to_sent_callback[dep_key]++;
     waiting_to_notify_receiver[dep_key]++;
-    if (++log_counter_init_cnt <= 10 || (log_counter_init_cnt % 5000 == 0 && fs_trace_deps)) {
-        std::cout << "[COUNTER INIT] cur_id=" << dep_cur_id << " src=" << rank << " dst=" << dst
-                  << " send_cnt=" << waiting_to_sent_callback[dep_key]
-                  << " recv_cnt=" << waiting_to_notify_receiver[dep_key]
-                  << std::endl;
-    }
 
     // Apply send latency delay like NS3 does
-    int send_lat = 3;  // Default 6μs like NS3
+    int send_lat = 0;  // Default 6μs like NS3
     const char* send_lat_env = std::getenv("AS_SEND_LAT");
     if (send_lat_env) {
         try {
             send_lat = std::stoi(send_lat_env);
         } catch (const std::invalid_argument& e) {
             std::cerr << "[FLOWSIM] AS_SEND_LAT parse error" << std::endl;
-            send_lat = 3;  // fallback to default
         }
     }
     send_lat *= 1000;  // Convert μs to ns, exactly like NS3
@@ -274,11 +235,7 @@ int FlowSimNetWork::sim_send(
     completion_data->start_time = start + send_lat;  // Record actual start time after delay
     completion_data->msg_handler = msg_handler;
     completion_data->fun_arg = fun_arg;
-    uint64_t now = FlowSim::Now();
-    if (++log_send_cnt <= 10 || (log_send_cnt % 5000 == 0 && fs_trace_deps)) {
-        std::cout << "[SEND CALL] time=" << now << "ns src=" << rank << " dst=" << dst
-                  << " size=" << count << " tag=" << tag << " delay=" << send_lat << "ns" << std::endl;
-    }
+    // Send with delay (no logging needed for performance)
     
     // Schedule FlowSim::Send with the same delay as NS3
     FlowSim::Schedule(send_lat, [](void* arg) {
@@ -287,6 +244,16 @@ int FlowSimNetWork::sim_send(
         uint64_t actual_start = FlowSim::Now();
         auto flow_key = std::make_tuple(data->flowTag.tag_id, data->flowTag.current_flow_id, data->src, data->dst);
         flow_start_times[flow_key] = actual_start;  // Update with actual start time
+        
+        // Add SEND logging to match NS3 pattern (first 5 + every 10000th)
+        static int send_count = 0;
+        send_count++;
+        if (send_count <= 5 || send_count % 10000 == 0) {
+            std::cout << "[FLOWSIM] SEND #" << send_count << " at time=" << actual_start << "ns: "
+                      << "src=" << data->src << " (group=" << (data->src / 16) << ") -> "
+                      << "dst=" << data->dst << " (group=" << (data->dst / 16) << "), "
+                      << "size=" << data->count << ", tag=" << data->flowTag.tag_id << std::endl;
+        }
         
         FlowSim::Send(data->src, data->dst, data->count, data->flowTag.tag_id, flowsim_completion_callback, data);
     }, completion_data);
@@ -343,12 +310,7 @@ void FlowSimNetWork::notify_receiver_packet_arrived(int sender_node, int receive
     
     // Check if receiver is registered
     auto recv_key = make_pair(tag, make_pair(sender_node, receiver_node));
-    if (++log_hash_cnt <= 20 || (log_hash_cnt % 10000 == 0 && fs_trace_deps)) {
-        bool present = expeRecvHash.find(recv_key) != expeRecvHash.end();
-        std::cout << "[HASH FIND RECV] key=(tag=" << tag
-                  << ",src=" << sender_node << ",dst=" << receiver_node << ") present=" << (present ? 1 : 0)
-                  << " cur=" << flowTag.current_flow_id << std::endl;
-    }
+    // Check if receiver is registered (no logging needed)
     if (expeRecvHash.find(recv_key) != expeRecvHash.end()) {
         task1 t = expeRecvHash[recv_key];
         
@@ -400,6 +362,13 @@ void FlowSimNetWork::notify_sender_sending_finished(int sender_node, int receive
     static int callback_count = 0;
     callback_count++;
     
+    // Add CALLBACK logging to match NS3 pattern (first 5 + every 10000th)
+    if (callback_count <= 5 || callback_count % 10000 == 0) {
+        std::cout << "[FLOWSIM] CALLBACK #" << callback_count << " at time=" << FlowSim::Now() << "ns: "
+                  << "src=" << sender_node << " -> dst=" << receiver_node << ", "
+                  << "size=" << message_size << ", tag=" << flowTag.tag_id << std::endl;
+    }
+    
     // Export per-flow FCT data to file (matching NS-3 format)
     static FILE* fct_output_file = nullptr;
     if (fct_output_file == nullptr) {
@@ -427,10 +396,10 @@ void FlowSimNetWork::notify_sender_sending_finished(int sender_node, int receive
             return; // Skip this FCT entry rather than output bad data
         }
         
-        // Match NS-3 format: src_node dst_node src_port dst_port msg_size start_time fct_ns standalone_fct
-        fprintf(fct_output_file, "%08x %08x %u %u %lu %lu %lu %lu\n", 
+        // Extended format: src_node dst_node src_port dst_port msg_size start_time fct_ns standalone_fct flow_id
+        fprintf(fct_output_file, "%08x %08x %u %u %lu %lu %lu %lu %d\n", 
                 sender_node, receiver_node, flowTag.tag_id, 0, 
-                message_size, start_time, fct_ns, fct_ns);
+                message_size, start_time, fct_ns, fct_ns, flowTag.current_flow_id);
         fflush(fct_output_file);
         ++g_fct_lines_written;
     }
@@ -453,21 +422,8 @@ void FlowSimNetWork::notify_sender_sending_finished(int sender_node, int receive
           nodeHash[make_pair(sender_node, 0)] += message_size;
         }
         
-        // Trace the handler invocation to ensure workload continuation
-        if (++log_handler_cnt <= 20 || (log_handler_cnt % 5000 == 0 && fs_trace_deps)) {
-          std::cout << "[HANDLER CALL] tag_id=" << flowTag.tag_id
-                    << " cur_id=" << flowTag.current_flow_id
-                    << " src=" << sender_node << " dst=" << receiver_node
-                    << " time=" << FlowSim::Now() << "ns" << std::endl;
-        }
         // Call sender handler directly (NS3-style) to continue AstraSim chain
-        if (log_handler_cnt <= 5 && fs_trace_deps) {
-          std::cout << "[HANDLER DEBUG] About to call t2.msg_handler for tag_id=" << flowTag.tag_id << std::endl;
-        }
         t2.msg_handler(t2.fun_arg);
-        if (log_handler_cnt <= 5 && fs_trace_deps) {
-          std::cout << "[HANDLER DEBUG] Completed t2.msg_handler for tag_id=" << flowTag.tag_id << std::endl;
-        }
         
         goto sender_end_1st_section;
       } else {

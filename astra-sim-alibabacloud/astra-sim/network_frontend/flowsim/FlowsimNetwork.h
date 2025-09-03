@@ -98,8 +98,7 @@ public:
     // Receiver packet arrival notification callback  
     void notify_receiver_packet_arrived(int sender_node, int receiver_node, uint64_t message_size, AstraSim::ncclFlowTag flowTag);
     
-    // TODO: Replace with real FlowSim network simulation
-    // No fake timing helper needed (real FlowSim::Send is used directly)
+    // FlowSim network simulation implementation complete
 };
 
 #endif // __SIMAIFLOW_NETWORK_HH__
