@@ -17,7 +17,7 @@ git submodule update --init --recursive
 
 ## ⚡ FlowSim (Fast)
 ```bash
-time AS_SEND_LAT=3 AS_NVLS_ENABLE=1 ./bin/SimAI_flowsim -t 8 -w ./example/microAllReduce_16gpus.txt -n ./Spectrum-X_128g_8gps_100Gbps_A100
+time AS_SEND_LAT=3 AS_NVLS_ENABLE=1 ./bin/SimAI_flowsim -w ./example/microAllReduce_16gpus.txt -n ./Spectrum-X_128g_8gps_100Gbps_A100
 ```
 
 ## 🔬 NS3 (Detailed)  
