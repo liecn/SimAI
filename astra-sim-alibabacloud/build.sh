@@ -4,6 +4,7 @@ NS3_BUILD_DIR="${SCRIPT_DIR:?}"/build/astra_ns3
 SIMAI_PHY_BUILD_DIR="${SCRIPT_DIR:?}"/build/simai_phy
 SIMAI_ANALYTICAL_BUILD_DIR="${SCRIPT_DIR:?}"/build/simai_analytical
 SIMAI_FLOWSIM_BUILD_DIR="${SCRIPT_DIR:?}"/build/simai_flowsim
+SIMAI_M4_BUILD_DIR="${SCRIPT_DIR:?}"/build/simai_m4
 SIM_LOG_DIR="${SCRIPT_DIR:?}"/../logs
 
 # Functions
@@ -22,6 +23,9 @@ function cleanup_build {
     "flowsim")
         cd "${SIMAI_FLOWSIM_BUILD_DIR}"
         ./build.sh -l;;
+    "m4")
+        cd "${SIMAI_M4_BUILD_DIR}"
+        ./build.sh -l;;
     esac
 }
 
@@ -39,6 +43,9 @@ function cleanup_result {
         ./build.sh -lr;;
     "flowsim")
         cd "${SIMAI_FLOWSIM_BUILD_DIR}"
+        ./build.sh -lr;;
+    "m4")
+        cd "${SIMAI_M4_BUILD_DIR}"
         ./build.sh -lr;;
     esac
 }
@@ -64,6 +71,9 @@ function compile {
     "flowsim")
         cd "${SIMAI_FLOWSIM_BUILD_DIR}"
         ./build.sh -c;;
+    "m4")
+        cd "${SIMAI_M4_BUILD_DIR}"
+        ./build.sh -c;;
     esac
 }
 
@@ -77,7 +87,7 @@ case "$1" in
     compile "$2";;
 -h|--help|*)
     printf -- "help message\n"
-    printf -- "-c|--compile mode supported ns3/phy/analytical/flowsim  (example:./build.sh -c flowsim)\n"
+    printf -- "-c|--compile mode supported ns3/phy/analytical/flowsim/m4  (example:./build.sh -c m4)\n"
     printf -- "-l|--clean  (example:./build.sh -l flowsim)\n"
     printf -- "-lr|--clean-result mode  (example:./build.sh -lr flowsim)\n"
 esac

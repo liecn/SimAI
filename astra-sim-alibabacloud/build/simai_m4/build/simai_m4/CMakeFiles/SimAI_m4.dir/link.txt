@@ -1,0 +1,1 @@
+/usr/bin/g++-9 -O3 -march=native -flto -DNDEBUG CMakeFiles/SimAI_m4.dir/M4Astra.cc.o CMakeFiles/SimAI_m4.dir/M4Network.cc.o -o SimAI_m4  ../AstraSim/libAstraSim.a

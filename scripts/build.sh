@@ -8,6 +8,7 @@ SOURCE_NS3_BIN_DIR="${SIMAI_DIR:?}"/extern/network_backend/ns3-interface/simulat
 SOURCE_ANA_BIN_DIR="${SIMAI_DIR:?}"/build/simai_analytical/build/simai_analytical/SimAI_analytical
 SOURCE_PHY_BIN_DIR="${SIMAI_DIR:?}"/build/simai_phy/build/simai_phynet/SimAI_phynet
 SOURCE_FLOWSIM_BIN_DIR="${SIMAI_DIR:?}"/build/simai_flowsim/build/simai_flowsim/SimAI_flowsim
+SOURCE_M4_BIN_DIR="${SIMAI_DIR:?}"/build/simai_m4/SimAI_m4
 
 TARGET_BIN_DIR="${SCRIPT_DIR:?}"/../bin
 function compile {
@@ -54,6 +55,15 @@ function compile {
         ./build.sh -lr flowsim
         ./build.sh -c flowsim 
         ln -s "${SOURCE_FLOWSIM_BIN_DIR:?}" "${TARGET_BIN_DIR:?}"/SimAI_flowsim;;
+    "m4")
+        mkdir -p "${TARGET_BIN_DIR:?}"
+        mkdir -p "${ROOT_DIR:?}"/results
+        if [ -L "${TARGET_BIN_DIR:?}/SimAI_m4" ]; then
+            rm -rf "${TARGET_BIN_DIR:?}"/SimAI_m4
+        fi
+        cd "${SIMAI_DIR:?}"
+        ./build.sh -c m4
+        ln -s "${SOURCE_M4_BIN_DIR:?}" "${TARGET_BIN_DIR:?}"/SimAI_m4;;
     esac
 }
 
@@ -85,6 +95,12 @@ function cleanup_build {
         fi
         cd "${SIMAI_DIR:?}"
         ./build.sh -lr flowsim;;
+    "m4")
+        if [ -L "${TARGET_BIN_DIR:?}/SimAI_m4" ]; then
+            rm -rf "${TARGET_BIN_DIR:?}"/SimAI_m4
+        fi
+        cd "${SIMAI_DIR:?}"
+        ./build.sh -l m4;;
     esac
 }
 
@@ -96,7 +112,7 @@ case "$1" in
     compile "$2";;
 -h|--help|*)
     printf -- "help message\n"
-    printf -- "-c|--compile mode supported ns3/phy/analytical/flowsim  (example:./build.sh -c flowsim)\n"
+    printf -- "-c|--compile mode supported ns3/phy/analytical/flowsim/m4  (example:./build.sh -c m4)\n"
     printf -- "-l|--clean  (example:./build.sh -l flowsim)\n"
     printf -- "-lr|--clean-result mode  (example:./build.sh -lr flowsim)\n"
 esac
