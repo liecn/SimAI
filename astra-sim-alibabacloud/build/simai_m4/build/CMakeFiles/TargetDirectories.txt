@@ -1,8 +1,0 @@
-/data1/lichenni/projects/SimAI/astra-sim-alibabacloud/build/simai_m4/build/CMakeFiles/edit_cache.dir
-/data1/lichenni/projects/SimAI/astra-sim-alibabacloud/build/simai_m4/build/CMakeFiles/rebuild_cache.dir
-/data1/lichenni/projects/SimAI/astra-sim-alibabacloud/build/simai_m4/build/AstraSim/CMakeFiles/AstraSim.dir
-/data1/lichenni/projects/SimAI/astra-sim-alibabacloud/build/simai_m4/build/AstraSim/CMakeFiles/edit_cache.dir
-/data1/lichenni/projects/SimAI/astra-sim-alibabacloud/build/simai_m4/build/AstraSim/CMakeFiles/rebuild_cache.dir
-/data1/lichenni/projects/SimAI/astra-sim-alibabacloud/build/simai_m4/build/simai_m4/CMakeFiles/SimAI_m4.dir
-/data1/lichenni/projects/SimAI/astra-sim-alibabacloud/build/simai_m4/build/simai_m4/CMakeFiles/edit_cache.dir
-/data1/lichenni/projects/SimAI/astra-sim-alibabacloud/build/simai_m4/build/simai_m4/CMakeFiles/rebuild_cache.dir
