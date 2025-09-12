@@ -6,8 +6,45 @@
 #include <cmath> // Required for std::isfinite
 #include <algorithm> // Required for std::find
 #include <iomanip> // Required for std::fixed and std::setprecision
+#include <cstdlib>
+#include <cstdint>
 
 std::shared_ptr<EventQueue> Topology::event_queue = nullptr;
+
+// Optional serialization overhead to mimic NS3 packetization
+static inline uint64_t fs_get_payload_size_bytes() {
+    static uint64_t cached = [](){
+        const char* e = std::getenv("FS_PAYLOAD");
+        if (e && e[0] != '\0') {
+            return static_cast<uint64_t>(strtoull(e, nullptr, 10));
+        }
+        // Default to NS3 packet_payload_size=1000 bytes if unspecified
+        return static_cast<uint64_t>(1000);
+    }();
+    return cached;
+}
+
+static inline uint64_t fs_get_header_bytes() {
+    static uint64_t cached = [](){
+        const char* e = std::getenv("FS_HDR");
+        if (e && e[0] != '\0') {
+            return static_cast<uint64_t>(strtoull(e, nullptr, 10));
+        }
+        // Default 0 to preserve historical FlowSim behavior unless enabled by user
+        return static_cast<uint64_t>(0);
+    }();
+    return cached;
+}
+
+static inline double fs_apply_serialization_overhead(double bytes) {
+    uint64_t hdr = fs_get_header_bytes();
+    uint64_t payload = fs_get_payload_size_bytes();
+    if (hdr == 0 || payload == 0) {
+        return bytes;
+    }
+    uint64_t n_pkts = (static_cast<uint64_t>(bytes) + payload - 1) / payload; // ceil(bytes/payload)
+    return bytes + static_cast<double>(n_pkts) * static_cast<double>(hdr);
+}
 
 void Topology::set_event_queue(std::shared_ptr<EventQueue> event_queue) noexcept {
     assert(event_queue != nullptr);
@@ -94,33 +131,60 @@ std::shared_ptr<Device> Topology::get_device(int index) {
 void Topology::update_link_states() {
     if (active_links.empty()) return;
 
+    // Reset all flow rates before recalculation
+    for (Chunk* chunk : active_chunks) {
+        chunk->set_rate(0.0);
+    }
+
     std::set<Chunk*> fixed_chunks;
-
-    // Progressive filling: iteratively fix flows on the current bottleneck link
+    
+    // Progressive filling: iteratively fix flows on bottleneck links
     while (fixed_chunks.size() < active_chunks.size()) {
-        double bottleneck_rate = std::numeric_limits<double>::max();
+        double min_fair_rate = std::numeric_limits<double>::max();
         std::pair<DeviceId, DeviceId> bottleneck_link;
-
-        // 1) Locate link whose fair share is the minimum among all links
+        
+        // Find the link with minimum fair share among unfixed flows
         for (const auto& link_key : active_links) {
             double fair_rate = calculate_bottleneck_rate(link_key, fixed_chunks);
-            if (fair_rate < bottleneck_rate) {
-                bottleneck_rate = fair_rate;
+            if (fair_rate < min_fair_rate && fair_rate > 0 && std::isfinite(fair_rate)) {
+                min_fair_rate = fair_rate;
                 bottleneck_link = link_key;
             }
         }
-
-        // No progress – should not happen, but guard against division issues
-        if (bottleneck_rate == std::numeric_limits<double>::max() || bottleneck_rate <= 0 || !std::isfinite(bottleneck_rate)) {
-            bottleneck_rate = 1.0;
-        }
-
-        // 2) Fix all yet-unfixed chunks on the bottleneck link to that rate
-        for (Chunk* chunk : link_map[bottleneck_link]->active_chunks) {
-            if (fixed_chunks.insert(chunk).second) { // newly inserted
-                chunk->set_rate(bottleneck_rate);
-
+        
+        // Safety check - if no valid rate found, this indicates a serious bug
+        if (min_fair_rate == std::numeric_limits<double>::max() || min_fair_rate <= 0) {
+            std::cerr << "[FLOWSIM ERROR] No valid bottleneck rate found! Active chunks: " 
+                      << active_chunks.size() << ", Fixed chunks: " << fixed_chunks.size() 
+                      << ", Active links: " << active_links.size() << std::endl;
+            
+            // Debug: Print link states
+            for (const auto& link_key : active_links) {
+                auto link_it = link_map.find(link_key);
+                if (link_it != link_map.end()) {
+                    std::cerr << "  Link " << link_key.first << "->" << link_key.second 
+                              << ": BW=" << link_it->second->get_bandwidth() 
+                              << ", Active chunks=" << link_it->second->active_chunks.size() << std::endl;
+                }
             }
+            
+            // This is a bug - should not happen in correct max-min implementation
+            assert(false && "Max-min algorithm failed to find valid rates");
+        }
+        
+        // Fix all unfixed flows on the bottleneck link to this rate
+        bool fixed_any = false;
+        int flows_fixed_this_round = 0;
+        for (Chunk* chunk : link_map[bottleneck_link]->active_chunks) {
+            if (fixed_chunks.find(chunk) == fixed_chunks.end()) {
+                chunk->set_rate(min_fair_rate);
+                fixed_chunks.insert(chunk);
+                fixed_any = true;
+                flows_fixed_this_round++;
+            }
+        }
+        if (!fixed_any) {
+            break;
         }
     }
 }
@@ -181,21 +245,30 @@ void Topology::add_chunk_to_links(Chunk* chunk) {
     // Set initial transmission start time
     chunk->set_transmission_start_time(event_queue->get_current_time());
     
+    // Apply serialization overhead once by inflating remaining size
+    {
+        ChunkSize rs = chunk->get_remaining_size();
+        uint64_t eff = static_cast<uint64_t>(fs_apply_serialization_overhead(static_cast<double>(rs)));
+        if (eff > rs) {
+            chunk->set_remaining_size(eff);
+        }
+    }
+    
     // Calculate rates for all chunks and schedule completion for this new chunk
     // This is more efficient than canceling all events
     update_link_states();
+    // logging removed
     
     // Schedule completion for the new chunk based on its calculated rate
     const auto current_time = event_queue->get_current_time();
     double remaining_size = chunk->get_remaining_size();
     double rate = chunk->get_rate();
     
-    // Prevent division by zero
     if (rate <= 0) {
-        rate = 1.0;
+        assert(false && "Invalid rate assigned to chunk");
     }
     
-    // Include both transmission time and path latency
+    // Include transmission time based on remaining size (already includes overhead if enabled) and path latency
     double transmission_time = remaining_size / rate;
     double path_latency = calculate_path_latency(chunk);
     uint64_t completion_time = current_time + std::max(1.0, transmission_time + path_latency);
@@ -286,7 +359,9 @@ void Topology::post_batch_completion_callback(void* arg) noexcept {
     for (Chunk* active_chunk : topology->active_chunks) {
         double remaining_size = active_chunk->get_remaining_size();
         double new_rate = active_chunk->get_rate();
-        if (new_rate <= 0) new_rate = 1.0;
+        if (new_rate <= 0) {
+            assert(false && "Invalid rate in post batch completion");
+        }
         double transmission_time = remaining_size / new_rate;
         double path_latency = topology->calculate_path_latency(active_chunk);
         uint64_t completion_time = current_time + std::max(1.0, transmission_time + path_latency);
@@ -317,6 +392,12 @@ void Topology::process_batch_of_chunks() {
         // Set topology reference and start time
         chunk->set_topology(this);
         chunk->set_transmission_start_time(current_time);
+        // Apply serialization overhead once by inflating remaining size
+        ChunkSize rs = chunk->get_remaining_size();
+        uint64_t eff = static_cast<uint64_t>(fs_apply_serialization_overhead(static_cast<double>(rs)));
+        if (eff > rs) {
+            chunk->set_remaining_size(eff);
+        }
         
         // Add to active chunks list
         active_chunks.push_back(chunk);
@@ -339,12 +420,11 @@ void Topology::process_batch_of_chunks() {
         double remaining_size = chunk->get_remaining_size();
         double rate = chunk->get_rate();
         
-        // Prevent division by zero
         if (rate <= 0) {
-            rate = 1.0;
+            assert(false && "Invalid rate in batch processing");
         }
         
-        // Calculate completion time with small timing variation to mimic NS3's natural staggering
+        // Calculate completion time based on remaining size (already includes overhead if enabled)
         double transmission_time = remaining_size / rate;
         double path_latency = calculate_path_latency(chunk);
         uint64_t completion_time = current_time + std::max(1.0, transmission_time + path_latency);

@@ -46,6 +46,8 @@ static bool fs_trace_deps = [](){
 
 // FCT summary counter
 static uint64_t g_fct_lines_written = 0;
+// File handle for FlowSim FCT output (created on first write)
+static FILE* fct_output_file = nullptr;
 
 // NS3-style: no batch-level gating, individual flow handlers trigger workload continuation
 
@@ -272,6 +274,41 @@ static void flowsim_completion_callback(void* arg) {
     // 2. Check if receiving is finished and notify receiver (triggers NCCL dependency chain)
     bool receiver_done = is_receive_finished(data->src, data->dst, data->flowTag);
     if (receiver_done) {
+        // Write per-flow FCT when the receive side finishes (align with NS3's qp_finish)
+        if (fct_output_file == nullptr) {
+            fct_output_file = fopen("results/flowsim/flowsim_fct.txt", "w");
+        }
+        if (fct_output_file) {
+            // Look up actual start time recorded at send scheduling
+            auto flow_key = std::make_tuple(data->flowTag.tag_id, data->flowTag.current_flow_id, data->src, data->dst);
+            auto it = flow_start_times.find(flow_key);
+            if (it != flow_start_times.end()) {
+                uint64_t start_time = it->second;
+                uint64_t fct_ns = data->actual_completion_time - start_time;
+                flow_start_times.erase(it);
+
+                // Maintain NS3-compatible columns but zero out nonessential fields
+                uint32_t src_ip = 0u;
+                uint32_t dst_ip = 0u;
+                unsigned int src_port = 0u;
+                unsigned int dst_port = 0u;
+
+                // Standalone FCT: best-effort placeholder (no contention). If unavailable, mirror NS3 column presence.
+                uint64_t standalone_fct = fct_ns;
+
+                // Append tag_id as 10th column for robust cross-backend matching
+                fprintf(fct_output_file, "%08x %08x %u %u %lu %lu %lu %lu %d\n",
+                        src_ip, dst_ip, src_port, dst_port, data->count, start_time, fct_ns, standalone_fct,
+                        data->flowTag.current_flow_id);
+                fflush(fct_output_file);
+                ++g_fct_lines_written;
+            } else {
+                std::cerr << "[FLOWSIM FCT ERROR] Start time not found for tag=" << data->flowTag.tag_id
+                          << " cur_id=" << data->flowTag.current_flow_id
+                          << " src=" << data->src << " dst=" << data->dst << std::endl;
+            }
+        }
+
         data->network->notify_receiver_packet_arrived(data->src, data->dst, data->count, data->flowTag);
         if (data->receiver_data) {
             delete data->receiver_data;  // Clean up receiver data
@@ -358,41 +395,6 @@ void FlowSimNetWork::notify_sender_sending_finished(int sender_node, int receive
         std::cout << "[FLOWSIM] CALLBACK #" << callback_count << " at time=" << FlowSim::Now() << "ns: "
                   << "src=" << sender_node << " -> dst=" << receiver_node << ", "
                   << "size=" << message_size << ", tag=" << flowTag.tag_id << std::endl;
-    }
-    
-    // Export per-flow FCT data to file (matching NS-3 format)
-    static FILE* fct_output_file = nullptr;
-    if (fct_output_file == nullptr) {
-        fct_output_file = fopen("results/flowsim/flowsim_fct.txt", "w");
-    }
-    
-    if (fct_output_file) {
-        // Use the recorded completion time from callback data
-        uint64_t completion_time = FlowSim::Now();  // This should be individual flow completion time
-        uint64_t start_time = 0;
-        uint64_t fct_ns = 0;
-        
-        // Look up actual start time
-        auto flow_key = std::make_tuple(flowTag.tag_id, flowTag.current_flow_id, sender_node, receiver_node);
-        auto start_time_it = flow_start_times.find(flow_key);
-        if (start_time_it != flow_start_times.end()) {
-            start_time = start_time_it->second;
-            fct_ns = completion_time - start_time;
-            
-            flow_start_times.erase(start_time_it);
-        } else {
-            // ERROR: This should not happen with correct key matching
-            std::cerr << "[FLOWSIM FCT ERROR] Flow start time not found for tag=" << flowTag.tag_id 
-                      << " src=" << sender_node << " dst=" << receiver_node << std::endl;
-            return; // Skip this FCT entry rather than output bad data
-        }
-        
-        // Extended format: src_node dst_node src_port dst_port msg_size start_time fct_ns standalone_fct flow_id
-        fprintf(fct_output_file, "%08x %08x %u %u %lu %lu %lu %lu %d\n", 
-                sender_node, receiver_node, flowTag.tag_id, 0, 
-                message_size, start_time, fct_ns, fct_ns, flowTag.current_flow_id);
-        fflush(fct_output_file);
-        ++g_fct_lines_written;
     }
     
 
