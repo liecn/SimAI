@@ -8,7 +8,7 @@ SOURCE_NS3_BIN_DIR="${SIMAI_DIR:?}"/extern/network_backend/ns3-interface/simulat
 SOURCE_ANA_BIN_DIR="${SIMAI_DIR:?}"/build/simai_analytical/build/simai_analytical/SimAI_analytical
 SOURCE_PHY_BIN_DIR="${SIMAI_DIR:?}"/build/simai_phy/build/simai_phynet/SimAI_phynet
 SOURCE_FLOWSIM_BIN_DIR="${SIMAI_DIR:?}"/build/simai_flowsim/build/simai_flowsim/SimAI_flowsim
-SOURCE_M4_BIN_DIR="${SIMAI_DIR:?}"/build/simai_m4/SimAI_m4
+SOURCE_M4_BIN_DIR="${SIMAI_DIR:?}"/build/simai_m4/build/simai_m4/SimAI_m4
 
 TARGET_BIN_DIR="${SCRIPT_DIR:?}"/../bin
 function compile {
