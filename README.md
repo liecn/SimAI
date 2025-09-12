@@ -1,6 +1,6 @@
-# 🚀 Quick Demo: NS3 vs FlowSim Performance Comparison
+# 🚀 SimAI: Multi-Backend Network Simulation Framework
 
-This repository offers two network simulation backends for SimAI with different speed vs accuracy trade-offs:
+This repository provides three network simulation backends for SimAI, each optimized for different use cases:
 
 ## 🔧 Build (Requires GCC-9)
 ```bash
@@ -8,39 +8,49 @@ This repository offers two network simulation backends for SimAI with different 
 git clone https://github.com/aliyun/SimAI.git && cd SimAI
 git submodule update --init --recursive
 
-# Build FlowSim backend
-./scripts/build.sh -c flowsim
-
-# Build NS3 backend  
-./scripts/build.sh -c ns3
+# Build all backends
+./scripts/build.sh -c flowsim  # Fast simulation
+./scripts/build.sh -c ns3      # Detailed simulation  
+./scripts/build.sh -c m4       # M4 inference backend
 ```
 
-## ⚡ FlowSim (Fast)
+## 🏃 Running Simulations
+
+### ⚡ FlowSim (Fast Network Simulation)
 ```bash
 time AS_SEND_LAT=3 AS_NVLS_ENABLE=1 ./bin/SimAI_flowsim -w ./example/microAllReduce_16gpus.txt -n ./Spectrum-X_128g_8gps_100Gbps_A100
 ```
 
-## 🔬 NS3 (Detailed)  
+### 🔬 NS3 (Detailed Packet-Level Simulation)
 ```bash
 time AS_SEND_LAT=3 AS_NVLS_ENABLE=1 ./bin/SimAI_simulator -t 8 -w ./example/microAllReduce_16gpus.txt -n ./Spectrum-X_128g_8gps_100Gbps_A100 -c astra-sim-alibabacloud/inputs/config/SimAI.conf -r
 ```
 
-## 🧪 M4 (Stub backend for framework verification)
+### 🧪 M4 (AI Model Inference Backend)
 ```bash
-# Build M4 backend (same build system as others)
-./scripts/build.sh -c m4
-
-# Run M4 (immediate-completion stub; verifies app ↔ backend wiring)
-time ./bin/SimAI_m4 -w ./example/microAllReduce_16gpus.txt -n ./Spectrum-X_128g_8gps_100Gbps_A100 -o results/m4/
+time AS_SEND_LAT=3 AS_NVLS_ENABLE=1 ./bin/SimAI_m4 -w ./example/microAllReduce_16gpus.txt -n ./Spectrum-X_128g_8gps_100Gbps_A100
 ```
 
-Notes:
-- The current M4 backend is a minimal stub (no timing/model inference). It immediately completes sends/receives to validate control flow. Use it to confirm the integration before enabling the full m4 inference loop.
-- FlowSim can be aligned to NS3 packetization via environment variables:
-  - `FS_PAYLOAD=1000` (matches PACKET_PAYLOAD_SIZE)
-  - `FS_HDR=<bytes>` (set to NS3’s per-packet header delta)
+## 📊 Results & Output Files
 
-## 📊 Results
-- **FlowSim**: ~11s execution, 7415 cycles simulation time
-- **NS3**: ~56s execution, 8072 cycles simulation time  
-- **Trade-off**: FlowSim 5x faster execution, NS3 more accurate modeling
+After running simulations, results are automatically saved to backend-specific directories:
+
+### FlowSim Results: `results/flowsim/`
+- `flowsim_fct.txt` - Per-flow completion times (FCT) with detailed flow information
+- `EndToEnd.csv` - High-level workload completion statistics and timing breakdown
+
+### NS3 Results: `results/ns3/`  
+- `ns3_fct.txt` - Per-flow completion times with packet-level accuracy
+- `EndToEnd.csv` - Workload statistics with detailed network modeling
+
+### M4 Results: `results/m4/`
+- `m4_fct.txt` - Flow completion times from M4 inference model
+- `EndToEnd.csv` - Application-level performance metrics
+
+## 🎯 Advanced Configuration
+
+### M4 Backend Notes:
+- Current implementation: Minimal stub for framework validation
+- Generates fake timing data to verify AstraSim integration
+- Ready for M4 inference model integration
+- Use to test application ↔ network backend communication
