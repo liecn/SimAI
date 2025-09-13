@@ -21,6 +21,7 @@
 #include <utility>
 #include <memory>
 #include <vector>
+#include <unordered_map>
 // Re-enable PyTorch headers
 #include <torch/torch.h>
 #include <torch/script.h>
@@ -29,6 +30,8 @@
 #include "Type.h"
 #include "astra-sim/system/routing/include/RoutingFramework.h"
 
+// Forward declarations
+struct M4CallbackData;
 
 // Copy FlowSim's task1 struct for callback management
 struct M4Task {
@@ -60,11 +63,20 @@ private:
   torch::jit::script::Module output_layer, gnn_layer_0, gnn_layer_1, gnn_layer_2;
   
   // M4 State Management - Re-enabled
-  torch::Tensor h_vec, flowid_active_mask, sldn_flowsim_tensor;
+  torch::Tensor h_vec, flowid_active_mask;
   torch::Tensor fat_tensor, i_fct_tensor, size_tensor;
   torch::Tensor params_tensor;
   torch::Tensor release_time_tensor;
   torch::Tensor flowid_to_nlinks_tensor;
+  torch::Tensor flowid_to_linkid_flat_tensor;
+  torch::Tensor flowid_to_linkid_offsets_tensor;
+  torch::Tensor edge_index;
+  torch::Tensor z_t_link;
+  torch::Tensor link_to_graph_id;
+  torch::Tensor link_to_nflows;
+  torch::Tensor flow_to_graph_id;
+  torch::Tensor time_last;
+  static torch::Tensor ones_cache;
   float flow_arrival_time, flow_completion_time;
   int32_t n_flows, flow_id_in_prop, n_flows_active;
   
@@ -73,6 +85,17 @@ private:
   bool models_loaded;
   int32_t hidden_size_;
   int32_t n_links_max_;
+
+  // Flow/link bookkeeping (parity with inference no_flowsim)
+  std::unordered_map<int, int> flowIdToIndex;
+  int next_flow_index = 0;
+  std::vector<int32_t> flowid_to_linkid_offsets_v;
+  std::vector<int32_t> flowid_to_linkid_flat_v;
+  std::unordered_map<long long, int> edgeKeyToLinkId; // key=(min(u,v)<<32)|max(u,v)
+  int graph_id_counter = 0;
+  std::vector<int32_t> edges_flow_ids_v;
+  std::vector<int32_t> edges_link_ids_v;
+  int graph_id_cur = 0;
 
   // Cached topology defaults (from RoutingFramework TopologyParser)
   double default_link_bandwidth_bytes_per_ns = 0.0;
@@ -147,8 +170,7 @@ public:
     
     // M4 Inference Functions (core ML pipeline)
     void setup_m4();           // Load PyTorch models
-    void update_times_m4();    // ML-based FCT prediction  
-    void step_m4();           // Advance M4 simulation state
+    void process_m4_send(M4CallbackData* data);  // Process delayed M4 send
     
     // M4 network simulation implementation complete
     
@@ -157,6 +179,9 @@ public:
       s_routing = std::move(routing);
     }
     static const AstraSim::RoutingFramework* GetRoutingFramework() { return s_routing.get(); }
+
+    // M4 processes sends/receives immediately like FlowSim
+    // No event queue needed
 };
 
 #endif // __SIMAI_M4_NETWORK_HH__

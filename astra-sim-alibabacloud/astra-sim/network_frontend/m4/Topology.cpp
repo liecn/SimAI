@@ -201,7 +201,13 @@ void Topology::reschedule_active_chunks() {
         //std::cout << "completion time " << min << " " << chunk->get_size() << " " << rate << "\n";
         next_completion_time = min;
         next_completion_id = chunk->get_id();
-        //event_queue->schedule_completion(min, chunk_completion_callback, chunk_ptr);
+        if (event_queue) {
+            event_queue->schedule_event(min, [](void* arg){
+                Chunk* completed = static_cast<Chunk*>(arg);
+                Topology* topo = completed->get_topology();
+                topo->chunk_completion(completed->get_id());
+            }, chunk_ptr);
+        }
         break;
         //chunk->set_completion_event_id(new_event_id);
     }
@@ -263,12 +269,15 @@ void Topology::remove_chunk_from_links(Chunk* chunk) {
 
 //void Topology::chunk_completion_callback(void* arg) noexcept {
 void Topology::chunk_completion(int chunk_id) {
-    Chunk *chunk;
-    for (Chunk *cand_chunk : active_chunks) {
+    Chunk* chunk = nullptr;
+    for (Chunk* cand_chunk : active_chunks) {
         if (cand_chunk->get_id() == chunk_id) {
             chunk = cand_chunk;
             break;
         }
+    }
+    if (chunk == nullptr) {
+        return;
     }
     //Chunk* chunk = static_cast<Chunk*>(arg);
     Topology* topology = chunk->get_topology();

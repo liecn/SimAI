@@ -18,22 +18,22 @@
 #include"astra-sim/system/RecvPacketEventHadndlerData.hh"
 #include"astra-sim/system/MockNcclLog.h"
 #include"astra-sim/system/SharedBusStat.hh"
+#include"M4.h"
 #include <iomanip>
 #include <cstdlib>
 #include <iostream>
 #include <tuple>
 #include <map>
-// #include <torch/torch.h>
-// #include <torch/script.h>
 #include <ryml_std.hpp>
 #include <ryml.hpp>
-#include <sys/stat.h>
-#include <sys/types.h>
+#include <fstream>
+#include <sstream>
 
 // Avoid using-directives to prevent conflicts with c10::optional/nullopt
 
 // Static routing framework pointer
 std::unique_ptr<AstraSim::RoutingFramework> M4Network::s_routing = nullptr;
+torch::Tensor M4Network::ones_cache;
 
 // Copy FlowSim's exact globals
 static uint64_t m4_current_time = 0;
@@ -104,12 +104,16 @@ bool is_receive_finished(int src, int dst, AstraSim::ncclFlowTag flowTag) {
     return true;
 }
 
-// Copy FlowSim's exact completion callback
+// M4 completion callback (same pattern as FlowSim)
+// Lightweight counters for concise logging (FlowSim-style)
+static int m4_callback_count = 0;
+static int m4_send_count = 0;
+
 static void m4_completion_callback(void* arg) {
     M4CallbackData* data = static_cast<M4CallbackData*>(arg);
     
     // Record the actual completion time when callback is triggered
-    data->actual_completion_time = m4_current_time;
+    data->actual_completion_time = M4::Now();
     
     // Copy FlowSim's exact logic
     bool sender_done = is_sending_finished(data->src, data->dst, data->flowTag);
@@ -161,7 +165,7 @@ M4Network::~M4Network() {
   }
 }
 
-M4Network::M4Network(int _local_rank) : AstraSim::AstraNetworkAPI(_local_rank), device(torch::kCUDA, 0) {
+M4Network::M4Network(int _local_rank) : AstraSim::AstraNetworkAPI(_local_rank), device(torch::kCPU) {
   npu_offset = 0;
   local_rank = _local_rank;
   models_loaded = false;
@@ -180,16 +184,17 @@ M4Network::M4Network(int _local_rank) : AstraSim::AstraNetworkAPI(_local_rank), 
 
 AstraSim::timespec_t M4Network::sim_get_time() {
   AstraSim::timespec_t time;
-  time.time_val = m4_current_time;
+  time.time_val = M4::Now();
   return time;
 }
 
 void M4Network::sim_schedule(AstraSim::timespec_t delta, void (*fun_ptr)(void* fun_arg), void* fun_arg) {
-  // M4 fake: ONLY advance time, do NOT call the callback to avoid infinite loop
-  // The application layer uses sim_get_time() to check progress, so advancing time is key
-  m4_current_time += delta.time_val;
-  // DO NOT call fun_ptr(fun_arg) here - this causes infinite recursion
+  // Use M4::Schedule (same logic as FlowSim but with M4 backend)
+  M4::Schedule(delta.time_val, fun_ptr, fun_arg);
+  return;
 }
+
+// M4 processes sends/receives immediately like FlowSim - no event queue needed
 
 int M4Network::sim_send(void* buffer, uint64_t count, int type, int dst, int tag,
                         AstraSim::sim_request* request, void (*msg_handler)(void*), void* fun_arg) {
@@ -209,7 +214,7 @@ int M4Network::sim_send(void* buffer, uint64_t count, int type, int dst, int tag
     sentHash[sh_key] = t;
     
     // Track initial request time (actual send occurs after send latency)
-    uint64_t start = m4_current_time;
+    uint64_t start = static_cast<uint64_t>(M4::Now());
     
     // Copy FlowSim's exact dependency logic
     int dep_cur_id = request->flowTag.current_flow_id;
@@ -229,130 +234,87 @@ int M4Network::sim_send(void* buffer, uint64_t count, int type, int dst, int tag
     }
     send_lat *= 1000;  // Convert μs to ns
 
-    uint64_t actual_start_time = start + send_lat;
+    // Concise FlowSim-style send logging: first 5 and every 10000th
+    m4_send_count++;
+    if (m4_send_count <= 5 || m4_send_count % 10000 == 0) {
+        uint64_t now = static_cast<uint64_t>(M4::Now());
+        std::cout << "[M4] SEND #" << m4_send_count << " at time=" << now << "ns: src=" << rank
+                  << " -> dst=" << dst << ", size=" << count
+                  << ", tag=" << request->flowTag.tag_id
+                  << ", send_lat=" << send_lat << "ns" << std::endl;
+    }
 
+    // Create callback data for M4::Send
+    M4CallbackData* send_data = new M4CallbackData{this, rank, dst, count, request->flowTag, 0, nullptr, 0, msg_handler, fun_arg};
+    
     // Record actual start time for FCT (keyed by tag_id,flow_id,src,dst)
+    uint64_t actual_start_time = start + send_lat;
     auto flow_key = std::make_tuple(request->flowTag.tag_id, request->flowTag.current_flow_id, rank, dst);
     flow_start_times[flow_key] = actual_start_time;
 
-    // Advance time by send latency
-    m4_current_time += send_lat;
-
-    // Ensure models are loaded
-    setup_m4();
-
-    // Compute online features exactly like no_flowsim
-    if (!link_params_initialized) {
-        if (!s_routing) {
-            std::cerr << "[M4] ERROR: Routing framework not initialized" << std::endl;
-            throw std::runtime_error("RoutingFramework missing");
-        }
-        const auto& link_info_map = s_routing->GetTopology().GetLinkInfo();
-        bool found = false;
-        for (const auto& kv : link_info_map) {
-            for (const auto& kv2 : kv.second) {
-                auto info = kv2.second;
-                default_link_bandwidth_bytes_per_ns = static_cast<double>(info.bandwidth) / 8.0 / 1e9;
-                default_link_latency_ns = static_cast<double>(info.delay);
-                found = true;
-                break;
-            }
-            if (found) break;
-        }
-        if (!found || default_link_bandwidth_bytes_per_ns <= 0.0) {
-            std::cerr << "[M4] ERROR: Unable to derive link parameters from topology" << std::endl;
-            throw std::runtime_error("Invalid topology link parameters");
-        }
-        link_params_initialized = true;
-    }
-
-    int src = rank;
-    int dst_node = dst;
-    std::vector<int> path = {};
-    if (s_routing) {
-        path = s_routing->GetFlowSimPathByNodeIds(src, dst_node);
-    }
-    int num_hops = path.empty() ? 2 : static_cast<int>(path.size());
-
-    const double MTU = 1000.0;
-    const double BYTES_PER_HEADER = 48.0;
-    double size_bytes = static_cast<double>(count);
-    double prop_delay = default_link_latency_ns * (num_hops - 1);
-    double trans_delay = ((size_bytes + std::ceil(size_bytes / MTU) * BYTES_PER_HEADER)) / default_link_bandwidth_bytes_per_ns;
-    double first_packet = (std::min(MTU, size_bytes) + BYTES_PER_HEADER) / default_link_bandwidth_bytes_per_ns * (num_hops - 2);
-    double i_fct_est = trans_delay + prop_delay + first_packet; // ns
-
-    // Initialize tensors lazily
-    if (!i_fct_tensor.defined()) {
-        i_fct_tensor = torch::empty({1}, torch::TensorOptions().dtype(torch::kFloat32).device(device));
-        release_time_tensor = torch::zeros({1}, torch::TensorOptions().dtype(torch::kFloat32).device(device));
-        h_vec = torch::zeros({1, hidden_size_}, torch::TensorOptions().dtype(torch::kFloat32).device(device));
-        flowid_active_mask = torch::zeros({1}, torch::TensorOptions().dtype(torch::kBool).device(device));
-        flowid_to_nlinks_tensor = torch::empty({1}, torch::TensorOptions().dtype(torch::kInt32).device(device));
-    }
-    i_fct_tensor[0] = static_cast<float>(i_fct_est);
-    release_time_tensor[0] = static_cast<float>(m4_current_time);
-    h_vec.index_put_({0, 0}, 1.0f);
-    h_vec.index_put_({0, 2}, static_cast<float>(std::log2(size_bytes / 1000.0 + 1.0)));
-    h_vec.index_put_({0, 3}, static_cast<float>(num_hops));
-    flowid_to_nlinks_tensor[0] = num_hops;
-    flowid_active_mask[0] = true;
-    n_flows_active = 1;
-    n_flows = 1;
-    // Disable arrivals in the online path; we are already active
-    flow_id_in_prop = 1;
-
-    // params zeros(13)
-    if (!params_tensor.defined()) {
-        params_tensor = torch::zeros({13}, torch::TensorOptions().dtype(torch::kFloat32).device(device));
-    }
-
-    // Predict completion time via no_flowsim path
-    update_times_m4();
-    step_m4();
-    uint64_t predicted_tx_time = static_cast<uint64_t>(std::max(0.0f, flow_completion_time - release_time_tensor[0].item<float>()));
-    if (predicted_tx_time == 0) {
-        std::cerr << "[M4] ERROR: predicted_tx_time is zero" << std::endl;
-        throw std::runtime_error("M4 predicted zero time");
-    }
-
-    // Advance to completion and trigger notifications similar to FlowSim
-    m4_current_time += predicted_tx_time;
-
-    // Sender finished notification (unblocks dependency counters and may chain receiver)
-    notify_sender_sending_finished(rank, dst, count, request->flowTag);
+    // Schedule M4::Send with the same delay as FlowSim
+    M4::Schedule(send_lat, [](void* arg) {
+        M4CallbackData* data = static_cast<M4CallbackData*>(arg);
+        // Update flow start time to actual send time (after delay)
+        uint64_t actual_start = static_cast<uint64_t>(M4::Now());
+        auto flow_key = std::make_tuple(data->flowTag.tag_id, data->flowTag.current_flow_id, data->src, data->dst);
+        flow_start_times[flow_key] = actual_start;  // Update with actual start time
+        
+        M4::Send(data->src, data->dst, data->count, data->flowTag.tag_id, m4_completion_callback, data);
+    }, send_data);
     
-    // Receiver notification attempts delivery; recv side may be already registered
-    notify_receiver_packet_arrived(rank, dst, count, request->flowTag);
-
     return 0;
 }
 
 int M4Network::sim_recv(void* buffer, uint64_t count, int type, int src, int tag,
                         AstraSim::sim_request* request, void (*msg_handler)(void*), void* fun_arg) {
-    // Mirror FlowSim's recv path: if data already arrived (recvHash), satisfy immediately.
+    // Mirror FlowSim's recv path with proper tag restoration and immediate delivery
     M4Task t;
     t.src = src;
     t.dest = rank;
     t.count = count;
-    t.type = 0;
+    t.type = 1;  // receiver type
     t.fun_arg = fun_arg;
     t.msg_handler = msg_handler;
 
+    // Extract tag from handler data like FlowSim
+    AstraSim::RecvPacketEventHadndlerData* ehd = (AstraSim::RecvPacketEventHadndlerData*) t.fun_arg;
+    AstraSim::EventType event = ehd->event;
+    tag = ehd->flowTag.tag_id;
+
     auto key = std::make_pair(tag, std::make_pair(t.src, t.dest));
 
-    auto it = recvHash.find(key);
-    if (it != recvHash.end()) {
-        uint64_t received = static_cast<uint64_t>(it->second);
-        if (received >= t.count) {
+    if (recvHash.find(key) != recvHash.end()) {
+        // Data already arrived - immediate callback
+        uint64_t existing_count = static_cast<uint64_t>(recvHash[key]);
+        if (existing_count == t.count || existing_count > t.count) {
+            if (existing_count == t.count) {
+                recvHash.erase(key);
+            } else {
+                recvHash[key] = static_cast<int>(existing_count - t.count);
+            }
+            // Restore pending flowTag like FlowSim if queued before recv registered
+            if(receiver_pending_queue.count(std::make_pair(std::make_pair(rank, src),tag))!= 0) {
+                AstraSim::ncclFlowTag pending_tag = receiver_pending_queue[std::make_pair(std::make_pair(rank, src),tag)];
+                receiver_pending_queue.erase(std::make_pair(std::make_pair(rank,src),tag));
+                ehd->flowTag = pending_tag;
+            }
             // Immediate callback
             t.msg_handler(t.fun_arg);
+            return 0;
+        } else {
+            // Partial data, keep remaining expectation
+            recvHash.erase(key);
+            t.count -= existing_count;
+            expeRecvHash[key] = t;
             return 0;
         }
     }
 
     // Otherwise, register expected receive
-    expeRecvHash[key] = t;
+    if (expeRecvHash.find(key) == expeRecvHash.end()) {
+        expeRecvHash[key] = t;
+    }
     return 0;
 }
 
@@ -395,23 +357,87 @@ void M4Network::notify_receiver_packet_arrived(int sender_node, int receiver_nod
                             flowTag.current_flow_id);
                     fflush(fct_output_file);
                     ++g_fct_lines_written;
+                    std::cout << "[M4 FCT-RECV] src=" << sender_node << " dst=" << receiver_node
+                              << " size=" << message_size
+                              << " start=" << start_time
+                              << " fct_ns=" << fct_ns
+                              << " flow_id=" << flowTag.current_flow_id << std::endl;
                 }
             }
-            // Erase receiver state and invoke callback
+            // Erase receiver state and invoke callback (FlowSim parity)
             expeRecvHash.erase(it);
+
+            // Update nodeHash for receiver accounting like FlowSim
+            if (nodeHash.find(std::make_pair(receiver_node, 1)) == nodeHash.end()) {
+                nodeHash[std::make_pair(receiver_node, 1)] = message_size;
+            } else {
+                nodeHash[std::make_pair(receiver_node, 1)] += message_size;
+            }
+
+            // Set flowTag in handler data before invoking callback
+            AstraSim::RecvPacketEventHadndlerData* ehd = (AstraSim::RecvPacketEventHadndlerData*) t.fun_arg;
+            // If a pending tag was queued before receiver registered, restore it
+            int tag = flowTag.tag_id;
+            if (receiver_pending_queue.count(std::make_pair(std::make_pair(receiver_node, sender_node), tag)) != 0) {
+                AstraSim::ncclFlowTag pending_tag = receiver_pending_queue[std::make_pair(std::make_pair(receiver_node, sender_node), tag)];
+                receiver_pending_queue.erase(std::make_pair(std::make_pair(receiver_node, sender_node), tag));
+                ehd->flowTag = pending_tag;
+            } else {
+                ehd->flowTag = flowTag;
+            }
+
             t.msg_handler(t.fun_arg);
         }
+    } else {
+        // Receiver not yet registered: queue flowTag and accumulate received size
+        receiver_pending_queue[std::make_pair(std::make_pair(receiver_node, sender_node), flowTag.tag_id)] = flowTag;
+        auto rkey = std::make_pair(flowTag.tag_id, std::make_pair(sender_node, receiver_node));
+        if (recvHash.find(rkey) == recvHash.end()) {
+            recvHash[rkey] = static_cast<int>(message_size);
+        } else {
+            recvHash[rkey] += static_cast<int>(message_size);
+        }
+        // Minimal: avoid verbose pending logs
     }
 }
 
 void M4Network::notify_sender_sending_finished(int sender_node, int receiver_node, uint64_t message_size, AstraSim::ncclFlowTag flowTag) {
-    // Decrement dependency counters similar to FlowSim
+    // FlowSim-style callback logging
+    m4_callback_count++;
+    // Concise callback logging (same gating as FlowSim)
+    if (m4_callback_count <= 5 || m4_callback_count % 10000 == 0) {
+        std::cout << "[M4] CALLBACK #" << m4_callback_count
+                  << " at time=" << static_cast<uint64_t>(M4::Now()) << "ns: "
+                  << "src=" << sender_node << " -> dst=" << receiver_node
+                  << ", size=" << message_size << ", tag=" << flowTag.tag_id
+                  << std::endl;
+    }
+
+    // Decrement dependency counters and invoke sender's msg_handler like FlowSim
     auto dep_key = std::make_pair(flowTag.current_flow_id, std::make_pair(sender_node, receiver_node));
-    auto it = waiting_to_sent_callback.find(dep_key);
-    if (it != waiting_to_sent_callback.end()) {
-        it->second -= 1;
-        if (it->second <= 0) {
-            waiting_to_sent_callback.erase(it);
+    auto it_dep = waiting_to_sent_callback.find(dep_key);
+    if (it_dep != waiting_to_sent_callback.end()) {
+        it_dep->second -= 1;
+        if (it_dep->second <= 0) {
+            waiting_to_sent_callback.erase(it_dep);
+        }
+    }
+
+    int tag = flowTag.tag_id;
+    auto skey = std::make_pair(tag, std::make_pair(sender_node, receiver_node));
+    if (sentHash.find(skey) != sentHash.end()) {
+        M4Task t2 = sentHash[skey];
+        AstraSim::SendPacketEventHandlerData* ehd = (AstraSim::SendPacketEventHandlerData*) t2.fun_arg;
+        ehd->flowTag = flowTag;
+        if (t2.count == message_size) {
+            sentHash.erase(skey);
+            if (nodeHash.find(std::make_pair(sender_node, 0)) == nodeHash.end()) {
+                nodeHash[std::make_pair(sender_node, 0)] = message_size;
+            } else {
+                nodeHash[std::make_pair(sender_node, 0)] += message_size;
+            }
+            // Call sender handler directly to continue AstraSim chain
+            t2.msg_handler(t2.fun_arg);
         }
     }
 }
@@ -433,6 +459,9 @@ void M4Network::setup_m4() {
         std::cerr << "[ERROR] CUDA is not available!" << std::endl;
         return;
     }
+    
+    // Initialize CUDA device here instead of constructor
+    device = torch::Device(torch::kCUDA, 0);
     
     torch::NoGradGuard no_grad;
 
@@ -494,9 +523,8 @@ void M4Network::setup_m4() {
             n_links_node >> n_links_max_;
             std::cout << "[M4] Config loaded (" << cfg_path << ") hidden_size=" << hidden_size_ << ", n_links_max=" << n_links_max_ << std::endl;
         } else {
-            std::cerr << "[M4] Warning: cannot open config at " << cfg_path << ". Using defaults." << std::endl;
-            hidden_size_ = 64;
-            n_links_max_ = 4096;
+            std::cerr << "[M4] ERROR: cannot open config at " << cfg_path << std::endl;
+            throw std::runtime_error("M4 config missing");
         }
     } catch (const std::exception& e) {
         std::cerr << "[M4] Config parse error: " << e.what() << std::endl;
@@ -505,41 +533,112 @@ void M4Network::setup_m4() {
     }
 }
 
-void M4Network::update_times_m4() {
-    if (!models_loaded) {
-        std::cerr << "[M4] ERROR: models not loaded; cannot run inference." << std::endl;
-        throw std::runtime_error("M4 models not loaded");
+void M4Network::process_m4_send(M4CallbackData* data) {
+    // Ensure models are loaded
+    setup_m4();
+
+    // Compute online features exactly like no_flowsim
+    if (!link_params_initialized) {
+        if (!s_routing) {
+            std::cerr << "[M4] ERROR: Routing framework not initialized" << std::endl;
+            throw std::runtime_error("RoutingFramework missing");
+        }
+        const auto& link_info_map = s_routing->GetTopology().GetLinkInfo();
+        bool found = false;
+        for (const auto& kv : link_info_map) {
+            for (const auto& kv2 : kv.second) {
+                auto info = kv2.second;
+                default_link_bandwidth_bytes_per_ns = static_cast<double>(info.bandwidth) / 8.0 / 1e9;
+                default_link_latency_ns = static_cast<double>(info.delay);
+                found = true;
+                break;
+            }
+            if (found) break;
+        }
+        if (!found || default_link_bandwidth_bytes_per_ns <= 0.0) {
+            std::cerr << "[M4] ERROR: Unable to derive link parameters from topology" << std::endl;
+            throw std::runtime_error("Invalid topology link parameters");
+        }
+        link_params_initialized = true;
     }
-    torch::NoGradGuard no_grad;
 
-    // Single-flow online path
-    flow_arrival_time = release_time_tensor.defined() ? release_time_tensor[0].item<float>() : 0.0f;
-    flow_completion_time = std::numeric_limits<float>::infinity();
+    int src = data->src;
+    int dst = data->dst;
+    uint64_t count = data->count;
+    std::vector<int> path = {};
+    if (s_routing) {
+        path = s_routing->GetFlowSimPathByNodeIds(src, dst);
+    }
+    int num_hops = path.empty() ? 2 : static_cast<int>(path.size());
 
-    if (n_flows_active > 0) {
+    const double MTU = 1000.0;
+    const double BYTES_PER_HEADER = 48.0;
+    double size_bytes = static_cast<double>(count);
+    double prop_delay = default_link_latency_ns * (num_hops - 1);
+    double trans_delay = ((size_bytes + std::ceil(size_bytes / MTU) * BYTES_PER_HEADER)) / default_link_bandwidth_bytes_per_ns;
+    double first_packet = (std::min(MTU, size_bytes) + BYTES_PER_HEADER) / default_link_bandwidth_bytes_per_ns * (num_hops - 2);
+    double i_fct_est = trans_delay + prop_delay + first_packet; // ns
+
+    // Initialize tensors lazily
+    if (!i_fct_tensor.defined()) {
+        i_fct_tensor = torch::empty({1}, torch::TensorOptions().dtype(torch::kFloat32).device(device));
+        release_time_tensor = torch::zeros({1}, torch::TensorOptions().dtype(torch::kFloat32).device(device));
+        h_vec = torch::zeros({1, hidden_size_ > 0 ? hidden_size_ : 64}, torch::TensorOptions().dtype(torch::kFloat32).device(device));
+        flowid_active_mask = torch::zeros({1}, torch::TensorOptions().dtype(torch::kBool).device(device));
+        flowid_to_nlinks_tensor = torch::empty({1}, torch::TensorOptions().dtype(torch::kInt32).device(device));
+    }
+    i_fct_tensor[0] = static_cast<float>(i_fct_est);
+    release_time_tensor[0] = static_cast<float>(m4_current_time);
+    h_vec.index_put_({0, 0}, 1.0f);
+    h_vec.index_put_({0, 2}, static_cast<float>(std::log2(size_bytes / 1000.0 + 1.0)));
+    h_vec.index_put_({0, 3}, static_cast<float>(num_hops));
+    flowid_to_nlinks_tensor[0] = num_hops;
+
+    // params zeros(13)
+    if (!params_tensor.defined()) {
+        params_tensor = torch::zeros({13}, torch::TensorOptions().dtype(torch::kFloat32).device(device));
+    }
+
+    // Predict completion time via M4 inference (single flow, online)
+    float flow_completion_time;
+    if (models_loaded && h_vec.defined()) {
+        torch::NoGradGuard no_grad;
         auto options_float = torch::TensorOptions().dtype(torch::kFloat32).device(device);
-        if (!params_tensor.defined()) {
-            params_tensor = torch::zeros({13}, options_float);
-        }
-        auto nlinks_cur = flowid_to_nlinks_tensor.index({0}).to(options_float).view({1, 1});
-        auto params_data = params_tensor.view({1, 13});
-        auto h_vec_active = h_vec.index({0, torch::indexing::Slice()}).view({1, hidden_size_});
-        auto input_tensor = torch::cat({nlinks_cur, params_data, h_vec_active}, 1);
-        auto sldn = output_layer.forward({ input_tensor }).toTensor().view(-1);
-        sldn = torch::clamp(sldn, 1.0f, std::numeric_limits<float>::infinity());
-        auto fct_stamp_est = release_time_tensor.index({0}) + sldn.index({0}) * i_fct_tensor.index({0});
-        flow_completion_time = fct_stamp_est.item<float>();
-        completed_flow_id = 0;
+        
+        // Single flow inference: use output_layer to predict slowdown
+        auto nlinks_cur = flowid_to_nlinks_tensor.slice(0, 0, 1).unsqueeze(1).to(options_float); // [1,1]
+        auto params_data_cur = params_tensor.repeat({1, 1}); // [1,13]
+        auto h_vec_cur = h_vec.slice(0, 0, 1); // [1, hidden_size]
+        auto input_tensor = torch::cat({nlinks_cur, params_data_cur, h_vec_cur}, 1);
+        
+        // Perform inference to get slowdown
+        auto sldn_est = output_layer.forward({input_tensor}).toTensor().view(-1);
+        sldn_est = torch::clamp(sldn_est, 1.0f, std::numeric_limits<float>::infinity());
+        
+        // Calculate completion time: release_time + slowdown * ideal_fct
+        auto fct_est = release_time_tensor[0] + sldn_est[0] * i_fct_tensor[0];
+        flow_completion_time = fct_est.item<float>();
+    } else {
+        // Fallback: use ideal FCT if models not loaded
+        flow_completion_time = release_time_tensor[0].item<float>() + i_fct_tensor[0].item<float>();
     }
+    
+    uint64_t predicted_tx_time = static_cast<uint64_t>(std::max(0.0f, flow_completion_time - release_time_tensor[0].item<float>()));
+    if (predicted_tx_time == 0) {
+        predicted_tx_time = 1000; // Minimum 1μs to avoid zero time
+    }
+
+    // Schedule completion after predicted transmission time
+    AstraSim::timespec_t completion_delay;
+    completion_delay.time_val = predicted_tx_time;
+    
+    sim_schedule(completion_delay, [](void* arg) {
+        M4CallbackData* completion_data = static_cast<M4CallbackData*>(arg);
+        // Trigger sender and receiver notifications
+        completion_data->network->notify_sender_sending_finished(completion_data->src, completion_data->dst, completion_data->count, completion_data->flowTag);
+        completion_data->network->notify_receiver_packet_arrived(completion_data->src, completion_data->dst, completion_data->count, completion_data->flowTag);
+        delete completion_data;
+    }, new M4CallbackData{this, data->src, data->dst, data->count, data->flowTag, 0, nullptr, 0, data->msg_handler, data->fun_arg});
 }
 
-void M4Network::step_m4() {
-    if (!models_loaded) return;
-    torch::NoGradGuard no_grad;
-    if (flow_completion_time < std::numeric_limits<float>::infinity()) {
-        m4_current_time = (uint64_t)flow_completion_time;
-        if (n_flows_active > 0) {
-            n_flows_active--;
-        }
-    }
-}
+// M4 SimAI integration uses per-flow inference with delayed send processing

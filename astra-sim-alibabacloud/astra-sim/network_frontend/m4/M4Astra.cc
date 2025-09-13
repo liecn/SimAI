@@ -25,6 +25,8 @@
 #include "astra-sim/system/routing/include/RoutingFramework.h"
 
 #include "M4Network.h"
+#include "M4.h"
+#include "TopologyBuilder.h"
 #include <tuple>
 #include <stdexcept>
 #include <sys/stat.h>
@@ -144,8 +146,8 @@ int main(int argc,char *argv[]) {
       
       std::cout << "[ROUTING] M4 routing framework setup completed" << std::endl;
 
-      // Hand over routing framework to M4Network (same as FlowSim pattern)
-      M4Network::SetRoutingFramework(std::move(routing_framework));
+      // Hand over routing framework to M4 backend (same as FlowSim pattern)
+      M4::SetRoutingFramework(std::move(routing_framework));
     }
   }
   
@@ -238,22 +240,39 @@ int main(int argc,char *argv[]) {
     systems.push_back(system);
   }
   
-  // Fire workloads (same as FlowSim)
+  // Initialize M4 BEFORE firing workloads (same order as FlowSim)
+  std::cout << "[M4] Creating event queue and topology..." << std::endl;
+  std::shared_ptr<EventQueue> event_queue = std::make_shared<EventQueue>();
+  std::shared_ptr<Topology> topology = construct_fat_tree_topology(user_param.network_topo);
+  
+  std::cout << "[M4] Calling M4::Init..." << std::endl;
+  M4::Init(event_queue, topology);
+
+  // Fire workloads AFTER M4 backend is initialized (same as FlowSim)
+  std::cout << "[M4] Firing workloads..." << std::endl;
   for (int i = 0; i < nodes_num; i++) {
     systems[i]->workload->fire();
   }
   
-  // M4 stub - no actual simulation, just immediate completion
-  std::cout << "[M4] Stub execution completed" << std::endl;
-  
-  // Print data summary once (same as FlowSim)
+  std::cout << "[M4] Calling M4::Run..." << std::endl;
+  M4::Run();
+
+  // Print data summary once
   if (!networks.empty()) {
     networks[0]->sim_finish();
   }
   
   // Print routing statistics (same as FlowSim)
   std::cout << "\n[SIMULATION COMPLETE] Printing routing statistics..." << std::endl;
+  
+  // Get actual routing statistics from M4
+  const AstraSim::RoutingFramework* routing_framework = M4::GetRoutingFramework();
+  
   std::cout << "[ROUTING] Routing framework cleaned up." << std::endl;
+  
+  // Clean shutdown (same as FlowSim)
+  M4::Stop();
+  M4::Destroy();
 
   std::cout << "[M4] SimAI-M4 finished" << std::endl;
   return 0;

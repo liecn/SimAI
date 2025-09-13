@@ -50,12 +50,10 @@ class EventQueue {
    * @param callback_arg argument of the callback function
    * @return EventId ID of the scheduled event
    */
-  /*
   EventId schedule_event(
       EventTime event_time,
       Callback callback,
       CallbackArg callback_arg) noexcept;
-  */
 
   /**
    * Cancel a scheduled event.
@@ -75,7 +73,10 @@ class EventQueue {
   /// next event ID to be assigned
   EventId next_event_id;
 
-  // Storage for next events
+  /// FlowSim-style event queue for multiple concurrent events
+  std::list<EventList> event_queue;
+
+  // Storage for next events (M4-style compatibility)
   Event* next_arrival;
   Event* next_completion;
 };

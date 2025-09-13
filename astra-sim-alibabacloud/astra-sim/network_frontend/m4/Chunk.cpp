@@ -63,11 +63,10 @@ void Chunk::set_rate(double rate) noexcept {
 }
 
 void Chunk::invoke_callback() noexcept {
-    // std::cerr << "Debug: Invoking callback for chunk ID: " << completion_event_id_ << std::endl;
-    
-    //(*callback)(callback_arg);
-
-    // std::cerr << "Debug: Callback invoked for chunk ID: " << completion_event_id_ << std::endl;
+    // Invoke the completion callback when the chunk finishes transmission
+    if (callback != nullptr) {
+        (*callback)(callback_arg);
+    }
 }
 
 void Chunk::set_transmission_start_time(EventTime start_time) noexcept {

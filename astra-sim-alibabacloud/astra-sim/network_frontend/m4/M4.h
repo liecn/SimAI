@@ -1,0 +1,102 @@
+/* 
+*Copyright (c) 2024, Alibaba Group;
+*Licensed under the Apache License, Version 2.0 (the "License");
+*you may not use this file except in compliance with the License.
+*You may obtain a copy of the License at
+
+*   http://www.apache.org/licenses/LICENSE-2.0
+
+*Unless required by applicable law or agreed to in writing, software
+*distributed under the License is distributed on an "AS IS" BASIS,
+*WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+*See the License for the specific language governing permissions and
+*limitations under the License.
+*/
+
+#ifndef __M4_H__
+#define __M4_H__
+
+#include <memory>
+#include <vector>
+#include <functional>
+#include "astra-sim/system/routing/include/RoutingFramework.h"
+#include <torch/torch.h>
+#include <torch/script.h>
+#include "Type.h"  // For Callback and CallbackArg types
+
+// Forward declarations
+class EventQueue;
+class Topology;
+
+// Use the Callback type from Type.h (function pointer, not std::function)
+// using Callback = std::function<void(void*)>;
+// using CallbackArg = void*;
+
+/**
+ * M4 Backend - ML-based network simulation
+ * Similar structure to FlowSim but uses ML inference for completion time prediction
+ */
+class M4 {
+private:
+    // Core components (same as FlowSim)
+    static std::shared_ptr<EventQueue> event_queue;
+    static std::shared_ptr<Topology> topology;
+    static std::unique_ptr<AstraSim::RoutingFramework> routing_framework_;
+    
+    // M4-specific ML components
+    static torch::Device device;
+    static torch::jit::script::Module lstmcell_time, lstmcell_rate, lstmcell_time_link, lstmcell_rate_link;
+    static torch::jit::script::Module output_layer, gnn_layer_0, gnn_layer_1, gnn_layer_2;
+    static torch::Tensor params_tensor;
+    static bool models_loaded;
+    static int32_t hidden_size_;
+    static int32_t n_links_max_;
+    
+    // Multi-flow state management (from @inference/ ground truth)
+    static torch::Tensor h_vec;
+    static torch::Tensor flowid_active_mask;
+    static torch::Tensor edge_index;
+    static torch::Tensor z_t_link;
+    static torch::Tensor link_to_graph_id;
+    static torch::Tensor link_to_nflows;
+    static torch::Tensor flow_to_graph_id;
+    static torch::Tensor time_last;
+    static torch::Tensor release_time_tensor;
+    static torch::Tensor flowid_to_nlinks_tensor;
+    static torch::Tensor i_fct_tensor;
+    
+    // Flow and graph management
+    static int32_t n_flows_max;
+    static int32_t n_flows_active;
+    static int32_t n_flows_completed;
+    static int32_t graph_id_counter;
+    static int32_t graph_id_cur;
+    static float time_clock;
+    static int32_t next_flow_id;
+
+public:
+    // Core M4 functions (mirror FlowSim interface)
+    static void Init(std::shared_ptr<EventQueue> event_queue, std::shared_ptr<Topology> topo);
+    static void Run();
+    static void Stop();
+    static void Destroy();
+    
+    // Scheduling and sending (same interface as FlowSim)
+    static void Schedule(uint64_t delay, void (*fun_ptr)(void* fun_arg), void* fun_arg);
+    static void Send(int src, int dst, uint64_t size, int tag, Callback callback, CallbackArg callbackArg);
+    static double Now();
+    
+    // Routing framework management (same as FlowSim)
+    static void SetRoutingFramework(std::unique_ptr<AstraSim::RoutingFramework> routing_framework);
+    static const AstraSim::RoutingFramework* GetRoutingFramework();
+    static bool IsRoutingFrameworkLoaded();
+    
+    // M4-specific ML setup
+    static void SetupML();
+    
+private:
+    // M4-specific completion callback with ML inference
+    static void m4_completion_callback(void* arg);
+};
+
+#endif // __M4_H__
