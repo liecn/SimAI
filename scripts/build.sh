@@ -62,6 +62,7 @@ function compile {
             rm -rf "${TARGET_BIN_DIR:?}"/SimAI_m4
         fi
         cd "${SIMAI_DIR:?}"
+        ./build.sh -lr m4
         ./build.sh -c m4
         ln -s "${SOURCE_M4_BIN_DIR:?}" "${TARGET_BIN_DIR:?}"/SimAI_m4;;
     esac

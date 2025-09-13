@@ -93,7 +93,7 @@ class MetaData {
 
 class AstraNetworkAPI {
  public:
-  enum class BackendType { NotSpecified, Garnet, NS3, Analytical, FlowSim };
+  enum class BackendType { NotSpecified, Garnet, NS3, Analytical, FlowSim, M4 };
   bool enabled;
 
   virtual BackendType get_backend_type() {

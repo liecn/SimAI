@@ -32,7 +32,7 @@
 
 #define RESULT_PATH "./simai_m4_"
 
-using namespace std;
+// Avoid global using-directives; prefer std:: qualifiers
 
 // Global variable definitions
 std::map<std::pair<std::pair<int, int>,int>, AstraSim::ncclFlowTag> receiver_pending_queue;
@@ -143,6 +143,9 @@ int main(int argc,char *argv[]) {
       }
       
       std::cout << "[ROUTING] M4 routing framework setup completed" << std::endl;
+
+      // Hand over routing framework to M4Network (same as FlowSim pattern)
+      M4Network::SetRoutingFramework(std::move(routing_framework));
     }
   }
   
