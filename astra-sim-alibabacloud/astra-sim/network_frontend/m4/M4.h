@@ -19,6 +19,8 @@
 #include <memory>
 #include <vector>
 #include <functional>
+#include <unordered_map>
+#include <unordered_set>
 #include "astra-sim/system/routing/include/RoutingFramework.h"
 #include <torch/torch.h>
 #include <torch/script.h>
@@ -74,6 +76,13 @@ private:
     static float time_clock;
     static int32_t next_flow_id;
 
+    // Link indexing for graph construction (derived from RoutingFramework paths)
+    static std::unordered_map<long long, int32_t> link_key_to_index; // key = ((int64_t)u<<32)|v
+    static int32_t next_link_index;
+
+    // Store per-flow link indices (built from RoutingFramework paths)
+    static std::vector<std::vector<int32_t>> flowid_to_link_indices;
+
 public:
     // Core M4 functions (mirror FlowSim interface)
     static void Init(std::shared_ptr<EventQueue> event_queue, std::shared_ptr<Topology> topo);
@@ -93,10 +102,28 @@ public:
     
     // M4-specific ML setup
     static void SetupML();
+    static void OnFlowCompleted(int flow_id);
+    static void ScheduleNextForGraph(int32_t graph_id);
     
 private:
     // M4-specific completion callback with ML inference
     static void m4_completion_callback(void* arg);
+
+    // Track currently active flows for batching
+    static std::vector<int32_t> active_flows;
+    struct M4CompletionData {
+        int src;
+        int dst;
+        uint64_t size;
+        int tag;
+        uint64_t start_time;
+        int flow_id;
+        int graph_id;
+        Callback callback;
+        CallbackArg callbackArg;
+    };
+    static std::unordered_map<int32_t, M4CompletionData*> pending_map;
+    static std::unordered_set<int32_t> scheduled_flows;
 };
 
 #endif // __M4_H__

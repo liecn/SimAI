@@ -234,14 +234,14 @@ int M4Network::sim_send(void* buffer, uint64_t count, int type, int dst, int tag
     }
     send_lat *= 1000;  // Convert μs to ns
 
-    // Concise FlowSim-style send logging: first 5 and every 10000th
+    // Match FlowSim's EXACT send logging format
     m4_send_count++;
     if (m4_send_count <= 5 || m4_send_count % 10000 == 0) {
         uint64_t now = static_cast<uint64_t>(M4::Now());
-        std::cout << "[M4] SEND #" << m4_send_count << " at time=" << now << "ns: src=" << rank
-                  << " -> dst=" << dst << ", size=" << count
-                  << ", tag=" << request->flowTag.tag_id
-                  << ", send_lat=" << send_lat << "ns" << std::endl;
+        std::cout << "[M4] SEND #" << m4_send_count << " at time=" << now << "ns: "
+                  << "src=" << rank << " (group=" << (rank / 16) << ") -> "
+                  << "dst=" << dst << " (group=" << (dst / 16) << "), "
+                  << "size=" << count << ", tag=" << request->flowTag.tag_id << std::endl;
     }
 
     // Create callback data for M4::Send
@@ -443,6 +443,18 @@ void M4Network::notify_sender_sending_finished(int sender_node, int receiver_nod
 }
 
 int M4Network::sim_finish() {
+    // Match FlowSim's exact data transfer statistics
+    for (auto it = nodeHash.begin(); it != nodeHash.end(); it++) {
+        std::pair<int, int> p = it->first;
+        if (p.second == 0) {
+            std::cout << "All data sent from node " << p.first << " is " << it->second << "\n";
+        } else {
+            std::cout << "All data received by node " << p.first << " is " << it->second << "\n";
+        }
+    }
+    // Match FlowSim's FCT summary format exactly
+    std::cout << "[FCT SUMMARY] lines=" << g_fct_lines_written << std::endl;
+    
     if (fct_output_file) {
         fflush(fct_output_file);
     }
@@ -539,11 +551,12 @@ void M4Network::process_m4_send(M4CallbackData* data) {
 
     // Compute online features exactly like no_flowsim
     if (!link_params_initialized) {
-        if (!s_routing) {
+        const AstraSim::RoutingFramework* rf = M4::GetRoutingFramework();
+        if (!rf) {
             std::cerr << "[M4] ERROR: Routing framework not initialized" << std::endl;
-            throw std::runtime_error("RoutingFramework missing");
+            return;
         }
-        const auto& link_info_map = s_routing->GetTopology().GetLinkInfo();
+        const auto& link_info_map = rf->GetTopology().GetLinkInfo();
         bool found = false;
         for (const auto& kv : link_info_map) {
             for (const auto& kv2 : kv.second) {
@@ -566,8 +579,8 @@ void M4Network::process_m4_send(M4CallbackData* data) {
     int dst = data->dst;
     uint64_t count = data->count;
     std::vector<int> path = {};
-    if (s_routing) {
-        path = s_routing->GetFlowSimPathByNodeIds(src, dst);
+    if (const AstraSim::RoutingFramework* rf = M4::GetRoutingFramework()) {
+        path = rf->GetFlowSimPathByNodeIds(src, dst);
     }
     int num_hops = path.empty() ? 2 : static_cast<int>(path.size());
 
@@ -628,17 +641,8 @@ void M4Network::process_m4_send(M4CallbackData* data) {
         predicted_tx_time = 1000; // Minimum 1μs to avoid zero time
     }
 
-    // Schedule completion after predicted transmission time
-    AstraSim::timespec_t completion_delay;
-    completion_delay.time_val = predicted_tx_time;
-    
-    sim_schedule(completion_delay, [](void* arg) {
-        M4CallbackData* completion_data = static_cast<M4CallbackData*>(arg);
-        // Trigger sender and receiver notifications
-        completion_data->network->notify_sender_sending_finished(completion_data->src, completion_data->dst, completion_data->count, completion_data->flowTag);
-        completion_data->network->notify_receiver_packet_arrived(completion_data->src, completion_data->dst, completion_data->count, completion_data->flowTag);
-        delete completion_data;
-    }, new M4CallbackData{this, data->src, data->dst, data->count, data->flowTag, 0, nullptr, 0, data->msg_handler, data->fun_arg});
+    // Schedule completion after predicted transmission time (FlowSim-style path)
+    M4::Schedule(predicted_tx_time, m4_completion_callback, data);
 }
 
 // M4 SimAI integration uses per-flow inference with delayed send processing
