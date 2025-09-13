@@ -878,7 +878,7 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
         }
       }
       sw->m_mmu->ConfigNPort(sw->GetNDevices() - 1);
-      sw->m_mmu->ConfigBufferSize(buffer_size * 1024 * 1024);
+      sw->m_mmu->ConfigBufferSize(buffer_size * 1024);
       sw->m_mmu->node_id = sw->GetId();
     } else if(n.Get(i)->GetNodeType() == 2){ 
 			Ptr<NVSwitchNode> sw = DynamicCast<NVSwitchNode>(n.Get(i));
@@ -898,7 +898,7 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
         }
       }
 			sw->m_mmu->ConfigNPort(sw->GetNDevices()-1);
-			sw->m_mmu->ConfigBufferSize(buffer_size* 1024 * 1024);
+			sw->m_mmu->ConfigBufferSize(buffer_size* 1024);
 			sw->m_mmu->node_id = sw->GetId();
 		}
   }

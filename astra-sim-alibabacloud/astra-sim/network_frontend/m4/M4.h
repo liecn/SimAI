@@ -67,6 +67,13 @@ private:
     static torch::Tensor flowid_to_nlinks_tensor;
     static torch::Tensor i_fct_tensor;
     
+    // Additional tensors from @inference/ for complete ML pipeline
+    static torch::Tensor flowid_to_linkid_flat_tensor;
+    static torch::Tensor flowid_to_linkid_offsets_tensor;
+    static torch::Tensor edges_flow_ids_tensor;
+    static torch::Tensor edges_link_ids_tensor;
+    static torch::Tensor ones_cache;
+    
     // Flow and graph management
     static int32_t n_flows_max;
     static int32_t n_flows_active;
@@ -82,6 +89,9 @@ private:
 
     // Store per-flow link indices (built from RoutingFramework paths)
     static std::vector<std::vector<int32_t>> flowid_to_link_indices;
+    
+    // Flow callback storage
+    static std::unordered_map<int, std::pair<void(*)(void*), void*>> flow_callbacks;
 
 public:
     // Core M4 functions (mirror FlowSim interface)
@@ -94,6 +104,13 @@ public:
     static void Schedule(uint64_t delay, void (*fun_ptr)(void* fun_arg), void* fun_arg);
     static void Send(int src, int dst, uint64_t size, int tag, Callback callback, CallbackArg callbackArg);
     static double Now();
+    
+    // Flow management functions
+    static int AddActiveFlow(int src, int dst, uint64_t size, const std::vector<int>& node_path, Callback callback, CallbackArg callbackArg);
+    
+    // ML batch processing function (uses @inference/ approach: MLP for prediction, LSTM+GNN for state updates)
+    static void ProcessFlowBatch();
+    static void UpdateFlowStates();
     
     // Routing framework management (same as FlowSim)
     static void SetRoutingFramework(std::unique_ptr<AstraSim::RoutingFramework> routing_framework);

@@ -26,6 +26,7 @@
 #include <ryml.hpp>
 #include <fstream>
 #include <sstream>
+#include <chrono>
 
 // Static members initialization (same pattern as FlowSim)
 std::shared_ptr<EventQueue> M4::event_queue = nullptr;
@@ -44,7 +45,7 @@ torch::jit::script::Module M4::gnn_layer_1;
 torch::jit::script::Module M4::gnn_layer_2;
 torch::Tensor M4::params_tensor;
 bool M4::models_loaded = false;
-int32_t M4::hidden_size_ = 64;
+int32_t M4::hidden_size_ = 200; // Model expects 214 total: 1+13+200=214 (matches main_m4_noflowsim.cpp)
 int32_t M4::n_links_max_ = 4096;
 
 // Multi-flow state management (from @inference/ ground truth)
@@ -61,6 +62,13 @@ torch::Tensor M4::release_time_tensor;
 torch::Tensor M4::flowid_to_nlinks_tensor;
 torch::Tensor M4::i_fct_tensor;
 
+// Additional tensors from @inference/ for complete ML pipeline
+torch::Tensor M4::flowid_to_linkid_flat_tensor;
+torch::Tensor M4::flowid_to_linkid_offsets_tensor;
+torch::Tensor M4::edges_flow_ids_tensor;
+torch::Tensor M4::edges_link_ids_tensor;
+torch::Tensor M4::ones_cache;
+
 // Flow and graph management
 int32_t M4::n_flows_max = 1000000;  // Large enough for simulation
 int32_t M4::n_flows_active = 0;
@@ -72,6 +80,9 @@ int32_t M4::next_flow_id = 0;  // For assigning unique flow IDs
 std::unordered_map<long long, int32_t> M4::link_key_to_index;
 int32_t M4::next_link_index = 0;
 std::vector<std::vector<int32_t>> M4::flowid_to_link_indices;
+
+// Flow callback storage
+std::unordered_map<int, std::pair<void(*)(void*), void*>> M4::flow_callbacks;
 std::vector<int32_t> M4::active_flows;
 std::unordered_map<int32_t, M4::M4CompletionData*> M4::pending_map; // flow_id -> completion data
 std::unordered_set<int32_t> M4::scheduled_flows; // flows with a scheduled completion event
@@ -144,13 +155,14 @@ void M4::Init(std::shared_ptr<EventQueue> event_queue, std::shared_ptr<Topology>
     // Prepare per-flow link storage
     flowid_to_link_indices.assign(n_flows_max, {});
     
-    std::cout << "[M4] SetupML() completed successfully! models_loaded=" << models_loaded << ", n_flows_max=" << n_flows_max << ", hidden_size_=" << hidden_size_ << std::endl;
+    std::cout << "[M4] Init() completed successfully! models_loaded=" << models_loaded << ", n_flows_max=" << n_flows_max << ", hidden_size_=" << hidden_size_ << std::endl;
 }
 
 void M4::SetupML() {
     if (models_loaded) return;
     
-    std::cout << "[M4] SetupML() called..." << std::endl;
+    auto setup_start = std::chrono::high_resolution_clock::now();
+    std::cout << "[M4] SetupML() starting..." << std::endl;
     
     if (!torch::cuda::is_available()) {
         std::cerr << "[M4] ERROR: CUDA is not available!" << std::endl;
@@ -161,48 +173,54 @@ void M4::SetupML() {
     
     torch::NoGradGuard no_grad;
     
-    // Model directory: use relative path from M4 frontend
+    // Model directory: use local models directory
     const std::string model_dir = "./astra-sim-alibabacloud/astra-sim/network_frontend/m4/models/";
 
     
+    // Load ALL models as required by M4 inference (same as inference main_m4_noflowsim.cpp)
     try {
-    
+        std::cout << "[M4] Loading all required models..." << std::endl;
         lstmcell_time = torch::jit::load(model_dir + "lstmcell_time.pt", device);
         lstmcell_rate = torch::jit::load(model_dir + "lstmcell_rate.pt", device);
-        lstmcell_time_link = torch::jit::load(model_dir + "lstmcell_time_link.pt", device);
         lstmcell_rate_link = torch::jit::load(model_dir + "lstmcell_rate_link.pt", device);
+        lstmcell_time_link = torch::jit::load(model_dir + "lstmcell_time_link.pt", device);
         output_layer = torch::jit::load(model_dir + "output_layer.pt", device);
         gnn_layer_0 = torch::jit::load(model_dir + "gnn_layer_0.pt", device);
         gnn_layer_1 = torch::jit::load(model_dir + "gnn_layer_1.pt", device);
         gnn_layer_2 = torch::jit::load(model_dir + "gnn_layer_2.pt", device);
-
-        // Set models to evaluation mode and optimize for inference
-        lstmcell_time.eval();
-        lstmcell_rate.eval();
-        lstmcell_time_link.eval();
-        lstmcell_rate_link.eval();
-        output_layer.eval();
-        gnn_layer_0.eval();
-        gnn_layer_1.eval();
-        gnn_layer_2.eval();
-
-        lstmcell_time = torch::jit::optimize_for_inference(lstmcell_time);
-        lstmcell_rate = torch::jit::optimize_for_inference(lstmcell_rate);
-        lstmcell_time_link = torch::jit::optimize_for_inference(lstmcell_time_link);
-        lstmcell_rate_link = torch::jit::optimize_for_inference(lstmcell_rate_link);
-        output_layer = torch::jit::optimize_for_inference(output_layer);
-        gnn_layer_0 = torch::jit::optimize_for_inference(gnn_layer_0);
-        gnn_layer_1 = torch::jit::optimize_for_inference(gnn_layer_1);
-        gnn_layer_2 = torch::jit::optimize_for_inference(gnn_layer_2);
-
-        models_loaded = true;
-    
-        
-    } catch (const std::exception& e) {
-        std::cerr << "[M4] ERROR: Failed to load M4 models: " << e.what() << std::endl;
+        std::cout << "[M4] All models loaded successfully" << std::endl;
+    }
+    catch (const c10::Error& e) {
+        std::cerr << "[M4] ERROR: Failed to load models: " << e.what() << std::endl;
         std::cerr << "[M4] ERROR: Model directory: " << model_dir << std::endl;
         models_loaded = false;
+        return;
     }
+
+    // Set models to evaluation mode
+    std::cout << "[M4] Setting models to evaluation mode..." << std::endl;
+    lstmcell_time.eval();
+    lstmcell_rate.eval();
+    lstmcell_rate_link.eval();
+    lstmcell_time_link.eval();
+    output_layer.eval();
+    gnn_layer_0.eval();
+    gnn_layer_1.eval();
+    gnn_layer_2.eval();
+
+    // Optimize models for inference
+    std::cout << "[M4] Optimizing models for inference..." << std::endl;
+    lstmcell_time = torch::jit::optimize_for_inference(lstmcell_time);
+    lstmcell_rate = torch::jit::optimize_for_inference(lstmcell_rate);
+    lstmcell_time_link = torch::jit::optimize_for_inference(lstmcell_time_link);
+    lstmcell_rate_link = torch::jit::optimize_for_inference(lstmcell_rate_link);
+    output_layer = torch::jit::optimize_for_inference(output_layer);
+    gnn_layer_0 = torch::jit::optimize_for_inference(gnn_layer_0);
+    gnn_layer_1 = torch::jit::optimize_for_inference(gnn_layer_1);
+    gnn_layer_2 = torch::jit::optimize_for_inference(gnn_layer_2);
+    std::cout << "[M4] Model optimization completed" << std::endl;
+
+    models_loaded = true;
 
     // Parse config for hidden_size and n_links_max
     try {
@@ -228,16 +246,42 @@ void M4::SetupML() {
         n_links_max_ = 4096;
     }
     
-    // Initialize params tensor (zeros(13))
-    params_tensor = torch::zeros({13}, torch::TensorOptions().dtype(torch::kFloat32).device(device));
+    // Initialize params tensor with ACTUAL network configuration from SimAI.conf
+    // Structure from consts.py: [bfsz(0), fwin(1), dctcp_flag(2), dcqcn_flag(3), hp_flag(4), timely_flag(5), 
+    //                           dctcp_k(6), dcqcn_k_min(7), dcqcn_k_max(8), u_tgt(9), hpai(10), timely_t_low(11), timely_t_high(12)]
+    std::vector<float> param_values(13, 0.0f);
+    
+    // Create parameter vector to match inference expectation (loaded from .npy file in inference)
+    // Use SimAI.conf values: CC_MODE=8 (DCTCP), BUFFER_SIZE=10, U_TARGET=0.95
+    param_values[0] = 10.0f;   // bfsz (BUFFER_SIZE from SimAI.conf)
+    param_values[1] = 15.0f;   // fwin (default from consts.py)
+    
+    // Set CC type: CC_MODE=8 corresponds to DCTCP (index 0 in CC_LIST = ["dctcp", "dcqcn_paper_vwin", "hp", "timely_vwin"])
+    // From consts.py: CC_DICT = {"dctcp": 8, ...} - so CC_MODE=8 is indeed DCTCP
+    param_values[2] = 1.0f;    // dctcp flag (index 2 = CC_IDX_BASE + 0)
+    
+    // Set DCTCP-specific parameters from SimAI.conf and consts.py defaults
+    param_values[6] = 10.0f;   // dctcp_k (default from consts.py)
+    
+    params_tensor = torch::from_blob(param_values.data(), {13}, torch::TensorOptions().dtype(torch::kFloat32)).to(device).clone();
+    
+    // Read topology parameters for logging
+    float topo_bandwidth = topology->get_bandwidth(); // in bps
+    float topo_latency = topology->get_latency(); // in ns
+    
+    std::cout << "[M4] Loaded network parameters from SimAI.conf: bfsz=" << param_values[0] << ", fwin=" << param_values[1] 
+              << ", cc=dctcp, u_tgt=" << param_values[9] << "%, topology_bw=" << (topo_bandwidth * 8.0) << "Gbps, topology_lat=" << topo_latency << "ns" << std::endl;
     
     // Initialize multi-flow state tensors (from @inference/ ground truth)
     auto options_float = torch::TensorOptions().dtype(torch::kFloat32).device(device);
     auto options_int32 = torch::TensorOptions().dtype(torch::kInt32).device(device);
     auto options_bool = torch::TensorOptions().dtype(torch::kBool).device(device);
     
-    // Initialize flow and link state tensors
+    // Initialize flow and link state tensors (NOT all zeros - need flow-specific features!)
     h_vec = torch::zeros({n_flows_max, hidden_size_}, options_float);
+    // Set first column to 1.0 for all flows (matching inference code)
+    h_vec.index_put_({torch::arange(n_flows_max, device=device), 0}, 1.0f);
+    // Note: Flow sizes and hop counts will be set dynamically in Send() when flows are created
     flowid_active_mask = torch::zeros({n_flows_max}, options_bool);
     time_last = torch::zeros({n_flows_max}, options_float);
     release_time_tensor = torch::zeros({n_flows_max}, options_float);
@@ -256,6 +300,17 @@ void M4::SetupML() {
     
     // Initialize empty edge_index - will be built dynamically as flows are added
     edge_index = torch::empty({2, 0}, torch::TensorOptions().dtype(torch::kInt64).device(device));
+    
+    // Initialize additional tensors for complete ML pipeline
+    flowid_to_linkid_flat_tensor = torch::empty({0}, options_int32);
+    flowid_to_linkid_offsets_tensor = torch::empty({0}, options_int32);
+    edges_flow_ids_tensor = torch::empty({0}, options_int32);
+    edges_link_ids_tensor = torch::empty({0}, options_int32);
+    ones_cache = torch::ones({1000}, options_float); // Pre-allocate for efficiency
+    
+    auto setup_end = std::chrono::high_resolution_clock::now();
+    auto setup_duration = std::chrono::duration_cast<std::chrono::milliseconds>(setup_end - setup_start).count();
+    std::cout << "[M4] SetupML() completed in " << setup_duration << "ms!" << std::endl;
 }
 
 void M4::OnFlowCompleted(const int flow_id) {
@@ -431,7 +486,12 @@ void M4::m4_completion_callback(void* arg) {
 }
 
 void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, CallbackArg callbackArg) {
-    // Exact same structure as FlowSim::Send but use M4 ML inference instead of max-min fair
+    // M4 integration with ASTRA-Sim using ML prediction
+    
+    if (!models_loaded) {
+        std::cerr << "[M4 ERROR] ML models not loaded! Cannot process flow." << std::endl;
+        throw std::runtime_error("M4 ML models not loaded");
+    }
     
     // Check AS_NVLS_ENABLE for hardware acceleration simulation (same as FlowSim)
     const char* nvls_env = std::getenv("AS_NVLS_ENABLE");
@@ -444,88 +504,217 @@ void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, Callb
     // Get pre-calculated path from routing framework (same as FlowSim)
     std::vector<int> node_path = routing_framework_->GetFlowSimPathByNodeIds(src, dst);
     if (node_path.empty()) {
-        // Nothing to schedule; invoke callback immediately
+        // Nothing to schedule; invoke callback immediately (same as FlowSim)
         callback(callbackArg);
         return;
     }
     
-    // Create M4 chunk with ML inference instead of using Topology like FlowSim
-    // This is where M4 differs from FlowSim - we use ML to predict completion time
+    // Convert to device route (same as FlowSim)
+    Route route;
+    for (int node_id : node_path) {
+        if (node_id >= 0 && node_id < topology->get_devices_count()) {
+            route.push_back(topology->get_device(node_id));
+        }
+    }
+    
+    if (route.size() >= 2) {
+        // Add flow to M4's active flow tracking for ML processing
+        int flow_id = AddActiveFlow(src, dst, size, node_path, callback, callbackArg);
+        
+        // Trigger ML batch processing if needed
+        ProcessFlowBatch();
+    }
+}
+
+int M4::AddActiveFlow(int src, int dst, uint64_t size, const std::vector<int>& node_path, Callback callback, CallbackArg callbackArg) {
+    // Add new flow to M4's active flow tracking
     
     // Assign flow ID for ML state tracking
     int flow_id = next_flow_id++;
     if (flow_id >= n_flows_max) flow_id = flow_id % n_flows_max;
     
-    // Check if ML models are properly initialized before using tensors
-    if (!models_loaded) {
-        // Fallback to simple calculation without tensors
-        double simple_tx_time = static_cast<double>(size) / (100e9 / 8.0); // 100Gbps
-        uint64_t tx_time_ns = static_cast<uint64_t>(simple_tx_time * 1e9);
-        Schedule(tx_time_ns, callback, callbackArg);
-        return;
-    }
-    
     // Update M4 state tensors (from @inference/ logic)
     time_clock = static_cast<float>(Now());
-    flowid_active_mask[flow_id] = true;
-    time_last[flow_id] = time_clock;
-    release_time_tensor.index_put_({flow_id}, time_clock);
     
     // Compute ideal FCT components (from @inference/)
     const double MTU = 1000.0;
     const double BYTES_PER_HEADER = 48.0;
-    const double default_link_bandwidth_bytes_per_ns = 100e9 / 8.0 / 1e9;
-    const double default_link_latency_ns = 1000.0;
+    float topology_latency = topology->get_latency();  // in ns
+    float topology_bandwidth = topology->get_bandwidth(); // in bytes/ns
+    
     int num_hops = static_cast<int>(node_path.size());
     double size_bytes = static_cast<double>(size);
-    double prop_delay = default_link_latency_ns * (num_hops - 1);
-    double trans_delay = ((size_bytes + std::ceil(size_bytes / MTU) * BYTES_PER_HEADER)) / default_link_bandwidth_bytes_per_ns;
-    double first_packet = (std::min(MTU, size_bytes) + BYTES_PER_HEADER) / default_link_bandwidth_bytes_per_ns * (num_hops - 2);
+    double prop_delay = topology_latency * (num_hops - 1);
+    double trans_delay = ((size_bytes + std::ceil(size_bytes / MTU) * BYTES_PER_HEADER)) / topology_bandwidth;
+    double first_packet = (std::min(MTU, size_bytes) + BYTES_PER_HEADER) / topology_bandwidth * (num_hops - 2);
     double ideal_fct = trans_delay + prop_delay + first_packet;
     
     // Update per-flow tensors for ML inference
     flowid_to_nlinks_tensor[flow_id] = num_hops - 1;
     i_fct_tensor[flow_id] = static_cast<float>(ideal_fct);
+    release_time_tensor[flow_id] = time_clock;
+    flowid_active_mask[flow_id] = true;
+    flow_to_graph_id[flow_id] = graph_id_cur;
+    
+    // Initialize h_vec using EXACT same logic as @inference/ (main_m4_noflowsim.cpp lines 197-200)
     h_vec[flow_id].zero_();
-    h_vec[flow_id][0] = 1.0f; // flow active
-    h_vec[flow_id][2] = std::log2(size_bytes / 1000.0 + 1.0);
-    h_vec[flow_id][3] = static_cast<float>(num_hops - 1);
+    h_vec[flow_id][0] = 1.0f; // flow active (line 198)
+    h_vec[flow_id][2] = std::log2(size_bytes / 1000.0 + 1.0); // size_tensor (line 199)
+    h_vec[flow_id][3] = static_cast<float>(num_hops - 1); // flowid_to_nlinks_tensor (line 200)
     
-    // ML inference to predict completion time (this replaces FlowSim's max-min fair calculation)
-    float predicted_completion_time;
-    if (models_loaded) {
-        try {
-            torch::NoGradGuard no_grad;
+    // Store callback for completion
+    flow_callbacks[flow_id] = std::make_pair(callback, callbackArg);
+    
+    return flow_id;
+}
+
+void M4::ProcessFlowBatch() {
+    // Process all active flows using @inference/ approach
+    // CRITICAL: @inference/ uses MLP DIRECTLY on h_vec, NOT after LSTM+GNN!
+    
+    if (!models_loaded) {
+        std::cerr << "[M4 ERROR] ML models not loaded! Cannot process flow batch." << std::endl;
+        throw std::runtime_error("M4 ML models not loaded");
+    }
+    
+    torch::NoGradGuard no_grad;
+    auto options_float = torch::TensorOptions().dtype(torch::kFloat32).device(device);
+    
+    // Update time_clock to current simulation time
+    time_clock = static_cast<float>(Now());
+    
+    // Get active flows (matching @inference/ update_times_m4() lines 284-285)
+    auto flowid_active_indices = torch::nonzero(flowid_active_mask).flatten();
+    
+    if (flowid_active_indices.numel() > 0) {
+        int n_flows_active = flowid_active_indices.size(0);
+        
+        // MLP prediction using CLEAN h_vec (matching @inference/ lines 286-294)
+        auto h_vec_active = h_vec.index_select(0, flowid_active_indices);
+        auto nlinks_cur = flowid_to_nlinks_tensor.index_select(0, flowid_active_indices).unsqueeze(1);
+        auto params_data_cur = params_tensor.repeat({n_flows_active, 1});
+        auto input_tensor = torch::cat({nlinks_cur, params_data_cur, h_vec_active}, 1);
+        
+        // Perform inference using MLP output layer (matching @inference/ lines 293-294)
+        auto sldn_est = output_layer.forward({input_tensor}).toTensor().view(-1);
+        sldn_est = torch::clamp(sldn_est, 1.0f, std::numeric_limits<float>::infinity());
+        
+        // Calculate predicted FCT (matching @inference/ line 296)
+        auto fct_est = release_time_tensor.index_select(0, flowid_active_indices) + 
+                      sldn_est * i_fct_tensor.index_select(0, flowid_active_indices);
+        
+        // Schedule completion for all flows based on ML predictions
+        for (int i = 0; i < n_flows_active; i++) {
+            int32_t flow_id = flowid_active_indices[i].item<int32_t>();
+            float predicted_completion_time = fct_est[i].item<float>();
+            uint64_t delay = static_cast<uint64_t>(std::max(1000.0f, predicted_completion_time - time_clock));
             
-            // Simple per-flow inference using output_layer (avoiding complex batching)
-            auto nlinks_tensor = torch::tensor({static_cast<float>(num_hops - 1)}, torch::TensorOptions().dtype(torch::kFloat32).device(device)).unsqueeze(0);
-            auto params_data = params_tensor.unsqueeze(0);
-            auto h_vec_cur = h_vec[flow_id].unsqueeze(0);
-            auto input_tensor = torch::cat({nlinks_tensor, params_data, h_vec_cur}, 1);
+            // Schedule completion using ASTRA-Sim event system
+            if (flow_callbacks.count(flow_id)) {
+                auto callback_pair = flow_callbacks[flow_id];
+                Schedule(delay, callback_pair.first, callback_pair.second);
+                
+                // Mark flow as inactive
+                flowid_active_mask[flow_id] = false;
+                flow_callbacks.erase(flow_id);
+            }
             
-            auto sldn_est = output_layer.forward({input_tensor}).toTensor().view(-1);
-            sldn_est = torch::clamp(sldn_est, 1.0f, std::numeric_limits<float>::infinity());
-            
-            auto fct_est = release_time_tensor[flow_id] + sldn_est[0] * i_fct_tensor[flow_id];
-            predicted_completion_time = fct_est.item<float>();
-        } catch (const std::exception& e) {
-            std::cerr << "[M4] ML inference failed: " << e.what() << std::endl;
-            // Fallback to ideal FCT
-            predicted_completion_time = release_time_tensor[flow_id].item<float>() + i_fct_tensor[flow_id].item<float>();
+            if (flow_id <= 5 || flow_id % 10000 == 0) {
+                float slowdown = sldn_est[i].item<float>();
+                float ideal_fct = i_fct_tensor[flow_id].item<float>();
+                std::cout << "[M4 DEBUG] Flow #" << flow_id << " slowdown=" << slowdown 
+                          << ", ideal_fct=" << ideal_fct << "ns, predicted_fct=" << predicted_completion_time << "ns" << std::endl;
+            }
         }
-    } else {
-        // Fallback to ideal FCT
-        predicted_completion_time = release_time_tensor[flow_id].item<float>() + i_fct_tensor[flow_id].item<float>();
+        
+        // LSTM+GNN state update (matching @inference/ step_m4() function)
+        // This updates the h_vec for future predictions but doesn't affect current predictions
+        UpdateFlowStates();
     }
+}
+
+void M4::UpdateFlowStates() {
+    // Update flow states using LSTM+GNN pipeline (matching @inference/ step_m4())
+    // This is separate from prediction - it updates h_vec for future use
     
-    // Schedule completion callback (same as FlowSim but using ML prediction)
-    uint64_t now_ns = static_cast<uint64_t>(Now());
-    uint64_t predicted_tx_time = static_cast<uint64_t>(std::max(0.0f, predicted_completion_time - static_cast<float>(now_ns)));
-    if (predicted_tx_time == 0) {
-        predicted_tx_time = 1000; // minimum 1μs
+    torch::NoGradGuard no_grad;
+    auto options_float = torch::TensorOptions().dtype(torch::kFloat32).device(device);
+    auto options_int64 = torch::TensorOptions().dtype(torch::kInt64).device(device);
+    
+    // Get active flows in current graph (matching @inference/ step_m4())
+    auto flowid_active_mask_cur = torch::logical_and(flowid_active_mask, flow_to_graph_id == graph_id_cur);
+    auto flowid_active_list_cur = torch::nonzero(flowid_active_mask_cur).flatten();
+    
+    if (flowid_active_list_cur.numel() > 0) {
+        int n_flows_active_cur = flowid_active_list_cur.size(0);
+        
+        // Calculate time deltas for active flows
+        auto time_deltas = (time_clock - time_last.index_select(0, flowid_active_list_cur).squeeze()).view({-1, 1});
+        
+        // Build edge_index for active flows
+        std::vector<int32_t> flow_ids, link_ids;
+        for (int i = 0; i < n_flows_active_cur; i++) {
+            int32_t fid = flowid_active_list_cur[i].item<int32_t>();
+            if (fid < flowid_to_link_indices.size()) {
+                for (int32_t lid : flowid_to_link_indices[fid]) {
+                    flow_ids.push_back(i);
+                    link_ids.push_back(lid);
+                }
+            }
+        }
+        
+        if (!flow_ids.empty()) {
+            auto edge_flow_tensor = torch::from_blob(flow_ids.data(), {(int)flow_ids.size()}, 
+                                                   torch::TensorOptions().dtype(torch::kInt32)).to(options_int64).clone();
+            auto edge_link_tensor = torch::from_blob(link_ids.data(), {(int)link_ids.size()}, 
+                                                   torch::TensorOptions().dtype(torch::kInt32)).to(options_int64).clone();
+            
+            // Get unique link indices
+            auto unique_result_tuple = torch::_unique(edge_link_tensor, true, true);
+            auto active_link_idx = std::get<0>(unique_result_tuple);
+            auto new_link_indices = std::get<1>(unique_result_tuple);
+            
+            new_link_indices += n_flows_active_cur;
+            auto edges_list_active = torch::cat({
+                torch::stack({edge_flow_tensor, new_link_indices}, 0),
+                torch::stack({new_link_indices, edge_flow_tensor}, 0)
+            }, 1);
+            
+            // LSTM TIME processing
+            auto h_vec_time_updated = h_vec.index_select(0, flowid_active_list_cur);
+            auto h_vec_time_link_updated = z_t_link.index_select(0, active_link_idx);
+            auto max_time_delta = torch::max(time_deltas).item<float>();
+            if (max_time_delta > 0.0f) {
+                time_deltas.fill_(max_time_delta / 1000.0f);
+                h_vec_time_updated = lstmcell_time.forward({time_deltas, h_vec_time_updated}).toTensor();
+                
+                auto time_deltas_link = torch::zeros({active_link_idx.size(0), 1}, options_float);
+                time_deltas_link.fill_(max_time_delta / 1000.0f);
+                h_vec_time_link_updated = lstmcell_time_link.forward({time_deltas_link, h_vec_time_link_updated}).toTensor();
+            }
+            
+            // GNN processing
+            auto x_combined = torch::cat({h_vec_time_updated, h_vec_time_link_updated}, 0);
+            auto gnn_output_0 = gnn_layer_0.forward({x_combined, edges_list_active}).toTensor();
+            auto gnn_output_1 = gnn_layer_1.forward({gnn_output_0, edges_list_active}).toTensor();
+            auto gnn_output_2 = gnn_layer_2.forward({gnn_output_1, edges_list_active}).toTensor();
+            
+            // LSTM RATE processing
+            auto h_vec_rate_updated = gnn_output_2.slice(0, 0, n_flows_active_cur);
+            auto h_vec_rate_link = gnn_output_2.slice(0, n_flows_active_cur, gnn_output_2.size(0));
+            
+            auto params_data = params_tensor.repeat({n_flows_active_cur, 1});
+            h_vec_rate_updated = torch::cat({h_vec_rate_updated, params_data}, 1);
+            h_vec_rate_updated = lstmcell_rate.forward({h_vec_rate_updated, h_vec_time_updated}).toTensor();
+            h_vec_rate_link = lstmcell_rate_link.forward({h_vec_rate_link, h_vec_time_link_updated}).toTensor();
+            
+            // Update tensors for future predictions
+            h_vec.index_copy_(0, flowid_active_list_cur, h_vec_rate_updated);
+            auto long_indices = active_link_idx.to(torch::kInt64);
+            z_t_link.index_copy_(0, long_indices, h_vec_rate_link);
+            time_last.index_put_({flowid_active_list_cur}, time_clock);
+        }
     }
-    
-    Schedule(predicted_tx_time, callback, callbackArg);
 }
 
 bool M4::IsRoutingFrameworkLoaded() {

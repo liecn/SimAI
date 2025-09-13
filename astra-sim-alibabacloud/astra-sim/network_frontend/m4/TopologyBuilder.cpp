@@ -36,10 +36,25 @@ std::tuple<int, int, std::vector<int>, std::vector<std::tuple<int, int, double, 
         std::string rate_str, delay_str, error_rate_str;
         std::istringstream iss_link(line);
         iss_link >> src >> dst >> rate_str >> delay_str >> error_rate_str;
-        rate = std::stod(rate_str.substr(0, rate_str.size() - 3)); // Removing "bps"
-        rate = bw_GBps_to_Bpns(rate / 8.0);
         
-        delay = std::stod(delay_str.substr(0, delay_str.size() - 2)); // Removing "ns"
+        // Parse bandwidth: "100Gbps" -> 100 Gbps -> bytes/ns
+        if (rate_str.size() >= 4 && rate_str.substr(rate_str.size() - 4) == "Gbps") {
+            double gbps = std::stod(rate_str.substr(0, rate_str.size() - 4));
+            rate = gbps / 8.0;  // Convert Gbps to GB/s (bytes/ns)
+        } else {
+            throw std::runtime_error("Unsupported bandwidth unit in: " + rate_str);
+        }
+        
+        // Parse latency: "0.0005ms" -> 0.0005 ms -> ns
+        if (delay_str.size() >= 2 && delay_str.substr(delay_str.size() - 2) == "ms") {
+            double ms = std::stod(delay_str.substr(0, delay_str.size() - 2));
+            delay = ms * 1e6;  // Convert ms to ns
+        } else if (delay_str.size() >= 2 && delay_str.substr(delay_str.size() - 2) == "ns") {
+            delay = std::stod(delay_str.substr(0, delay_str.size() - 2));
+        } else {
+            throw std::runtime_error("Unsupported latency unit in: " + delay_str);
+        }
+        
         error_rate = std::stod(error_rate_str);
         links.emplace_back(src, dst, rate, delay, error_rate);
     }
@@ -71,7 +86,7 @@ std::shared_ptr<Topology> construct_fat_tree_topology(const std::string& topolog
 Bandwidth bw_GBps_to_Bpns(const Bandwidth bw_GBps) noexcept {
     assert(bw_GBps > 0);
 
-    // 1 GB is 2^30 B
-    // 1 s is 10^9 ns
-    return bw_GBps / (1'000'000'000);
+    // This function is now unused - bandwidth is converted directly in parser
+    // Keeping for backward compatibility
+    return bw_GBps;
 }

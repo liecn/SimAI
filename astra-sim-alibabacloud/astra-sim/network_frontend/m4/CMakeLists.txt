@@ -8,6 +8,10 @@ project(SimAI_m4)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Optimization flags for maximum performance (matching inference CMakeLists.txt)
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -fPIC -march=native -mtune=native -ffast-math -funroll-loops -DNDEBUG")
+set(CMAKE_BUILD_TYPE Release)
+
 # Use CONDA_PREFIX to dynamically locate the LibTorch path (like m4/inference)
 if(DEFINED ENV{CONDA_PREFIX})
     set(CONDA_PREFIX $ENV{CONDA_PREFIX})
