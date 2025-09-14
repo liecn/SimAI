@@ -215,7 +215,7 @@ void M4::SetupML() {
     // Create parameter vector to match inference expectation (loaded from .npy file in inference)
     // Use SimAI.conf values: CC_MODE=8 (DCTCP), BUFFER_SIZE=10, U_TARGET=0.95
     param_values[0] = 10.0f;   // bfsz (BUFFER_SIZE from SimAI.conf)
-    param_values[1] = 15.0f;   // fwin (default from consts.py)
+    param_values[1] = 18.0f;   // fwin (default from consts.py)
     
     // Set CC type: CC_MODE=8 corresponds to DCTCP (index 0 in CC_LIST = ["dctcp", "dcqcn_paper_vwin", "hp", "timely_vwin"])
     // From consts.py: CC_DICT = {"dctcp": 8, ...} - so CC_MODE=8 is indeed DCTCP
@@ -539,16 +539,25 @@ void M4::process_batch_of_flows() {
             if (!flow_ids.empty()) {
                 auto edge_flow_tensor = torch::from_blob(flow_ids.data(), {(int)flow_ids.size()}, torch::TensorOptions().dtype(torch::kInt32)).to(torch::kInt64).to(device).clone();
                 auto edge_link_tensor = torch::from_blob(link_ids.data(), {(int)link_ids.size()}, torch::TensorOptions().dtype(torch::kInt32)).to(torch::kInt64).to(device).clone();
-                auto unique_result_tuple = torch::_unique(edge_link_tensor, true, true);
-                auto active_link_idx = std::get<0>(unique_result_tuple);
-                auto new_link_indices = std::get<1>(unique_result_tuple);
-                new_link_indices += n_flows_active_cur;
+                // Compact interacting flows and remap indices (exactly like @inference)
+                auto unique_flows_tuple = torch::_unique(edge_flow_tensor, true, true);
+                auto flow_pos_unique = std::get<0>(unique_flows_tuple);
+                auto new_flow_indices = std::get<1>(unique_flows_tuple);
+                int n_flows_interacting = (int)flow_pos_unique.size(0);
+                auto subset_indices = flowid_active_list_cur.index_select(0, flow_pos_unique);
+
+                auto unique_links_tuple = torch::_unique(edge_link_tensor, true, true);
+                auto active_link_idx = std::get<0>(unique_links_tuple);
+                auto new_link_indices = std::get<1>(unique_links_tuple);
+                new_link_indices += n_flows_interacting;
+
                 auto edges_list_active = torch::cat({
-                    torch::stack({edge_flow_tensor, new_link_indices}, 0),
-                    torch::stack({new_link_indices, edge_flow_tensor}, 0)
+                    torch::stack({new_flow_indices, new_link_indices}, 0),
+                    torch::stack({new_link_indices, new_flow_indices}, 0)
                 }, 1);
-                auto time_deltas = (time_clock - time_last.index_select(0, flowid_active_list_cur).squeeze()).view({-1, 1});
-                auto h_vec_time_updated = h_vec.index_select(0, flowid_active_list_cur);
+
+                auto time_deltas = (time_clock - time_last.index_select(0, subset_indices).squeeze()).view({-1, 1});
+                auto h_vec_time_updated = h_vec.index_select(0, subset_indices);
                 auto h_vec_time_link_updated = z_t_link.index_select(0, active_link_idx);
                 auto max_time_delta = torch::max(time_deltas).item<float>();
                 if (max_time_delta > 0.0f) {
@@ -562,15 +571,15 @@ void M4::process_batch_of_flows() {
                 auto gnn_output_0 = gnn_layer_0.forward({x_combined, edges_list_active}).toTensor();
                 auto gnn_output_1 = gnn_layer_1.forward({gnn_output_0, edges_list_active}).toTensor();
                 auto gnn_output_2 = gnn_layer_2.forward({gnn_output_1, edges_list_active}).toTensor();
-                auto h_vec_rate_updated = gnn_output_2.slice(0, 0, n_flows_active_cur);
-                auto h_vec_rate_link = gnn_output_2.slice(0, n_flows_active_cur, gnn_output_2.size(0));
-                auto params_data = params_tensor.repeat({n_flows_active_cur, 1});
+                auto h_vec_rate_updated = gnn_output_2.slice(0, 0, n_flows_interacting);
+                auto h_vec_rate_link = gnn_output_2.slice(0, n_flows_interacting, gnn_output_2.size(0));
+                auto params_data = params_tensor.repeat({n_flows_interacting, 1});
                 h_vec_rate_updated = torch::cat({h_vec_rate_updated, params_data}, 1);
                 h_vec_rate_updated = lstmcell_rate.forward({h_vec_rate_updated, h_vec_time_updated}).toTensor();
                 h_vec_rate_link = lstmcell_rate_link.forward({h_vec_rate_link, h_vec_time_link_updated}).toTensor();
-                h_vec.index_copy_(0, flowid_active_list_cur, h_vec_rate_updated);
+                h_vec.index_copy_(0, subset_indices, h_vec_rate_updated);
                 z_t_link.index_copy_(0, active_link_idx.to(torch::kInt64), h_vec_rate_link);
-                time_last.index_put_({flowid_active_list_cur}, time_clock);
+                time_last.index_put_({subset_indices}, time_clock);
             }
         }
     }
