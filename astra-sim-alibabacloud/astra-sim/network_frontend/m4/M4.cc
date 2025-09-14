@@ -428,6 +428,7 @@ void M4::process_batch_of_flows() {
     
     // Initialize per-flow state for this temporal batch and collect batch IDs
     current_batch_link_set.clear();
+    std::unordered_map<int32_t, int32_t> batch_link_counts;
     std::vector<int64_t> flow_ids_batch;
     flow_ids_batch.reserve(pending_flows_.size());
     for (M4Flow* flow : pending_flows_) {
@@ -476,15 +477,42 @@ void M4::process_batch_of_flows() {
                 int32_t lid = link_key_to_index[link_key];
                 flow_link_indices.push_back(lid);
                 current_batch_link_set.insert(lid);
+                batch_link_counts[lid] += 1;
             }
             flowid_to_link_indices[flow_id] = std::move(flow_link_indices);
         } else {
             // Add existing links to batch set
-            for (int32_t lid : flowid_to_link_indices[flow_id]) current_batch_link_set.insert(lid);
+            for (int32_t lid : flowid_to_link_indices[flow_id]) {
+                current_batch_link_set.insert(lid);
+                batch_link_counts[lid] += 1;
+            }
         }
 
         flow_ids_batch.push_back(flow_id);
         n_flows_active++;
+    }
+
+    // Increment link_to_nflows and tag graph id for links touched by this batch (parity with @inference)
+    if (!batch_link_counts.empty()) {
+        std::vector<int32_t> link_ids_vec;
+        std::vector<int32_t> link_incrs_vec;
+        link_ids_vec.reserve(batch_link_counts.size());
+        link_incrs_vec.reserve(batch_link_counts.size());
+        for (const auto &kv : batch_link_counts) {
+            link_ids_vec.push_back(kv.first);
+            link_incrs_vec.push_back(kv.second);
+        }
+        auto link_idx64 = torch::from_blob(link_ids_vec.data(), {(int)link_ids_vec.size()}, torch::TensorOptions().dtype(torch::kInt32))
+                               .to(torch::kInt64)
+                               .to(device)
+                               .clone();
+        auto incr_i32 = torch::from_blob(link_incrs_vec.data(), {(int)link_incrs_vec.size()}, torch::TensorOptions().dtype(torch::kInt32))
+                               .to(device)
+                               .clone();
+        auto cur_counts = link_to_nflows.index_select(0, link_idx64);
+        link_to_nflows.index_put_({link_idx64}, cur_counts + incr_i32);
+        auto graph_id_fill = torch::full({(int)link_ids_vec.size()}, graph_id_cur, torch::TensorOptions().dtype(torch::kInt32).device(device));
+        link_to_graph_id.index_put_({link_idx64}, graph_id_fill);
     }
 
     // Evolve states for interacting flows (LSTM -> GNN) before prediction
