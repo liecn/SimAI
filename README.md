@@ -25,11 +25,10 @@ git checkout dev
 git submodule update --init --recursive
 
 # Run docker with volume binding
-cd ../
-docker run -it -v $(pwd)/SimAI:/app/SimAI simai
+docker run -it -v $(pwd)/SimAI:/data1/lichenni/projects/SimAI simai
 
 # Build all backends (in docker)
-cd /app/SimAI
+cd /data1/lichenni/projects/SimAI/
 ./scripts/build.sh -c flowsim  # Fast simulation
 ./scripts/build.sh -c ns3      # Detailed simulation  
 ./scripts/build.sh -c m4       # M4 inference backend
