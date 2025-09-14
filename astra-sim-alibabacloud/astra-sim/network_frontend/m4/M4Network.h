@@ -57,56 +57,8 @@ private:
   std::shared_ptr<Topology> topology;
   std::vector<Route> routing;
   
-  // M4 Inference Components - Re-enabled
-  torch::Device device;
-  torch::jit::script::Module lstmcell_time, lstmcell_rate, lstmcell_time_link, lstmcell_rate_link;
-  torch::jit::script::Module output_layer, gnn_layer_0, gnn_layer_1, gnn_layer_2;
-  
-  // M4 State Management - Re-enabled
-  torch::Tensor h_vec, flowid_active_mask;
-  torch::Tensor fat_tensor, i_fct_tensor, size_tensor;
-  torch::Tensor params_tensor;
-  torch::Tensor release_time_tensor;
-  torch::Tensor flowid_to_nlinks_tensor;
-  torch::Tensor flowid_to_linkid_flat_tensor;
-  torch::Tensor flowid_to_linkid_offsets_tensor;
-  torch::Tensor edge_index;
-  torch::Tensor z_t_link;
-  torch::Tensor link_to_graph_id;
-  torch::Tensor link_to_nflows;
-  torch::Tensor flow_to_graph_id;
-  torch::Tensor time_last;
-  static torch::Tensor ones_cache;
-  float flow_arrival_time, flow_completion_time;
-  int32_t n_flows, flow_id_in_prop, n_flows_active;
-  
-  // M4 Model Parameters
-  std::vector<double> params;
-  bool models_loaded;
-  int32_t hidden_size_;
-  int32_t n_links_max_;
-
-  // Flow/link bookkeeping (parity with inference no_flowsim)
-  std::unordered_map<int, int> flowIdToIndex;
-  int next_flow_index = 0;
-  std::vector<int32_t> flowid_to_linkid_offsets_v;
-  std::vector<int32_t> flowid_to_linkid_flat_v;
-  std::unordered_map<long long, int> edgeKeyToLinkId; // key=(min(u,v)<<32)|max(u,v)
-  int graph_id_counter = 0;
-  std::vector<int32_t> edges_flow_ids_v;
-  std::vector<int32_t> edges_link_ids_v;
-  int graph_id_cur = 0;
-
-  // Cached topology defaults (from RoutingFramework TopologyParser)
-  double default_link_bandwidth_bytes_per_ns = 0.0;
-  double default_link_latency_ns = 0.0;
-  bool link_params_initialized = false;
-
-  // Online flow features (no_flowsim inputs built on the fly)
-  std::vector<int64_t> fsize_vec;
-  std::vector<int32_t> nlinks_vec;
-  std::vector<float> release_time_vec;
-  int completed_flow_id = -1;
+  // CLEANED: M4Network is now just an interface layer
+  // All ML inference is handled by M4::Send() -> batch processing -> GNN
 
   // Routing framework shared with FlowSim
   static std::unique_ptr<AstraSim::RoutingFramework> s_routing;
@@ -168,9 +120,8 @@ public:
     // Receiver packet arrival notification callback  
     void notify_receiver_packet_arrived(int sender_node, int receiver_node, uint64_t message_size, AstraSim::ncclFlowTag flowTag);
     
-    // M4 Inference Functions (core ML pipeline)
-    void setup_m4();           // Load PyTorch models
-    void process_m4_send(M4CallbackData* data);  // Process delayed M4 send
+    // CLEANED: M4Network now only handles ASTRA-Sim interface
+    // All ML inference is done by M4::Send() with batch processing and GNN
     
     // M4 network simulation implementation complete
     

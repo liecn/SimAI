@@ -20,6 +20,7 @@
 #include <iostream>
 #include <cstdlib>
 #include <unordered_map>
+#include <map>
 #include <unordered_set>
 #include <algorithm>
 #include <ryml_std.hpp>
@@ -213,6 +214,17 @@ void M4::SetupML() {
     // Set DCTCP-specific parameters from SimAI.conf and consts.py defaults
     param_values[6] = 10.0f;   // dctcp_k (default from consts.py)
     
+    // Additional parameters to match @inference/ exactly
+    param_values[3] = 0.0f;    // dcqcn_flag (not used for DCTCP)
+    param_values[4] = 0.0f;    // hp_flag (not used for DCTCP)
+    param_values[5] = 0.0f;    // timely_flag (not used for DCTCP)
+    param_values[7] = 0.0f;    // dcqcn_k_min (not used for DCTCP)
+    param_values[8] = 0.0f;    // dcqcn_k_max (not used for DCTCP)
+    param_values[9] = 0.0f;    // u_tgt
+    param_values[10] = 0.0f;   // hpai (not used for DCTCP)
+    param_values[11] = 0.0f;   // timely_t_low (not used for DCTCP)
+    param_values[12] = 0.0f;   // timely_t_high (not used for DCTCP)
+    
     params_tensor = torch::from_blob(param_values.data(), {13}, torch::TensorOptions().dtype(torch::kFloat32)).to(device).clone();
     
     // Read topology parameters for logging
@@ -220,7 +232,7 @@ void M4::SetupML() {
     float topo_latency = topology->get_latency(); // in ns
     
     std::cout << "[M4] Loaded network parameters from SimAI.conf: bfsz=" << param_values[0] << ", fwin=" << param_values[1] 
-              << ", cc=dctcp, u_tgt=" << param_values[9] << "%, topology_bw=" << (topo_bandwidth * 8.0) << "Gbps, topology_lat=" << topo_latency << "ns" << std::endl;
+              << ", cc=dctcp, u_tgt=" << param_values[9] << ", dctcp_k=" << param_values[6] << ", topology_bw=" << (topo_bandwidth * 8.0) << "Gbps, topology_lat=" << topo_latency << "ns" << std::endl;
     
     // Initialize multi-flow state tensors (from @inference/ ground truth)
     auto options_float = torch::TensorOptions().dtype(torch::kFloat32).device(device);
@@ -362,6 +374,7 @@ void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, Callb
         
         // Add to pending batch for temporal processing (like FlowSim's pending_chunks_)
         pending_flows_.push_back(m4_flow.get());
+        // Keep ownership in active_flows_ptrs until batch processing
         active_flows_ptrs.push_back(std::move(m4_flow));
         
         // Schedule batch processing if not already scheduled (like FlowSim's batch timeout)
@@ -385,6 +398,12 @@ void M4::process_batch_of_flows() {
         return;
     }
     
+    // Concise logging every 10K flows
+    static int batch_count = 0;
+    if (++batch_count % 10000 == 0) {
+        std::cout << "[M4] Processed " << batch_count << " batches (" << pending_flows_.size() << " flows in current batch)" << std::endl;
+    }
+    
     // Reset batching state (following FlowSim)
     batch_timeout_event_id_ = 0;
     last_batch_time_ = 0;
@@ -392,8 +411,13 @@ void M4::process_batch_of_flows() {
     const auto current_time = event_queue->get_current_time();
     time_clock = static_cast<float>(current_time);
     
-    // Process all pending flows as a batch (following FlowSim's pattern)
+    // Process all pending flows individually (revert to simpler approach)
     for (M4Flow* flow : pending_flows_) {
+        if (!flow) {
+            std::cerr << "[M4 ERROR] Null flow pointer in pending_flows_!" << std::endl;
+            continue;
+        }
+        
         // Assign flow ID and initialize state (following @inference/ logic)
         int flow_id = next_flow_id++;
         if (flow_id >= n_flows_max) flow_id = flow_id % n_flows_max;
@@ -401,14 +425,16 @@ void M4::process_batch_of_flows() {
         flow->flow_id = flow_id;
         flow->start_time = current_time;
         
+        uint64_t size = flow->size;
+        int num_hops = static_cast<int>(flow->node_path.size());
+        
         // Initialize flow state tensors (exact @inference/ logic)
         const double MTU = 1000.0;
         const double BYTES_PER_HEADER = 48.0;
         float topology_latency = topology->get_latency();
         float topology_bandwidth = topology->get_bandwidth();
         
-        int num_hops = static_cast<int>(flow->node_path.size());
-        double size_bytes = static_cast<double>(flow->size);
+        double size_bytes = static_cast<double>(size);
         double prop_delay = topology_latency * (num_hops - 1);
         double trans_delay = ((size_bytes + std::ceil(size_bytes / MTU) * BYTES_PER_HEADER)) / topology_bandwidth;
         double first_packet = (std::min(MTU, size_bytes) + BYTES_PER_HEADER) / topology_bandwidth * (num_hops - 2);
@@ -466,9 +492,11 @@ void M4::update_times_m4() {
         // Get indices of active flows
         auto flowid_active_indices = torch::nonzero(flowid_active_mask).flatten();
         auto h_vec_active = h_vec.index_select(0, flowid_active_indices);
-        auto nlinks_cur = flowid_to_nlinks_tensor.index_select(0, flowid_active_indices).unsqueeze(1);
-        auto params_data_cur = params_tensor.repeat({n_flows_active, 1});
-        auto input_tensor = torch::cat({nlinks_cur, params_data_cur, h_vec_active}, 1);
+        auto nlinks_cur = flowid_to_nlinks_tensor.index_select(0, flowid_active_indices).unsqueeze(1); // [n_active,1]
+        auto params_data_cur = params_tensor.repeat({n_flows_active, 1}); // [n_active,13]
+        
+        // Follow @inference/ main_m4_noflowsim.cpp exactly (214 dimensions)
+        auto input_tensor = torch::cat({nlinks_cur, params_data_cur, h_vec_active}, 1); // [n_active, 214]
         
         // Batch ML inference (exact @inference/ logic)
         auto sldn_est = output_layer.forward({input_tensor}).toTensor().view(-1);
@@ -476,6 +504,14 @@ void M4::update_times_m4() {
         
         auto fct_stamp_est = release_time_tensor.index_select(0, flowid_active_indices) + 
                            sldn_est * i_fct_tensor.index_select(0, flowid_active_indices);
+        
+        // Concise logging for first prediction only
+        static bool first_prediction_logged = false;
+        if (!first_prediction_logged && n_flows_active > 0) {
+            float slowdown = sldn_est[0].item<float>();
+            std::cout << "[M4] First prediction: " << slowdown << "x slowdown" << std::endl;
+            first_prediction_logged = true;
+        }
         
         // Find flow with minimum completion time
         auto min_idx_tensor = torch::argmin(fct_stamp_est);
@@ -598,4 +634,19 @@ void M4::Destroy() {
     routing_framework_.reset();
     topology.reset();
     event_queue.reset();
+}
+
+// Topology access methods for FCT calculation
+float M4::GetTopologyLatency() {
+    if (!topology) {
+        throw std::runtime_error("[M4 ERROR] topology is null in GetTopologyLatency()!");
+    }
+    return topology->get_latency();
+}
+
+float M4::GetTopologyBandwidth() {
+    if (!topology) {
+        throw std::runtime_error("[M4 ERROR] topology is null in GetTopologyBandwidth()!");
+    }
+    return topology->get_bandwidth();
 }

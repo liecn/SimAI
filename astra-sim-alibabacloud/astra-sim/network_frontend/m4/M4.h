@@ -153,6 +153,10 @@ public:
     static const AstraSim::RoutingFramework* GetRoutingFramework();
     static bool IsRoutingFrameworkLoaded();
     
+    // Topology access for FCT calculation
+    static float GetTopologyLatency();
+    static float GetTopologyBandwidth();
+    
     // M4-specific ML setup
     static void SetupML();
     static void OnFlowCompleted(int flow_id);

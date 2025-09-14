@@ -33,10 +33,10 @@
 
 // Static routing framework pointer
 std::unique_ptr<AstraSim::RoutingFramework> M4Network::s_routing = nullptr;
-torch::Tensor M4Network::ones_cache;
+// CLEANED: Removed dead ones_cache static variable
 
 // Copy FlowSim's exact globals
-static uint64_t m4_current_time = 0;
+// Removed unused m4_current_time - using M4::Now() instead
 static uint64_t g_fct_lines_written = 0;
 static FILE* fct_output_file = nullptr;
 
@@ -123,27 +123,52 @@ static void m4_completion_callback(void* arg) {
     
     bool receiver_done = is_receive_finished(data->src, data->dst, data->flowTag);
     if (receiver_done) {
-        // Write per-flow FCT when the receive side finishes (copy FlowSim logic)
-        if (fct_output_file == nullptr) {
-            fct_output_file = fopen("results/m4/m4_fct.txt", "w");
-        }
         if (fct_output_file) {
             auto flow_key = std::make_tuple(data->flowTag.tag_id, data->flowTag.current_flow_id, data->src, data->dst);
             auto it = flow_start_times.find(flow_key);
             if (it != flow_start_times.end()) {
                 uint64_t start_time = it->second;
-                uint64_t fct_ns = data->actual_completion_time - start_time;
+                
+                // Debug first flow timing
+                if (g_fct_lines_written == 0) {
+                    std::cout << "[M4 DEBUG] First flow: actual_completion_time=" << data->actual_completion_time 
+                             << ", start_time=" << start_time << std::endl;
+                }
+                
+                // Check for timing issues that could cause underflow
+                uint64_t fct_ns;
+                if (data->actual_completion_time >= start_time) {
+                    fct_ns = data->actual_completion_time - start_time;
+                } else {
+                    std::cerr << "[M4 ERROR] actual_completion_time (" << data->actual_completion_time 
+                             << ") < start_time (" << start_time << ") for flow " << data->flowTag.current_flow_id << std::endl;
+                    fct_ns = 0; // Avoid underflow
+                }
+                
                 flow_start_times.erase(it);
 
                 uint32_t src_ip = 0u;
                 uint32_t dst_ip = 0u;
                 unsigned int src_port = 0u;
                 unsigned int dst_port = 0u;
-                uint64_t standalone_fct = fct_ns;
+                
+                // Calculate ideal FCT (standalone) like NS3 does
+                float topology_latency = M4::GetTopologyLatency(); // in ns
+                float topology_bandwidth = M4::GetTopologyBandwidth(); // in bytes/ns
+                
+                // Calculate: ideal_fct = base_rtt + transmission_time
+                uint64_t base_rtt = 2 * (uint64_t)topology_latency;
+                uint64_t transmission_time = (uint64_t)(data->count / topology_bandwidth);
+                uint64_t standalone_fct = base_rtt + transmission_time;
 
                 fprintf(fct_output_file, "%08x %08x %u %u %lu %lu %lu %lu %d\n",
                         src_ip, dst_ip, src_port, dst_port, data->count, start_time, fct_ns, standalone_fct,
                         data->flowTag.current_flow_id);
+                
+                // Concise logging for first flow only
+                if (g_fct_lines_written == 0) {
+                    std::cout << "[M4] First FCT: " << (fct_ns/1000.0) << "μs" << std::endl;
+                }
                 fflush(fct_output_file);
                 ++g_fct_lines_written;
             }
@@ -165,17 +190,9 @@ M4Network::~M4Network() {
   }
 }
 
-M4Network::M4Network(int _local_rank) : AstraSim::AstraNetworkAPI(_local_rank), device(torch::kCPU) {
+M4Network::M4Network(int _local_rank) : AstraSim::AstraNetworkAPI(_local_rank) {
   npu_offset = 0;
   local_rank = _local_rank;
-  models_loaded = false;
-  n_flows = 0;
-  flow_id_in_prop = 0;
-  n_flows_active = 0;
-  flow_arrival_time = 0.0f;
-  flow_completion_time = 0.0f;
-  hidden_size_ = 0;
-  n_links_max_ = 0;
   
   // Initialize M4 core components (similar to FlowSim)
   event_queue = std::make_shared<EventQueue>();
@@ -345,13 +362,19 @@ void M4Network::notify_receiver_packet_arrived(int sender_node, int receiver_nod
                 auto fit = flow_start_times.find(flow_key);
                 if (fit != flow_start_times.end()) {
                     uint64_t start_time = fit->second;
-                    uint64_t fct_ns = m4_current_time - start_time;
+                    uint64_t fct_ns = static_cast<uint64_t>(M4::Now()) - start_time;
                     flow_start_times.erase(fit);
                     uint32_t src_ip = 0u;
                     uint32_t dst_ip = 0u;
                     unsigned int src_port = 0u;
                     unsigned int dst_port = 0u;
-                    uint64_t standalone_fct = fct_ns;
+                    // Calculate proper ideal FCT like the main callback
+                    float topology_latency = M4::GetTopologyLatency(); // in ns
+                    float topology_bandwidth = M4::GetTopologyBandwidth(); // in bytes/ns
+                    uint64_t base_rtt = 2 * (uint64_t)topology_latency;
+                    uint64_t transmission_time = (uint64_t)(message_size / topology_bandwidth);
+                    uint64_t standalone_fct = base_rtt + transmission_time;
+                    
                     fprintf(fct_output_file, "%08x %08x %u %u %lu %lu %lu %lu %d\n",
                             src_ip, dst_ip, src_port, dst_port, message_size, start_time, fct_ns, standalone_fct,
                             flowTag.current_flow_id);
@@ -462,187 +485,6 @@ int M4Network::sim_finish() {
     return 0;
 }
 
-// ========== M4 INFERENCE FUNCTIONS ==========
-// Based on m4/inference/main_m4.cpp
-
-void M4Network::setup_m4() {
-    if (models_loaded) return;
-    if (!torch::cuda::is_available()) {
-        std::cerr << "[ERROR] CUDA is not available!" << std::endl;
-        return;
-    }
-    
-    // Initialize CUDA device here instead of constructor
-    device = torch::Device(torch::kCUDA, 0);
-    
-    torch::NoGradGuard no_grad;
-
-    // Model directory: use relative path from M4 frontend
-    const std::string model_dir = "./astra-sim-alibabacloud/astra-sim/network_frontend/m4/models/";
-    
-    try {
-        // Load all 8 PyTorch models
-        lstmcell_time = torch::jit::load(model_dir + "lstmcell_time.pt", device);
-        lstmcell_rate = torch::jit::load(model_dir + "lstmcell_rate.pt", device);
-        lstmcell_time_link = torch::jit::load(model_dir + "lstmcell_time_link.pt", device);
-        lstmcell_rate_link = torch::jit::load(model_dir + "lstmcell_rate_link.pt", device);
-        output_layer = torch::jit::load(model_dir + "output_layer.pt", device);
-        gnn_layer_0 = torch::jit::load(model_dir + "gnn_layer_0.pt", device);
-        gnn_layer_1 = torch::jit::load(model_dir + "gnn_layer_1.pt", device);
-        gnn_layer_2 = torch::jit::load(model_dir + "gnn_layer_2.pt", device);
-
-        // Set models to evaluation mode
-        lstmcell_time.eval();
-        lstmcell_rate.eval();
-        lstmcell_time_link.eval();
-        lstmcell_rate_link.eval();
-        output_layer.eval();
-        gnn_layer_0.eval();
-        gnn_layer_1.eval();
-        gnn_layer_2.eval();
-
-        // Optimize models for inference
-        lstmcell_time = torch::jit::optimize_for_inference(lstmcell_time);
-        lstmcell_rate = torch::jit::optimize_for_inference(lstmcell_rate);
-        lstmcell_time_link = torch::jit::optimize_for_inference(lstmcell_time_link);
-        lstmcell_rate_link = torch::jit::optimize_for_inference(lstmcell_rate_link);
-        output_layer = torch::jit::optimize_for_inference(output_layer);
-        gnn_layer_0 = torch::jit::optimize_for_inference(gnn_layer_0);
-        gnn_layer_1 = torch::jit::optimize_for_inference(gnn_layer_1);
-        gnn_layer_2 = torch::jit::optimize_for_inference(gnn_layer_2);
-
-        models_loaded = true;
-        std::cout << "[M4] Successfully loaded all 8 PyTorch models" << std::endl;
-        
-    } catch (const std::exception& e) {
-        std::cerr << "[ERROR] Failed to load M4 models: " << e.what() << std::endl;
-        std::cerr << "[ERROR] Model directory: " << model_dir << std::endl;
-        models_loaded = false;
-    }
-
-    // Parse no_flowsim config for hidden_size and n_links_max
-    try {
-        const std::string cfg_path = "./m4/config/test_config.yaml";
-        std::ifstream infile(cfg_path);
-        if (infile.good()) {
-            std::ostringstream contents;
-            contents << infile.rdbuf();
-            std::string config_contents = contents.str();
-            ryml::Tree config = ryml::parse_in_place(ryml::to_substr(config_contents));
-            ryml::NodeRef hidden_size_node = config["model"]["hidden_size"];
-            ryml::NodeRef n_links_node = config["dataset"]["n_links_max"];
-            hidden_size_node >> hidden_size_;
-            n_links_node >> n_links_max_;
-            std::cout << "[M4] Config loaded (" << cfg_path << ") hidden_size=" << hidden_size_ << ", n_links_max=" << n_links_max_ << std::endl;
-        } else {
-            std::cerr << "[M4] ERROR: cannot open config at " << cfg_path << std::endl;
-            throw std::runtime_error("M4 config missing");
-        }
-    } catch (const std::exception& e) {
-        std::cerr << "[M4] Config parse error: " << e.what() << std::endl;
-        hidden_size_ = 64;
-        n_links_max_ = 4096;
-    }
-}
-
-void M4Network::process_m4_send(M4CallbackData* data) {
-    // Ensure models are loaded
-    setup_m4();
-
-    // Compute online features exactly like no_flowsim
-    if (!link_params_initialized) {
-        const AstraSim::RoutingFramework* rf = M4::GetRoutingFramework();
-        if (!rf) {
-            std::cerr << "[M4] ERROR: Routing framework not initialized" << std::endl;
-            return;
-        }
-        const auto& link_info_map = rf->GetTopology().GetLinkInfo();
-        bool found = false;
-        for (const auto& kv : link_info_map) {
-            for (const auto& kv2 : kv.second) {
-                auto info = kv2.second;
-                default_link_bandwidth_bytes_per_ns = static_cast<double>(info.bandwidth) / 8.0 / 1e9;
-                default_link_latency_ns = static_cast<double>(info.delay);
-                found = true;
-                break;
-            }
-            if (found) break;
-        }
-        if (!found || default_link_bandwidth_bytes_per_ns <= 0.0) {
-            std::cerr << "[M4] ERROR: Unable to derive link parameters from topology" << std::endl;
-            throw std::runtime_error("Invalid topology link parameters");
-        }
-        link_params_initialized = true;
-    }
-
-    int src = data->src;
-    int dst = data->dst;
-    uint64_t count = data->count;
-    std::vector<int> path = {};
-    if (const AstraSim::RoutingFramework* rf = M4::GetRoutingFramework()) {
-        path = rf->GetFlowSimPathByNodeIds(src, dst);
-    }
-    int num_hops = path.empty() ? 2 : static_cast<int>(path.size());
-
-    const double MTU = 1000.0;
-    const double BYTES_PER_HEADER = 48.0;
-    double size_bytes = static_cast<double>(count);
-    double prop_delay = default_link_latency_ns * (num_hops - 1);
-    double trans_delay = ((size_bytes + std::ceil(size_bytes / MTU) * BYTES_PER_HEADER)) / default_link_bandwidth_bytes_per_ns;
-    double first_packet = (std::min(MTU, size_bytes) + BYTES_PER_HEADER) / default_link_bandwidth_bytes_per_ns * (num_hops - 2);
-    double i_fct_est = trans_delay + prop_delay + first_packet; // ns
-
-    // Initialize tensors lazily
-    if (!i_fct_tensor.defined()) {
-        i_fct_tensor = torch::empty({1}, torch::TensorOptions().dtype(torch::kFloat32).device(device));
-        release_time_tensor = torch::zeros({1}, torch::TensorOptions().dtype(torch::kFloat32).device(device));
-        h_vec = torch::zeros({1, hidden_size_ > 0 ? hidden_size_ : 64}, torch::TensorOptions().dtype(torch::kFloat32).device(device));
-        flowid_active_mask = torch::zeros({1}, torch::TensorOptions().dtype(torch::kBool).device(device));
-        flowid_to_nlinks_tensor = torch::empty({1}, torch::TensorOptions().dtype(torch::kInt32).device(device));
-    }
-    i_fct_tensor[0] = static_cast<float>(i_fct_est);
-    release_time_tensor[0] = static_cast<float>(m4_current_time);
-    h_vec.index_put_({0, 0}, 1.0f);
-    h_vec.index_put_({0, 2}, static_cast<float>(std::log2(size_bytes / 1000.0 + 1.0)));
-    h_vec.index_put_({0, 3}, static_cast<float>(num_hops));
-    flowid_to_nlinks_tensor[0] = num_hops;
-
-    // params zeros(13)
-    if (!params_tensor.defined()) {
-        params_tensor = torch::zeros({13}, torch::TensorOptions().dtype(torch::kFloat32).device(device));
-    }
-
-    // Predict completion time via M4 inference (single flow, online)
-    float flow_completion_time;
-    if (models_loaded && h_vec.defined()) {
-        torch::NoGradGuard no_grad;
-        auto options_float = torch::TensorOptions().dtype(torch::kFloat32).device(device);
-        
-        // Single flow inference: use output_layer to predict slowdown
-        auto nlinks_cur = flowid_to_nlinks_tensor.slice(0, 0, 1).unsqueeze(1).to(options_float); // [1,1]
-        auto params_data_cur = params_tensor.repeat({1, 1}); // [1,13]
-        auto h_vec_cur = h_vec.slice(0, 0, 1); // [1, hidden_size]
-        auto input_tensor = torch::cat({nlinks_cur, params_data_cur, h_vec_cur}, 1);
-        
-        // Perform inference to get slowdown
-        auto sldn_est = output_layer.forward({input_tensor}).toTensor().view(-1);
-        sldn_est = torch::clamp(sldn_est, 1.0f, std::numeric_limits<float>::infinity());
-        
-        // Calculate completion time: release_time + slowdown * ideal_fct
-        auto fct_est = release_time_tensor[0] + sldn_est[0] * i_fct_tensor[0];
-        flow_completion_time = fct_est.item<float>();
-    } else {
-        // Fallback: use ideal FCT if models not loaded
-        flow_completion_time = release_time_tensor[0].item<float>() + i_fct_tensor[0].item<float>();
-    }
-    
-    uint64_t predicted_tx_time = static_cast<uint64_t>(std::max(0.0f, flow_completion_time - release_time_tensor[0].item<float>()));
-    if (predicted_tx_time == 0) {
-        predicted_tx_time = 1000; // Minimum 1μs to avoid zero time
-    }
-
-    // Schedule completion after predicted transmission time (FlowSim-style path)
-    M4::Schedule(predicted_tx_time, m4_completion_callback, data);
-}
-
-// M4 SimAI integration uses per-flow inference with delayed send processing
+// ========== M4 CLEANED ==========
+// M4Network is now just an ASTRA-Sim interface layer
+// All ML inference is handled by M4::Send() -> batch processing -> GNN
