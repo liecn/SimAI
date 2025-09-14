@@ -56,19 +56,7 @@ static void ensure_dir(const char* path) {
 }
 
 
-// Copy FlowSim's exact callback data structure
-struct M4CallbackData {
-    M4Network* network;
-    int src;
-    int dst; 
-    uint64_t count;
-    AstraSim::ncclFlowTag flowTag;
-    uint64_t actual_completion_time;
-    M4CallbackData* receiver_data = nullptr;
-    uint64_t start_time = 0;
-    void (*msg_handler)(void* fun_arg) = nullptr;
-    void* fun_arg = nullptr;
-};
+// M4CallbackData is declared in M4Network.h
 
 // Copy FlowSim's exact flow tracking
 static std::map<std::tuple<int, int, int, int>, uint64_t> flow_start_times;
@@ -175,12 +163,12 @@ static void m4_completion_callback(void* arg) {
         }
 
         data->network->notify_receiver_packet_arrived(data->src, data->dst, data->count, data->flowTag);
-        if (data->receiver_data) {
-            delete data->receiver_data;
-        }
+        // receiver_data is not used; avoid deleting to prevent invalid frees across batched callbacks
+        // if (data->receiver_data) { delete data->receiver_data; }
     }
     
-    delete data;
+    // Avoid double-free in batched completions; memory is reclaimed at process end
+    // delete data;
 }
 
 M4Network::~M4Network() {

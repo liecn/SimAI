@@ -147,6 +147,8 @@ public:
     // Inference-style event-driven ML processing
     static void update_times_m4();
     static void step_m4();
+    // Post-batch state evolution only (no scheduling, no completion selection)
+    static void step_m4_state_only(float new_time_clock);
     
     // Routing framework management (same as FlowSim)
     static void SetRoutingFramework(std::unique_ptr<AstraSim::RoutingFramework> routing_framework);

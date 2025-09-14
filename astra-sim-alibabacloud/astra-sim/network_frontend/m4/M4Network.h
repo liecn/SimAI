@@ -30,8 +30,19 @@
 #include "Type.h"
 #include "astra-sim/system/routing/include/RoutingFramework.h"
 
-// Forward declarations
-struct M4CallbackData;
+// Define M4 callback payload so backend can access flowTag.current_flow_id
+struct M4CallbackData {
+  class M4Network* network;
+  int src;
+  int dst;
+  uint64_t count;
+  AstraSim::ncclFlowTag flowTag;
+  uint64_t actual_completion_time;
+  M4CallbackData* receiver_data = nullptr;
+  uint64_t start_time = 0;
+  void (*msg_handler)(void* fun_arg) = nullptr;
+  void* fun_arg = nullptr;
+};
 
 // Copy FlowSim's task1 struct for callback management
 struct M4Task {
