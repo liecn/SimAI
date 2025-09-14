@@ -31,6 +31,7 @@ function compile {
     # Configure with Release flags (no LTO to avoid Torch conflicts)
     cmake -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_CXX_FLAGS_RELEASE="-O3 -march=native -DNDEBUG" \
+          -DCMAKE_CUDA_ARCHITECTURES=80 \
           -DUSE_ANALYTICAL=TRUE ..
     # Build in parallel using all available cores
     make -j$(nproc)

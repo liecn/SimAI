@@ -12,15 +12,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -fPIC -march=native -mtune=native -ffast-math -funroll-loops -DNDEBUG")
 set(CMAKE_BUILD_TYPE Release)
 
-# Use CONDA_PREFIX to dynamically locate the LibTorch path (like m4/inference)
-if(DEFINED ENV{CONDA_PREFIX})
+# Prefer a standalone LibTorch (CUDA + cuDNN) if provided, otherwise fall back to conda Torch
+if(DEFINED ENV{LIBTORCH_DIR})
+    message(STATUS "Using LibTorch from LIBTORCH_DIR: $ENV{LIBTORCH_DIR}")
+    set(CMAKE_PREFIX_PATH "$ENV{LIBTORCH_DIR}/share/cmake/Torch")
+elseif(DEFINED ENV{CONDA_PREFIX})
     set(CONDA_PREFIX $ENV{CONDA_PREFIX})
+    set(CMAKE_PREFIX_PATH "${CONDA_PREFIX}/lib/python3.10/site-packages/torch/share/cmake/Torch")
+    message(STATUS "Using Torch from conda: ${CMAKE_PREFIX_PATH}")
 else()
-    message(FATAL_ERROR "CONDA_PREFIX is not set. Please activate your conda environment.")
+    message(FATAL_ERROR "Neither LIBTORCH_DIR nor CONDA_PREFIX is set. Please set LIBTORCH_DIR to a CUDA+cuDNN LibTorch, or activate conda.")
 endif()
-
-# Adjust the Python version in the path if necessary
-set(CMAKE_PREFIX_PATH "${CONDA_PREFIX}/lib/python3.10/site-packages/torch/share/cmake/Torch")
 
 # Find the Torch package
 find_package(Torch REQUIRED)

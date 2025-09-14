@@ -105,6 +105,8 @@ private:
 
     // Store per-flow link indices (built from RoutingFramework paths)
     static std::vector<std::vector<int32_t>> flowid_to_link_indices;
+    // Links touched by the current temporal batch (for interaction filtering)
+    static std::unordered_set<int32_t> current_batch_link_set;
     
     // FlowSim-style temporal batching
     static std::vector<M4Flow*> pending_flows_;
@@ -113,9 +115,7 @@ private:
     static int batch_timeout_event_id_;
     static constexpr uint64_t BATCH_TIMEOUT_NS = 0;
     
-    // Inference-style flow completion tracking
-    static float flow_completion_time;
-    static int32_t completed_flow_id;
+    // (removed) inference-style single-flow tracking
 
 public:
     // Type definitions (same as FlowSim)
@@ -144,11 +144,8 @@ public:
     static void process_batch_of_flows();
     static void batch_timeout_callback(void* arg);
     
-    // Inference-style event-driven ML processing
-    static void update_times_m4();
-    static void step_m4();
-    // Post-batch state evolution only (no scheduling, no completion selection)
-    static void step_m4_state_only(float new_time_clock);
+    // (kept) flow/link bookkeeping helpers
+    static void OnFlowCompleted(int flow_id);
     
     // Routing framework management (same as FlowSim)
     static void SetRoutingFramework(std::unique_ptr<AstraSim::RoutingFramework> routing_framework);
@@ -161,8 +158,7 @@ public:
     
     // M4-specific ML setup
     static void SetupML();
-    static void OnFlowCompleted(int flow_id);
-    static void ScheduleNextForGraph(int32_t graph_id);
+    // (removed) legacy completion hooks
     
 private:
 };

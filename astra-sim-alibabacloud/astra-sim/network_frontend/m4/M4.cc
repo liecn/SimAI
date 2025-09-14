@@ -28,6 +28,7 @@
 #include <fstream>
 #include <sstream>
 #include <chrono>
+#include <ATen/Context.h>
 
 // Include header that defines M4CallbackData
 #include "M4Network.h"
@@ -84,6 +85,7 @@ int32_t M4::next_flow_id = 0;  // For assigning unique flow IDs
 std::unordered_map<long long, int32_t> M4::link_key_to_index;
 int32_t M4::next_link_index = 0;
 std::vector<std::vector<int32_t>> M4::flowid_to_link_indices;
+std::unordered_set<int32_t> M4::current_batch_link_set;
 
 // FlowSim-style temporal batching
 std::vector<M4Flow*> M4::pending_flows_;
@@ -91,9 +93,7 @@ std::list<std::unique_ptr<M4Flow>> M4::active_flows_ptrs;
 uint64_t M4::last_batch_time_ = 0;
 int M4::batch_timeout_event_id_ = 0;
 
-// Inference-style flow completion tracking
-float M4::flow_completion_time = std::numeric_limits<float>::infinity();
-int32_t M4::completed_flow_id = -1;
+// (removed) legacy inference-style flow completion tracking
 
 // Remove old scheduling logic - now handled by event-driven processing
 
@@ -124,6 +124,13 @@ void M4::SetupML() {
     }
     
     std::cout << "[M4] CUDA is available, proceeding with setup..." << std::endl;
+    // Enable cuDNN benchmarking for optimal algorithm selection
+    try {
+        at::globalContext().setBenchmarkCuDNN(true);
+        std::cout << "[M4] cuDNN benchmark enabled: " << at::globalContext().benchmarkCuDNN() << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "[M4] WARNING: Failed to enable cuDNN benchmark: " << e.what() << std::endl;
+    }
     
     torch::NoGradGuard no_grad;
     
@@ -279,15 +286,37 @@ void M4::SetupML() {
 }
 
 void M4::OnFlowCompleted(const int flow_id) {
-    // Decrement link_to_nflows for this flow's links
+    // Decrement per-link active counts; clear masks and reset link states if idle
     if (flow_id < 0 || flow_id >= n_flows_max) return;
     const auto &links = flowid_to_link_indices[flow_id];
-    if (links.empty()) return;
+    if (links.empty()) {
+        flowid_active_mask[flow_id] = false;
+        flow_to_graph_id[flow_id] = -1;
+        return;
+    }
     auto options_int32 = torch::TensorOptions().dtype(torch::kInt32).device(device);
+    auto options_float = torch::TensorOptions().dtype(torch::kFloat32).device(device);
     auto idx = torch::from_blob(const_cast<int32_t*>(links.data()), {(int)links.size()}, options_int32).to(device).clone();
-    auto ones = torch::ones({(int)links.size()}, options_int32).to(device);
+    auto ones_i32 = torch::ones({(int)links.size()}, options_int32).to(device);
     auto cur = link_to_nflows.index_select(0, idx);
-    link_to_nflows.index_put_({idx}, torch::clamp(cur - ones, 0));
+    auto new_counts = torch::clamp(cur - ones_i32, 0);
+    link_to_nflows.index_put_({idx}, new_counts);
+
+    // Links that became idle now
+    auto idle_mask = (new_counts == 0);
+    if (idle_mask.any().item<bool>()) {
+        auto idle_links = idx.masked_select(idle_mask);
+        // Clear graph id and reset z_t_link rows
+        link_to_graph_id.index_put_({idle_links}, -1);
+        auto reset_values = torch::zeros({idle_links.size(0), z_t_link.size(1)}, options_float);
+        z_t_link.index_put_({idle_links, torch::indexing::Slice()}, reset_values);
+        z_t_link.index_put_({idle_links, 1}, torch::ones({idle_links.size(0)}, options_float));
+        z_t_link.index_put_({idle_links, 2}, torch::ones({idle_links.size(0)}, options_float));
+    }
+
+    // Clear flow state
+    flowid_active_mask[flow_id] = false;
+    flow_to_graph_id[flow_id] = -1;
 }
 
 void M4::SetRoutingFramework(std::unique_ptr<AstraSim::RoutingFramework> routing_framework) {
@@ -394,8 +423,11 @@ void M4::process_batch_of_flows() {
     
     const auto current_time = event_queue->get_current_time();
     time_clock = static_cast<float>(current_time);
+    // Advance graph id so state evolution only touches flows in this temporal batch
+    graph_id_cur++;
     
     // Initialize per-flow state for this temporal batch and collect batch IDs
+    current_batch_link_set.clear();
     std::vector<int64_t> flow_ids_batch;
     flow_ids_batch.reserve(pending_flows_.size());
     for (M4Flow* flow : pending_flows_) {
@@ -441,17 +473,79 @@ void M4::process_batch_of_flows() {
                 if (link_key_to_index.find(link_key) == link_key_to_index.end()) {
                     link_key_to_index[link_key] = next_link_index++;
                 }
-                flow_link_indices.push_back(link_key_to_index[link_key]);
+                int32_t lid = link_key_to_index[link_key];
+                flow_link_indices.push_back(lid);
+                current_batch_link_set.insert(lid);
             }
             flowid_to_link_indices[flow_id] = std::move(flow_link_indices);
+        } else {
+            // Add existing links to batch set
+            for (int32_t lid : flowid_to_link_indices[flow_id]) current_batch_link_set.insert(lid);
         }
 
         flow_ids_batch.push_back(flow_id);
         n_flows_active++;
     }
 
-    // Evolve states first (LSTM -> GNN) so contention is reflected before prediction
-    step_m4_state_only(static_cast<float>(current_time));
+    // Evolve states for interacting flows (LSTM -> GNN) before prediction
+    {
+        torch::NoGradGuard no_grad;
+        time_clock = static_cast<float>(current_time);
+        auto flowid_active_list_cur = torch::nonzero(flowid_active_mask).flatten();
+        if (flowid_active_list_cur.numel() > 0) {
+            int n_flows_active_cur = flowid_active_list_cur.size(0);
+            std::vector<int32_t> flow_ids, link_ids;
+            flow_ids.reserve(1024);
+            link_ids.reserve(4096);
+            for (int i = 0; i < n_flows_active_cur; i++) {
+                int32_t fid = flowid_active_list_cur[i].item<int32_t>();
+                if (fid < flowid_to_link_indices.size()) {
+                    for (int32_t lid : flowid_to_link_indices[fid]) {
+                        if (current_batch_link_set.find(lid) != current_batch_link_set.end()) {
+                            flow_ids.push_back(i);
+                            link_ids.push_back(lid);
+                        }
+                    }
+                }
+            }
+            if (!flow_ids.empty()) {
+                auto edge_flow_tensor = torch::from_blob(flow_ids.data(), {(int)flow_ids.size()}, torch::TensorOptions().dtype(torch::kInt32)).to(torch::kInt64).to(device).clone();
+                auto edge_link_tensor = torch::from_blob(link_ids.data(), {(int)link_ids.size()}, torch::TensorOptions().dtype(torch::kInt32)).to(torch::kInt64).to(device).clone();
+                auto unique_result_tuple = torch::_unique(edge_link_tensor, true, true);
+                auto active_link_idx = std::get<0>(unique_result_tuple);
+                auto new_link_indices = std::get<1>(unique_result_tuple);
+                new_link_indices += n_flows_active_cur;
+                auto edges_list_active = torch::cat({
+                    torch::stack({edge_flow_tensor, new_link_indices}, 0),
+                    torch::stack({new_link_indices, edge_flow_tensor}, 0)
+                }, 1);
+                auto time_deltas = (time_clock - time_last.index_select(0, flowid_active_list_cur).squeeze()).view({-1, 1});
+                auto h_vec_time_updated = h_vec.index_select(0, flowid_active_list_cur);
+                auto h_vec_time_link_updated = z_t_link.index_select(0, active_link_idx);
+                auto max_time_delta = torch::max(time_deltas).item<float>();
+                if (max_time_delta > 0.0f) {
+                    time_deltas.fill_(max_time_delta / 1000.0f);
+                    h_vec_time_updated = lstmcell_time.forward({time_deltas, h_vec_time_updated}).toTensor();
+                    auto time_deltas_link = torch::zeros({active_link_idx.size(0), 1}, torch::TensorOptions().dtype(torch::kFloat32).device(device));
+                    time_deltas_link.fill_(max_time_delta / 1000.0f);
+                    h_vec_time_link_updated = lstmcell_time_link.forward({time_deltas_link, h_vec_time_link_updated}).toTensor();
+                }
+                auto x_combined = torch::cat({h_vec_time_updated, h_vec_time_link_updated}, 0);
+                auto gnn_output_0 = gnn_layer_0.forward({x_combined, edges_list_active}).toTensor();
+                auto gnn_output_1 = gnn_layer_1.forward({gnn_output_0, edges_list_active}).toTensor();
+                auto gnn_output_2 = gnn_layer_2.forward({gnn_output_1, edges_list_active}).toTensor();
+                auto h_vec_rate_updated = gnn_output_2.slice(0, 0, n_flows_active_cur);
+                auto h_vec_rate_link = gnn_output_2.slice(0, n_flows_active_cur, gnn_output_2.size(0));
+                auto params_data = params_tensor.repeat({n_flows_active_cur, 1});
+                h_vec_rate_updated = torch::cat({h_vec_rate_updated, params_data}, 1);
+                h_vec_rate_updated = lstmcell_rate.forward({h_vec_rate_updated, h_vec_time_updated}).toTensor();
+                h_vec_rate_link = lstmcell_rate_link.forward({h_vec_rate_link, h_vec_time_link_updated}).toTensor();
+                h_vec.index_copy_(0, flowid_active_list_cur, h_vec_rate_updated);
+                z_t_link.index_copy_(0, active_link_idx.to(torch::kInt64), h_vec_rate_link);
+                time_last.index_put_({flowid_active_list_cur}, time_clock);
+            }
+        }
+    }
 
     // Build batch input exactly like @inference/ using UPDATED h_vec
     torch::Tensor flowid_batch = torch::from_blob(flow_ids_batch.data(), {(int)flow_ids_batch.size()}, torch::TensorOptions().dtype(torch::kInt64)).to(device).clone();
@@ -474,210 +568,18 @@ void M4::process_batch_of_flows() {
         event_queue->schedule_event(completion_time, flow->callback, flow->callbackArg);
     }
 
+    // Clear active mask immediately to avoid cross-batch GNN growth and stale contention
+    for (size_t i = 0; i < flow_ids_batch.size(); i++) {
+        int flow_id = (int)flow_ids_batch[i];
+        flowid_active_mask[flow_id] = false;
+    }
+
     // Clear temporal batch
     pending_flows_.clear();
 }
 
 // LSTM+GNN state evolution only (no completion selection/scheduling)
-void M4::step_m4_state_only(float new_time_clock) {
-    torch::NoGradGuard no_grad;
-    auto options_float = torch::TensorOptions().dtype(torch::kFloat32).device(device);
-
-    time_clock = new_time_clock;
-
-    auto flowid_active_mask_cur = torch::logical_and(flowid_active_mask, flow_to_graph_id == graph_id_cur);
-    auto flowid_active_list_cur = torch::nonzero(flowid_active_mask_cur).flatten();
-    if (flowid_active_list_cur.numel() == 0) return;
-
-    int n_flows_active_cur = flowid_active_list_cur.size(0);
-    std::vector<int32_t> flow_ids, link_ids;
-    flow_ids.reserve(1024);
-    link_ids.reserve(4096);
-    for (int i = 0; i < n_flows_active_cur; i++) {
-        int32_t fid = flowid_active_list_cur[i].item<int32_t>();
-        if (fid < flowid_to_link_indices.size()) {
-            for (int32_t lid : flowid_to_link_indices[fid]) {
-                flow_ids.push_back(i);
-                link_ids.push_back(lid);
-            }
-        }
-    }
-    if (flow_ids.empty()) return;
-
-    auto edge_flow_tensor = torch::from_blob(flow_ids.data(), {(int)flow_ids.size()}, torch::TensorOptions().dtype(torch::kInt32)).to(torch::kInt64).to(device).clone();
-    auto edge_link_tensor = torch::from_blob(link_ids.data(), {(int)link_ids.size()}, torch::TensorOptions().dtype(torch::kInt32)).to(torch::kInt64).to(device).clone();
-
-    auto unique_result_tuple = torch::_unique(edge_link_tensor, true, true);
-    auto active_link_idx = std::get<0>(unique_result_tuple);
-    auto new_link_indices = std::get<1>(unique_result_tuple);
-    new_link_indices += n_flows_active_cur;
-    auto edges_list_active = torch::cat({
-        torch::stack({edge_flow_tensor, new_link_indices}, 0),
-        torch::stack({new_link_indices, edge_flow_tensor}, 0)
-    }, 1);
-
-    auto time_deltas = (time_clock - time_last.index_select(0, flowid_active_list_cur).squeeze()).view({-1, 1});
-    auto h_vec_time_updated = h_vec.index_select(0, flowid_active_list_cur);
-    auto h_vec_time_link_updated = z_t_link.index_select(0, active_link_idx);
-
-    auto max_time_delta = torch::max(time_deltas).item<float>();
-    if (max_time_delta > 0.0f) {
-        time_deltas.fill_(max_time_delta / 1000.0f);
-        h_vec_time_updated = lstmcell_time.forward({time_deltas, h_vec_time_updated}).toTensor();
-
-        auto time_deltas_link = torch::zeros({active_link_idx.size(0), 1}, options_float);
-        time_deltas_link.fill_(max_time_delta / 1000.0f);
-        h_vec_time_link_updated = lstmcell_time_link.forward({time_deltas_link, h_vec_time_link_updated}).toTensor();
-    }
-
-    auto x_combined = torch::cat({h_vec_time_updated, h_vec_time_link_updated}, 0);
-    auto gnn_output_0 = gnn_layer_0.forward({x_combined, edges_list_active}).toTensor();
-    auto gnn_output_1 = gnn_layer_1.forward({gnn_output_0, edges_list_active}).toTensor();
-    auto gnn_output_2 = gnn_layer_2.forward({gnn_output_1, edges_list_active}).toTensor();
-
-    auto h_vec_rate_updated = gnn_output_2.slice(0, 0, n_flows_active_cur);
-    auto h_vec_rate_link = gnn_output_2.slice(0, n_flows_active_cur, gnn_output_2.size(0));
-
-    auto params_data = params_tensor.repeat({n_flows_active_cur, 1});
-    h_vec_rate_updated = torch::cat({h_vec_rate_updated, params_data}, 1);
-    h_vec_rate_updated = lstmcell_rate.forward({h_vec_rate_updated, h_vec_time_updated}).toTensor();
-    h_vec_rate_link = lstmcell_rate_link.forward({h_vec_rate_link, h_vec_time_link_updated}).toTensor();
-
-    h_vec.index_copy_(0, flowid_active_list_cur, h_vec_rate_updated);
-    z_t_link.index_copy_(0, active_link_idx.to(torch::kInt64), h_vec_rate_link);
-    time_last.index_put_({flowid_active_list_cur}, time_clock);
-}
-
-// Inference-style event-driven ML processing
-void M4::update_times_m4() {
-    torch::NoGradGuard no_grad;
-    
-    // Find next flow completion (following @inference/ update_times_m4())
-    flow_completion_time = std::numeric_limits<float>::infinity();
-    
-    if (n_flows_active > 0) {
-        // Get indices of active flows
-        auto flowid_active_indices = torch::nonzero(flowid_active_mask).flatten();
-        auto h_vec_active = h_vec.index_select(0, flowid_active_indices);
-        auto nlinks_cur = flowid_to_nlinks_tensor.index_select(0, flowid_active_indices).unsqueeze(1); // [n_active,1]
-        auto params_data_cur = params_tensor.repeat({n_flows_active, 1}); // [n_active,13]
-        
-        // Follow @inference/ main_m4_noflowsim.cpp exactly (214 dimensions)
-        auto input_tensor = torch::cat({nlinks_cur, params_data_cur, h_vec_active}, 1); // [n_active, 214]
-        
-        // Batch ML inference (exact @inference/ logic)
-        auto sldn_est = output_layer.forward({input_tensor}).toTensor().view(-1);
-        sldn_est = torch::clamp(sldn_est, 1.0f, std::numeric_limits<float>::infinity());
-        
-        auto fct_stamp_est = release_time_tensor.index_select(0, flowid_active_indices) + 
-                           sldn_est * i_fct_tensor.index_select(0, flowid_active_indices);
-        
-        // Concise logging for first prediction only
-        static bool first_prediction_logged = false;
-        if (!first_prediction_logged && n_flows_active > 0) {
-            float slowdown = sldn_est[0].item<float>();
-            std::cout << "[M4] First prediction: " << slowdown << "x slowdown" << std::endl;
-            first_prediction_logged = true;
-        }
-        
-        // Find flow with minimum completion time
-        auto min_idx_tensor = torch::argmin(fct_stamp_est);
-        int min_idx = min_idx_tensor.item<int>();
-        flow_completion_time = fct_stamp_est[min_idx].item<float>();
-        completed_flow_id = flowid_active_indices[min_idx].item<int32_t>();
-    }
-}
-
-void M4::step_m4() {
-    torch::NoGradGuard no_grad;
-    auto options_float = torch::TensorOptions().dtype(torch::kFloat32).device(device);
-    
-    // Flow completes (following @inference/ step_m4())
-    time_clock = flow_completion_time;
-    
-    // Mark flow as completed
-    flowid_active_mask[completed_flow_id] = false;
-    n_flows_active--;
-    n_flows_completed++;
-    
-    // Find and trigger callback for completed flow
-    for (auto& flow_ptr : active_flows_ptrs) {
-        if (flow_ptr->flow_id == completed_flow_id) {
-            uint64_t delay = static_cast<uint64_t>(std::max(0.0f, flow_completion_time - static_cast<float>(Now())));
-            Schedule(delay, flow_ptr->callback, flow_ptr->callbackArg);
-            break;
-        }
-    }
-    
-    // Update flow states using LSTM+GNN (exact @inference/ step_m4() logic)
-    auto flowid_active_mask_cur = torch::logical_and(flowid_active_mask, flow_to_graph_id == graph_id_cur);
-    auto flowid_active_list_cur = torch::nonzero(flowid_active_mask_cur).flatten();
-    
-    if (flowid_active_list_cur.numel() > 0) {
-        int n_flows_active_cur = flowid_active_list_cur.size(0);
-        
-        // Build edge indices for GNN
-        std::vector<int32_t> flow_ids, link_ids;
-        for (int i = 0; i < n_flows_active_cur; i++) {
-            int32_t fid = flowid_active_list_cur[i].item<int32_t>();
-            if (fid < flowid_to_link_indices.size()) {
-                for (int32_t lid : flowid_to_link_indices[fid]) {
-                    flow_ids.push_back(i);
-                    link_ids.push_back(lid);
-                }
-            }
-        }
-        
-        if (!flow_ids.empty()) {
-            auto edge_flow_tensor = torch::from_blob(flow_ids.data(), {(int)flow_ids.size()}, 
-                                                   torch::TensorOptions().dtype(torch::kInt32)).to(torch::kInt64).to(device).clone();
-            auto edge_link_tensor = torch::from_blob(link_ids.data(), {(int)link_ids.size()}, 
-                                                   torch::TensorOptions().dtype(torch::kInt32)).to(torch::kInt64).to(device).clone();
-            
-            auto unique_result_tuple = torch::_unique(edge_link_tensor, true, true);
-            auto active_link_idx = std::get<0>(unique_result_tuple);
-            auto new_link_indices = std::get<1>(unique_result_tuple);
-            
-            new_link_indices += n_flows_active_cur;
-            auto edges_list_active = torch::cat({
-                torch::stack({edge_flow_tensor, new_link_indices}, 0),
-                torch::stack({new_link_indices, edge_flow_tensor}, 0)
-            }, 1);
-            
-            // LSTM+GNN pipeline (exact @inference/ step_m4())
-            auto time_deltas = (time_clock - time_last.index_select(0, flowid_active_list_cur).squeeze()).view({-1, 1});
-            auto h_vec_time_updated = h_vec.index_select(0, flowid_active_list_cur);
-            auto h_vec_time_link_updated = z_t_link.index_select(0, active_link_idx);
-            
-            auto max_time_delta = torch::max(time_deltas).item<float>();
-            if (max_time_delta > 0.0f) {
-                time_deltas.fill_(max_time_delta / 1000.0f);
-                h_vec_time_updated = lstmcell_time.forward({time_deltas, h_vec_time_updated}).toTensor();
-                
-                auto time_deltas_link = torch::zeros({active_link_idx.size(0), 1}, options_float);
-                time_deltas_link.fill_(max_time_delta / 1000.0f);
-                h_vec_time_link_updated = lstmcell_time_link.forward({time_deltas_link, h_vec_time_link_updated}).toTensor();
-            }
-            
-            auto x_combined = torch::cat({h_vec_time_updated, h_vec_time_link_updated}, 0);
-            auto gnn_output_0 = gnn_layer_0.forward({x_combined, edges_list_active}).toTensor();
-            auto gnn_output_1 = gnn_layer_1.forward({gnn_output_0, edges_list_active}).toTensor();
-            auto gnn_output_2 = gnn_layer_2.forward({gnn_output_1, edges_list_active}).toTensor();
-            
-            auto h_vec_rate_updated = gnn_output_2.slice(0, 0, n_flows_active_cur);
-            auto h_vec_rate_link = gnn_output_2.slice(0, n_flows_active_cur, gnn_output_2.size(0));
-            
-            auto params_data = params_tensor.repeat({n_flows_active_cur, 1});
-            h_vec_rate_updated = torch::cat({h_vec_rate_updated, params_data}, 1);
-            h_vec_rate_updated = lstmcell_rate.forward({h_vec_rate_updated, h_vec_time_updated}).toTensor();
-            h_vec_rate_link = lstmcell_rate_link.forward({h_vec_rate_link, h_vec_time_link_updated}).toTensor();
-            
-            h_vec.index_copy_(0, flowid_active_list_cur, h_vec_rate_updated);
-            z_t_link.index_copy_(0, active_link_idx.to(torch::kInt64), h_vec_rate_link);
-            time_last.index_put_({flowid_active_list_cur}, time_clock);
-        }
-    }
-}
+// (removed) legacy helpers: step_m4_state_only, update_times_m4, step_m4
 
 bool M4::IsRoutingFrameworkLoaded() {
     return routing_framework_ != nullptr;
