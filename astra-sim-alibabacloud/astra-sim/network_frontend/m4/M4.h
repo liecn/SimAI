@@ -29,10 +29,26 @@
 // Forward declarations
 class EventQueue;
 class Topology;
+class Device;
+class Node;
 
 // Use the Callback type from Type.h (function pointer, not std::function)
 // using Callback = std::function<void(void*)>;
 // using CallbackArg = void*;
+
+// M4Flow structure for temporal batching (like FlowSim's Chunk)
+struct M4Flow {
+    int src, dst;
+    uint64_t size;
+    std::vector<int> node_path;
+    void (*callback)(void*);
+    void* callbackArg;
+    uint64_t start_time;
+    int flow_id;
+    
+    M4Flow(int s, int d, uint64_t sz, const std::vector<int>& path, void (*cb)(void*), void* arg)
+        : src(s), dst(d), size(sz), node_path(path), callback(cb), callbackArg(arg), start_time(0), flow_id(-1) {}
+};
 
 /**
  * M4 Backend - ML-based network simulation
@@ -90,10 +106,25 @@ private:
     // Store per-flow link indices (built from RoutingFramework paths)
     static std::vector<std::vector<int32_t>> flowid_to_link_indices;
     
-    // Flow callback storage
-    static std::unordered_map<int, std::pair<void(*)(void*), void*>> flow_callbacks;
+    // FlowSim-style temporal batching
+    static std::vector<M4Flow*> pending_flows_;
+    static std::list<std::unique_ptr<M4Flow>> active_flows_ptrs;
+    static uint64_t last_batch_time_;
+    static int batch_timeout_event_id_;
+    static constexpr uint64_t BATCH_TIMEOUT_NS = 0;
+    
+    // Inference-style flow completion tracking
+    static float flow_completion_time;
+    static int32_t completed_flow_id;
 
 public:
+    // Type definitions (same as FlowSim)
+    using Callback = void (*)(void*);
+    using CallbackArg = void*;
+    using Route = std::vector<std::shared_ptr<Node>>;
+    using ChunkSize = uint64_t;
+    
+    
     // Core M4 functions (mirror FlowSim interface)
     static void Init(std::shared_ptr<EventQueue> event_queue, std::shared_ptr<Topology> topo);
     static void Run();
@@ -109,8 +140,13 @@ public:
     static int AddActiveFlow(int src, int dst, uint64_t size, const std::vector<int>& node_path, Callback callback, CallbackArg callbackArg);
     
     // ML batch processing function (uses @inference/ approach: MLP for prediction, LSTM+GNN for state updates)
-    static void ProcessFlowBatch();
-    static void UpdateFlowStates();
+    // FlowSim-style batch processing
+    static void process_batch_of_flows();
+    static void batch_timeout_callback(void* arg);
+    
+    // Inference-style event-driven ML processing
+    static void update_times_m4();
+    static void step_m4();
     
     // Routing framework management (same as FlowSim)
     static void SetRoutingFramework(std::unique_ptr<AstraSim::RoutingFramework> routing_framework);
@@ -123,24 +159,6 @@ public:
     static void ScheduleNextForGraph(int32_t graph_id);
     
 private:
-    // M4-specific completion callback with ML inference
-    static void m4_completion_callback(void* arg);
-
-    // Track currently active flows for batching
-    static std::vector<int32_t> active_flows;
-    struct M4CompletionData {
-        int src;
-        int dst;
-        uint64_t size;
-        int tag;
-        uint64_t start_time;
-        int flow_id;
-        int graph_id;
-        Callback callback;
-        CallbackArg callbackArg;
-    };
-    static std::unordered_map<int32_t, M4CompletionData*> pending_map;
-    static std::unordered_set<int32_t> scheduled_flows;
 };
 
 #endif // __M4_H__
