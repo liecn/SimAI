@@ -450,14 +450,17 @@ void M4::process_batch_of_flows() {
         n_flows_active++;
     }
 
-    // Build batch input exactly like @inference/
+    // Evolve states first (LSTM -> GNN) so contention is reflected before prediction
+    step_m4_state_only(static_cast<float>(current_time));
+
+    // Build batch input exactly like @inference/ using UPDATED h_vec
     torch::Tensor flowid_batch = torch::from_blob(flow_ids_batch.data(), {(int)flow_ids_batch.size()}, torch::TensorOptions().dtype(torch::kInt64)).to(device).clone();
     auto h_vec_batch = h_vec.index_select(0, flowid_batch);
     auto nlinks_batch = flowid_to_nlinks_tensor.index_select(0, flowid_batch).unsqueeze(1);
     auto params_batch = params_tensor.unsqueeze(0).repeat({(int)flow_ids_batch.size(), 1});
     auto input_batch = torch::cat({nlinks_batch, params_batch, h_vec_batch}, 1);
 
-    // Single MLP forward for the entire temporal batch
+    // Single MLP forward for the entire temporal batch (predict after step)
     auto sldn = output_layer.forward({input_batch}).toTensor().view(-1);
     sldn = torch::clamp(sldn, 1.0f, std::numeric_limits<float>::infinity());
 
@@ -470,9 +473,6 @@ void M4::process_batch_of_flows() {
         M4Flow* flow = pending_flows_[(int)i];
         event_queue->schedule_event(completion_time, flow->callback, flow->callbackArg);
     }
-
-    // After prediction, evolve hidden states once for the new time slice (predict -> step order)
-    step_m4_state_only(static_cast<float>(current_time));
 
     // Clear temporal batch
     pending_flows_.clear();
