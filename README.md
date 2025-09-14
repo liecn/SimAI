@@ -25,6 +25,7 @@ git checkout dev
 git submodule update --init --recursive
 
 # Run docker with volume binding
+cd ../
 docker run -it -v $(pwd)/SimAI:/data1/lichenni/projects/SimAI simai
 
 # Build all backends (in docker)
