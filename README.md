@@ -14,6 +14,27 @@ git submodule update --init --recursive
 ./scripts/build.sh -c m4       # M4 inference backend
 ```
 
+## 🔧 Build using Docker
+```bash
+# Build a docker image
+docker build -t simai .
+
+# Clone the repo (NOT in docker)
+git clone https://github.com/liecn/SimAI.git && cd SimAI
+git checkout dev
+git submodule update --init --recursive
+
+# Run docker with volume binding
+cd ../
+docker run -it -v $(pwd)/SimAI:/app/SimAI simai
+
+# Build all backends (in docker)
+cd /app/SimAI
+./scripts/build.sh -c flowsim  # Fast simulation
+./scripts/build.sh -c ns3      # Detailed simulation  
+./scripts/build.sh -c m4       # M4 inference backend
+```
+
 ## 🏃 Running Simulations
 
 ### ⚡ FlowSim (Fast Network Simulation)
