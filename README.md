@@ -52,6 +52,12 @@ time AS_SEND_LAT=3 AS_NVLS_ENABLE=1 ./bin/SimAI_simulator -t 8 -w ./example/micr
 time AS_SEND_LAT=3 AS_NVLS_ENABLE=1 ./bin/SimAI_m4 -w ./example/microAllReduce_16gpus.txt -n ./Spectrum-X_128g_8gps_100Gbps_A100
 ```
 
+### Sweep experiments
+```bash
+./run_sweep.sh <flowsim | ns3> <N> <M>
+e.g., ./run_sweep.sh flowsim 0 1
+```
+
 ## 📊 Results & Output Files
 
 After running simulations, results are automatically saved to backend-specific directories:
