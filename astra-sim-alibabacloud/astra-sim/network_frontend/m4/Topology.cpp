@@ -5,6 +5,7 @@
 #include <set>
 #include <unordered_set>
 #include <algorithm>
+#include <unordered_map>
 
 std::shared_ptr<EventQueue> Topology::event_queue = nullptr;
 
@@ -340,4 +341,55 @@ void Topology::cancel_all_events() noexcept {
         //}
     }
     */
+}
+
+double Topology::get_link_bandwidth(DeviceId src, DeviceId dst) {
+    auto it = link_map.find(std::make_pair(src, dst));
+    if (it == link_map.end()) {
+        throw std::runtime_error("[M4 ERROR] Topology::get_link_bandwidth: link not found");
+    }
+    return it->second->get_bandwidth();
+}
+
+float Topology::get_link_latency(DeviceId src, DeviceId dst) {
+    auto it = link_map.find(std::make_pair(src, dst));
+    if (it == link_map.end()) {
+        throw std::runtime_error("[M4 ERROR] Topology::get_link_latency: link not found");
+    }
+    return it->second->get_latency();
+}
+
+std::vector<int> Topology::find_ns3_route(int src, int dst) {
+    if (src == dst) return {src};
+    // BFS from src to dst; expand only via switches/NVSwitches
+    std::queue<int> q;
+    std::unordered_map<int, int> parent;
+    q.push(src);
+    parent[src] = -1;
+    while (!q.empty()) {
+        int u = q.front(); q.pop();
+        // iterate neighbors of u
+        for (const auto &kv : link_map) {
+            if (kv.first.first != u) continue;
+            int v = kv.first.second;
+            // Only allow traversal if v is a switch or NVSwitch, or v==dst
+            bool v_is_switch = switch_node_ids.count(v) > 0;
+            bool v_is_nvswitch = nvswitch_node_ids.count(v) > 0;
+            // Emulate NS3 host->host path: avoid NVSwitch for inter-host routing
+            // Allow traversing only through switches; allow stepping into dst host
+            if (!v_is_switch && v != dst) continue;
+            if (parent.find(v) != parent.end()) continue;
+            // u should not be an NVSwitch either (we never enqueue those)
+            parent[v] = u;
+            if (v == dst) {
+                // reconstruct path
+                std::vector<int> path;
+                for (int cur = v; cur != -1; cur = parent[cur]) path.push_back(cur);
+                std::reverse(path.begin(), path.end());
+                return path;
+            }
+            q.push(v);
+        }
+    }
+    throw std::runtime_error("[M4 ERROR] NS3-like route not found");
 }

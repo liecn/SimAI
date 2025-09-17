@@ -140,14 +140,32 @@ static void m4_completion_callback(void* arg) {
                 unsigned int src_port = 0u;
                 unsigned int dst_port = 0u;
                 
-                // Calculate ideal FCT (standalone) like NS3 does
-                float topology_latency = M4::GetTopologyLatency(); // in ns
-                float topology_bandwidth = M4::GetTopologyBandwidth(); // in bytes/ns
+                // Use routing framework's pre-computed RTT and bandwidth (same as NS3)
+                const AstraSim::RoutingFramework* rf = M4::GetRoutingFramework();
+                if (!rf) {
+                    throw std::runtime_error("[M4 ERROR] RoutingFramework is null when computing standalone_fct (send)");
+                }
                 
-                // Calculate: ideal_fct = base_rtt + transmission_time
-                uint64_t base_rtt = 2 * (uint64_t)topology_latency;
-                uint64_t transmission_time = (uint64_t)(data->count / topology_bandwidth);
-                uint64_t standalone_fct = base_rtt + transmission_time;
+                uint64_t base_rtt = rf->GetPairRtt(data->src, data->dst);
+                uint64_t b_bps = rf->GetPairBandwidth(data->src, data->dst);
+                
+                const uint32_t packet_payload_size = 1000u;
+                const uint32_t header_overhead = 52u; // 14(L2)+20(L3)+8(UDP)+2(pg)+8(seq)
+                uint64_t num_pkts = (data->count + packet_payload_size - 1) / packet_payload_size;
+                uint64_t total_bytes = data->count + num_pkts * header_overhead;
+                
+                // Use NS3's exact calculation: base_rtt + total_bytes * 8000000000lu / b
+                uint64_t standalone_fct = base_rtt + total_bytes * 8000000000lu / b_bps;
+                if (g_fct_lines_written < 3) {
+                    std::ostringstream os;
+                    os << "[M4 DEBUG SEND] flow_id=" << data->flowTag.current_flow_id
+                       << " base_rtt=" << base_rtt
+                       << " bandwidth_bps=" << b_bps
+                       << " num_pkts=" << num_pkts
+                       << " total_bytes=" << total_bytes
+                       << " standalone_fct=" << standalone_fct;
+                    std::cout << os.str() << std::endl;
+                }
 
                 fprintf(fct_output_file, "%08x %08x %u %u %lu %lu %lu %lu %d\n",
                         src_ip, dst_ip, src_port, dst_port, data->count, start_time, fct_ns, standalone_fct,
@@ -356,13 +374,36 @@ void M4Network::notify_receiver_packet_arrived(int sender_node, int receiver_nod
                     uint32_t dst_ip = 0u;
                     unsigned int src_port = 0u;
                     unsigned int dst_port = 0u;
-                    // Calculate proper ideal FCT like the main callback
-                    float topology_latency = M4::GetTopologyLatency(); // in ns
-                    float topology_bandwidth = M4::GetTopologyBandwidth(); // in bytes/ns
-                    uint64_t base_rtt = 2 * (uint64_t)topology_latency;
-                    uint64_t transmission_time = (uint64_t)(message_size / topology_bandwidth);
-                    uint64_t standalone_fct = base_rtt + transmission_time;
+
+                    // Compute NS3-matching standalone FCT:
+                    // base_rtt = sum(link_latency along route) * 2
+                    // Use routing framework's pre-computed RTT and bandwidth (same as NS3)
+                    const AstraSim::RoutingFramework* rf = M4::GetRoutingFramework();
+                    if (!rf) {
+                        throw std::runtime_error("[M4 ERROR] RoutingFramework is null when computing standalone_fct (recv)");
+                    }
                     
+                    uint64_t base_rtt = rf->GetPairRtt(sender_node, receiver_node);
+                    uint64_t b_bps = rf->GetPairBandwidth(sender_node, receiver_node);
+                    
+                    const uint32_t packet_payload_size = 1000u;
+                    const uint32_t header_overhead = 52u;
+                    uint64_t num_pkts = (message_size + packet_payload_size - 1) / packet_payload_size;
+                    uint64_t total_bytes = message_size + num_pkts * header_overhead;
+                    
+                    // Use NS3's exact calculation: base_rtt + total_bytes * 8000000000lu / b
+                    uint64_t standalone_fct = base_rtt + total_bytes * 8000000000lu / b_bps;
+                    if (g_fct_lines_written < 3) {
+                        std::ostringstream os;
+                        os << "[M4 DEBUG RECV] flow_id=" << flowTag.current_flow_id
+                           << " base_rtt=" << base_rtt
+                           << " bandwidth_bps=" << b_bps
+                           << " num_pkts=" << num_pkts
+                           << " total_bytes=" << total_bytes
+                           << " standalone_fct=" << standalone_fct;
+                        std::cout << os.str() << std::endl;
+                    }
+
                     fprintf(fct_output_file, "%08x %08x %u %u %lu %lu %lu %lu %d\n",
                             src_ip, dst_ip, src_port, dst_port, message_size, start_time, fct_ns, standalone_fct,
                             flowTag.current_flow_id);

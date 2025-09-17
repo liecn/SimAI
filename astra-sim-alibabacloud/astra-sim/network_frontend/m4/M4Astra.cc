@@ -244,6 +244,29 @@ int main(int argc,char *argv[]) {
   std::cout << "[M4] Creating event queue and topology..." << std::endl;
   std::shared_ptr<EventQueue> event_queue = std::make_shared<EventQueue>();
   std::shared_ptr<Topology> topology = construct_fat_tree_topology(user_param.network_topo);
+  // Provide NS3-like node roles to Topology for BFS
+  {
+    // Switch IDs are listed in the second line of the topo file
+    std::ifstream tf(user_param.network_topo);
+    if (tf.is_open()) {
+      uint32_t n_nodes, gps, nvl, swc, lnk; std::string gtype;
+      tf >> n_nodes >> gps >> nvl >> swc >> lnk >> gtype;
+      std::vector<int> ids_second_line;
+      ids_second_line.reserve(swc + nvl);
+      // read the second line: in DCN topologies this contains NVSwitch + switch ids
+      for (int i = 0; i < (int)(swc + nvl); ++i) { int sid; tf >> sid; ids_second_line.push_back(sid); }
+      tf.close();
+      // Derive gpu count and NVSwitch id range
+      int gpu_count = static_cast<int>(n_nodes) - static_cast<int>(nvl) - static_cast<int>(swc);
+      std::unordered_set<int> nv_ids;
+      for (int i = 0; i < (int)nvl; ++i) nv_ids.insert(gpu_count + i);
+      std::vector<int> switch_only_ids;
+      switch_only_ids.reserve(ids_second_line.size());
+      for (int id : ids_second_line) if (nv_ids.count(id) == 0) switch_only_ids.push_back(id);
+      topology->set_switch_node_ids(switch_only_ids);
+      topology->set_nvswitch_count(gpu_count, nvswitch_num);
+    }
+  }
   
   std::cout << "[M4] Calling M4::Init..." << std::endl;
   M4::Init(event_queue, topology);

@@ -101,6 +101,9 @@ void RoutingFramework::PrecalculateRoutingTables() {
     }
     
     BuildRoutingTablesFromNextHop();
+    
+    // Compute pair RTT and bandwidth tables (same logic as NS3)
+    ComputePairRttAndBandwidth();
 }
 
 std::vector<int> RoutingFramework::GetPrecalculatedNextHops(int src_node, int dst_node) const {
@@ -666,6 +669,97 @@ bool RoutingFramework::PrecalculateFlowPathsForFlowSim(const std::string& topolo
     }
     
     return true;
+}
+
+void RoutingFramework::ComputePairRttAndBandwidth() {
+    // Implement NS3's exact pairRtt and pairBw computation logic
+    int node_count = topology_.GetNodeCount();
+    
+    pair_rtt_.clear();
+    pair_bandwidth_.clear();
+    
+    // For each pair of host nodes (type 0), compute RTT and bottleneck bandwidth
+    for (int src = 0; src < node_count; src++) {
+        if (topology_.GetNodeType(src) != 0) continue;  // Only for host nodes
+        
+        for (int dst = 0; dst < node_count; dst++) {
+            if (topology_.GetNodeType(dst) != 0) continue;  // Only for host nodes
+            
+            // Use BFS to compute delay, txDelay, and bottleneck bandwidth (same as NS3)
+            uint64_t delay = 0, tx_delay = 0;
+            uint64_t bottleneck_bw_bps = UINT64_MAX;
+            
+            // Get path from src to dst using our routing tables
+            std::vector<int> path = FindPath(src, dst);
+            
+            if (path.size() < 2) {
+                // No path found - set to 0 (will cause error when accessed)
+                pair_rtt_[src][dst] = 0;
+                pair_bandwidth_[src][dst] = 0;
+                continue;
+            }
+            
+            // Compute delay, tx_delay, and bottleneck bandwidth along the path
+            const uint32_t packet_payload_size = 1000;  // Same as NS3
+            
+            const auto& link_info_map = topology_.GetLinkInfo();
+            for (size_t i = 0; i + 1 < path.size(); ++i) {
+                int u = path[i];
+                int v = path[i + 1];
+                
+                // Get link properties from topology
+                auto u_it = link_info_map.find(u);
+                if (u_it == link_info_map.end()) {
+                    throw std::runtime_error("[ROUTING ERROR] No link info for source node " + std::to_string(u));
+                }
+                auto v_it = u_it->second.find(v);
+                if (v_it == u_it->second.end()) {
+                    throw std::runtime_error("[ROUTING ERROR] No link info for link " + std::to_string(u) + " -> " + std::to_string(v));
+                }
+                
+                uint64_t link_delay_ns = v_it->second.delay;
+                uint64_t link_bw_bps = v_it->second.bandwidth;
+                
+                delay += link_delay_ns;
+                tx_delay += (packet_payload_size * 1000000000ULL * 8) / link_bw_bps;  // Same as NS3
+                bottleneck_bw_bps = std::min(bottleneck_bw_bps, link_bw_bps);
+            }
+            
+            // Compute final RTT (same as NS3: delay * 2 + txDelay)
+            uint64_t rtt = delay * 2 + tx_delay;
+            
+            pair_rtt_[src][dst] = rtt;
+            pair_bandwidth_[src][dst] = bottleneck_bw_bps;
+        }
+    }
+}
+
+uint64_t RoutingFramework::GetPairRtt(int src_node, int dst_node) const {
+    auto src_it = pair_rtt_.find(src_node);
+    if (src_it == pair_rtt_.end()) {
+        throw std::runtime_error("[ROUTING ERROR] No RTT data for source node " + std::to_string(src_node));
+    }
+    
+    auto dst_it = src_it->second.find(dst_node);
+    if (dst_it == src_it->second.end()) {
+        throw std::runtime_error("[ROUTING ERROR] No RTT data for path " + std::to_string(src_node) + " -> " + std::to_string(dst_node));
+    }
+    
+    return dst_it->second;
+}
+
+uint64_t RoutingFramework::GetPairBandwidth(int src_node, int dst_node) const {
+    auto src_it = pair_bandwidth_.find(src_node);
+    if (src_it == pair_bandwidth_.end()) {
+        throw std::runtime_error("[ROUTING ERROR] No bandwidth data for source node " + std::to_string(src_node));
+    }
+    
+    auto dst_it = src_it->second.find(dst_node);
+    if (dst_it == src_it->second.end()) {
+        throw std::runtime_error("[ROUTING ERROR] No bandwidth data for path " + std::to_string(src_node) + " -> " + std::to_string(dst_node));
+    }
+    
+    return dst_it->second;
 }
 
 } // namespace AstraSim 

@@ -214,7 +214,7 @@ void M4::SetupML() {
     
     // Create parameter vector to match inference expectation (loaded from .npy file in inference)
     // Use SimAI.conf values: CC_MODE=8 (DCTCP), BUFFER_SIZE=10, U_TARGET=0.95
-    param_values[0] = 150.0f;   // bfsz (BUFFER_SIZE from SimAI.conf)
+    param_values[0] = 400.0f;   // bfsz (BUFFER_SIZE from SimAI.conf)
     param_values[1] = 15.0f;   // fwin (default from consts.py)
     
     // Set CC type: CC_MODE=8 corresponds to DCTCP (index 0 in CC_LIST = ["dctcp", "dcqcn_paper_vwin", "hp", "timely_vwin"])
@@ -222,7 +222,7 @@ void M4::SetupML() {
     param_values[2] = 1.0f;    // dctcp flag (index 2 = CC_IDX_BASE + 0)
     
     // Set DCTCP-specific parameters from SimAI.conf and consts.py defaults
-    param_values[6] = 30.0f;   // dctcp_k (default from consts.py)
+    param_values[6] = 80.0f;   // dctcp_k (default from consts.py)
     
     // Additional parameters to match @inference/ exactly
     param_values[3] = 0.0f;    // dcqcn_flag (not used for DCTCP)
@@ -442,19 +442,31 @@ void M4::process_batch_of_flows() {
         flow->start_time = current_time;
 
         uint64_t size = flow->size;
-        int num_hops = static_cast<int>(flow->node_path.size());
-
-        const double MTU = 1000.0;
-        const double BYTES_PER_HEADER = 48.0;
-        float topology_latency = topology->get_latency();
-        float topology_bandwidth = topology->get_bandwidth();
         double size_bytes = static_cast<double>(size);
-        double prop_delay = topology_latency * (num_hops - 1);
-        double trans_delay = ((size_bytes + std::ceil(size_bytes / MTU) * BYTES_PER_HEADER)) / topology_bandwidth;
-        double first_packet = (std::min(MTU, size_bytes) + BYTES_PER_HEADER) / topology_bandwidth * (num_hops - 2);
-        double ideal_fct = trans_delay + prop_delay + first_packet;
+        
+        // Use routing framework's pre-computed RTT and bandwidth (same as NS3)
+        if (!routing_framework_) {
+            throw std::runtime_error("[M4 ERROR] RoutingFramework is null when computing ideal FCT");
+        }
+        
+        uint64_t base_rtt = routing_framework_->GetPairRtt(flow->src, flow->dst);
+        uint64_t b_bps = routing_framework_->GetPairBandwidth(flow->src, flow->dst);
+        
+        const uint32_t packet_payload_size = 1000u;
+        const uint32_t header_overhead = 52u; // 14(L2)+20(L3)+8(UDP)+2(pg)+8(seq)
+        uint64_t num_pkts = (size + packet_payload_size - 1) / packet_payload_size;
+        uint64_t total_bytes = size + num_pkts * header_overhead;
+        
+        // Use NS3's exact calculation: base_rtt + total_bytes * 8000000000lu / b
+        double ideal_fct = (double)base_rtt + (double)(total_bytes * 8000000000ULL) / (double)b_bps;
 
-        flowid_to_nlinks_tensor[flow_id] = num_hops - 1;
+        // Get route for hop count (still needed for ML features)
+        std::vector<int> ns3_route = topology->find_ns3_route(flow->src, flow->dst);
+        if (ns3_route.size() < 2) {
+            throw std::runtime_error("[M4 ERROR] Empty/invalid NS3 route for hop count");
+        }
+        int ns3_num_links = static_cast<int>(ns3_route.size()) - 1;
+        flowid_to_nlinks_tensor[flow_id] = ns3_num_links;
         i_fct_tensor[flow_id] = static_cast<float>(ideal_fct);
         release_time_tensor[flow_id] = time_clock;
         flowid_active_mask[flow_id] = true;
@@ -462,14 +474,13 @@ void M4::process_batch_of_flows() {
         h_vec[flow_id].zero_();
         h_vec[flow_id][0] = 1.0f;
         h_vec[flow_id][2] = std::log2(size_bytes / 1000.0 + 1.0);
-        h_vec[flow_id][3] = static_cast<float>(num_hops - 1);
-
+        h_vec[flow_id][3] = static_cast<float>(ns3_num_links);
         if (flow_id >= (int)flowid_to_link_indices.size()) flowid_to_link_indices.resize(flow_id + 1);
         if (flowid_to_link_indices[flow_id].empty()) {
             std::vector<int32_t> flow_link_indices;
-            for (int i = 0; i < num_hops - 1; i++) {
-                int src_node = flow->node_path[i];
-                int dst_node = flow->node_path[i + 1];
+            for (int i = 0; i < ns3_num_links; i++) {
+                int src_node = ns3_route[i];
+                int dst_node = ns3_route[i + 1];
                 long long link_key = ((long long)src_node << 32) | dst_node;
                 if (link_key_to_index.find(link_key) == link_key_to_index.end()) {
                     link_key_to_index[link_key] = next_link_index++;
@@ -592,8 +603,49 @@ void M4::process_batch_of_flows() {
     auto input_batch = torch::cat({nlinks_batch, params_batch, h_vec_batch}, 1);
 
     // Single MLP forward for the entire temporal batch (predict after step)
-    auto sldn = output_layer.forward({input_batch}).toTensor().view(-1);
-    sldn = torch::clamp(sldn, 1.0f, std::numeric_limits<float>::infinity());
+    auto sldn_raw = output_layer.forward({input_batch}).toTensor().view(-1);
+    // Debug: print slowdown stats for first few batches only
+    static int debug_batches = 0;
+    if (debug_batches < 3) {
+        auto to_cpu = [](const torch::Tensor& t){ return t.detach().to(torch::kCPU); };
+        auto s = to_cpu(sldn_raw);
+        double s_min = s.min().item<double>();
+        double s_max = s.max().item<double>();
+        double s_mean = s.mean().item<double>();
+        auto below_one = (s < 1.0).to(torch::kFloat32);
+        double frac_below_one = below_one.mean().item<double>();
+        auto nlinks_cpu = to_cpu(nlinks_batch.squeeze(1).to(torch::kFloat32));
+        auto size_feat_cpu = to_cpu(h_vec_batch.index({torch::indexing::Slice(), 2}));
+        double nlinks_min = nlinks_cpu.min().item<double>();
+        double nlinks_max = nlinks_cpu.max().item<double>();
+        double size_min = size_feat_cpu.min().item<double>();
+        double size_max = size_feat_cpu.max().item<double>();
+        std::cout << "[M4 DBG] slowdown_raw min/mean/max=" << s_min << "/" << s_mean << "/" << s_max
+                  << " frac<1=" << frac_below_one
+                  << " nlinks[min,max]=" << nlinks_min << "," << nlinks_max
+                  << " size_feat[min,max]=" << size_min << "," << size_max
+                  << std::endl;
+        // print a small slice of the actual feature vectors fed to MLP for the first row
+        double nlinks0 = nlinks_cpu[0].item<double>();
+        double size0 = size_feat_cpu[0].item<double>();
+        std::cout << "[M4 DBG] feat nlinks0=" << nlinks0 << " size0=" << size0 << " h0[0..5]=";
+        int h_cols = (int)h_vec_batch.size(1);
+        for (int k = 0; k < std::min(6, h_cols); ++k) {
+            double v = to_cpu(h_vec_batch.index({0, k})).item<double>();
+            if (k) std::cout << ",";
+            std::cout << v;
+        }
+        std::cout << " in0[0..9]=";
+        int in_cols = (int)input_batch.size(1);
+        for (int k = 0; k < std::min(10, in_cols); ++k) {
+            double v = to_cpu(input_batch.index({0, k})).item<double>();
+            if (k) std::cout << ",";
+            std::cout << v;
+        }
+        std::cout << std::endl;
+        debug_batches++;
+    }
+    auto sldn = torch::clamp(sldn_raw, 1.0f, std::numeric_limits<float>::infinity());
 
     // Schedule completion for every flow in this batch
     for (size_t i = 0; i < flow_ids_batch.size(); i++) {

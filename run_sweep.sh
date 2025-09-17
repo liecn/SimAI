@@ -23,6 +23,9 @@ case "$1" in
   ns3)
     time AS_SEND_LAT=3 AS_NVLS_ENABLE=1 ./bin/SimAI_simulator -t 8 -w ./example/sweep/microAllReduce.txt -n ./example/sweep/$TOPOFILE -c ./example/sweep/SimAI.conf -r
     ;;
+  m4)
+    time AS_SEND_LAT=3 AS_NVLS_ENABLE=1 ./bin/SimAI_m4 -w ./example/sweep/microAllReduce.txt -n ./example/sweep/$TOPOFILE
+    ;;
   *) # This is a catch-all for any other value
     echo "Error: Invalid simulator '$1'. Please choose 'flowsim' or 'ns3'."
     exit 1

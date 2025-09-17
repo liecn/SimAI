@@ -155,6 +155,7 @@ public:
     // Topology access for FCT calculation
     static float GetTopologyLatency();
     static float GetTopologyBandwidth();
+    static std::shared_ptr<Topology> GetTopology() { return topology; }
     
     // M4-specific ML setup
     static void SetupML();

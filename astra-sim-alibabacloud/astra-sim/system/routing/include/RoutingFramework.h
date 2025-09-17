@@ -79,6 +79,22 @@ public:
      */
     bool PrecalculateFlowPathsForFlowSim(const std::string& topology_file, 
                                         const std::string& network_config_file);
+    
+    /**
+     * Get pre-computed RTT between two nodes (same as NS3's pairRtt)
+     * @param src_node Source node ID
+     * @param dst_node Destination node ID
+     * @return RTT in nanoseconds, or throws if not found
+     */
+    uint64_t GetPairRtt(int src_node, int dst_node) const;
+    
+    /**
+     * Get pre-computed bandwidth between two nodes (same as NS3's pairBw)
+     * @param src_node Source node ID
+     * @param dst_node Destination node ID
+     * @return Bandwidth in bits per second, or throws if not found
+     */
+    uint64_t GetPairBandwidth(int src_node, int dst_node) const;
 
 private:
     TopologyParser topology_;
@@ -87,8 +103,13 @@ private:
     std::map<int, std::unordered_map<uint32_t, std::vector<int>>> routing_tables_;
     uint32_t ecmp_seed_;
     
+    // Pre-computed RTT and bandwidth tables (same as NS3's pairRtt and pairBw)
+    std::map<int, std::map<int, uint64_t>> pair_rtt_;
+    std::map<int, std::map<int, uint64_t>> pair_bandwidth_;
+    
     void CalculateRouteNS3Style(int host_node);
     void BuildRoutingTablesFromNextHop();
+    void ComputePairRttAndBandwidth();
     int GetInterfaceIndex(int from_node, int to_node) const;
     std::vector<int> FindPath(int src, int dst);
     

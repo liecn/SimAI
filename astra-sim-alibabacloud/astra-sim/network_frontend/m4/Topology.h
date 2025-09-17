@@ -13,6 +13,8 @@ LICENSE file in the root directory of this source tree.
 #include <unordered_set>
 #include <limits>
 #include <set>
+#include <queue>
+#include <stdexcept>
 #include "EventQueue.h"
 #include "Chunk.h"
 #include "Device.h"
@@ -56,6 +58,23 @@ class Topology {
   float bandwidth;
   float latency;
 
+  // Per-link accessors (bandwidth in bytes/ns, latency in ns)
+  // Throws if the link does not exist
+  double get_link_bandwidth(DeviceId src, DeviceId dst);
+  float get_link_latency(DeviceId src, DeviceId dst);
+
+  // Record of node roles to emulate NS3 BFS expansion
+  void set_switch_node_ids(const std::vector<int>& ids) { switch_node_ids.clear(); switch_node_ids.insert(ids.begin(), ids.end()); }
+  void set_nvswitch_count(int gpu_count, int nvswitch_count) {
+    nvswitch_node_ids.clear();
+    for (int i = 0; i < nvswitch_count; ++i) {
+      nvswitch_node_ids.insert(gpu_count + i);
+    }
+  }
+
+  // Find NS3-like route: expand only through switches/NVSwitches
+  std::vector<int> find_ns3_route(int src, int dst);
+
 
 
  protected:
@@ -73,6 +92,9 @@ class Topology {
   std::vector<Chunk*> active_chunks;
   std::vector<std::unique_ptr<Chunk>> active_chunks_ptrs; // Store unique pointers to chunks
   std::unordered_map<int, double> completion_time_map;
+
+  std::unordered_set<int> switch_node_ids;
+  std::unordered_set<int> nvswitch_node_ids;
 
   int next_completion_id;
   EventTime next_completion_time;
