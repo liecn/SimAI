@@ -214,15 +214,15 @@ void M4::SetupML() {
     
     // Create parameter vector to match inference expectation (loaded from .npy file in inference)
     // Use SimAI.conf values: CC_MODE=8 (DCTCP), BUFFER_SIZE=10, U_TARGET=0.95
-    param_values[0] = 400.0f;   // bfsz (BUFFER_SIZE from SimAI.conf)
-    param_values[1] = 15.0f;   // fwin (default from consts.py)
+    param_values[0] = 1000.0f;   // bfsz (BUFFER_SIZE from SimAI.conf)
+    param_values[1] = 150.0f;   // fwin (default from consts.py)
     
     // Set CC type: CC_MODE=8 corresponds to DCTCP (index 0 in CC_LIST = ["dctcp", "dcqcn_paper_vwin", "hp", "timely_vwin"])
     // From consts.py: CC_DICT = {"dctcp": 8, ...} - so CC_MODE=8 is indeed DCTCP
     param_values[2] = 1.0f;    // dctcp flag (index 2 = CC_IDX_BASE + 0)
     
     // Set DCTCP-specific parameters from SimAI.conf and consts.py defaults
-    param_values[6] = 80.0f;   // dctcp_k (default from consts.py)
+    param_values[6] = 100.0f;   // dctcp_k (default from consts.py)
     
     // Additional parameters to match @inference/ exactly
     param_values[3] = 0.0f;    // dcqcn_flag (not used for DCTCP)
