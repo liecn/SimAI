@@ -6,6 +6,3 @@
 	path = ns-3-alibabacloud
 	url = git@github.com:liecn/ns-3-alibabacloud.git
 	branch = dev
-[submodule "m4"]
-	path = m4
-	url = git@github.com:netiken/m4.git
