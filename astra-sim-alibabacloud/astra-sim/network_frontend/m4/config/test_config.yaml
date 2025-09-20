@@ -2,24 +2,19 @@
 
 # Dataset parameters
 dataset:
-  n_flows_list: [2000]
   # n_links_max: 96
   n_links_max: 768
   # n_links_max: 16896
   # n_links_max: 135168
-  n_hosts_list: [32]
   shard: 0
-  shard_list: [0,4000,4000] # [start, end, num]
   lr: 10
   train_frac: 0.9
   topo_type: "_topology_flows"
-  enable_segmentation: True
   sampling_method: "balanced" # weighted, uniform, balanced
-  enable_topo: True
   flow_size_threshold: 100000000
   enable_flowsim_gt: False
-  enable_remainsize: True
-  enable_queuelen: True
+  enable_remainsize: False
+  enable_queuelen: False
 
 # Model parameters
 model:
@@ -38,7 +33,7 @@ model:
 
 # Training parameters
 training:
-  gpu: [2]
+  gpu: [0]
   n_epochs: 5
   batch_size: 1
   learning_rate: 0.0001
