@@ -2,12 +2,12 @@
 
 # Dataset parameters
 dataset:
+  shard: 0
+  lr: 10
   # n_links_max: 96
   n_links_max: 768
   # n_links_max: 16896
   # n_links_max: 135168
-  shard: 0
-  lr: 10
   train_frac: 0.9
   topo_type: "_topology_flows"
   sampling_method: "balanced" # weighted, uniform, balanced
@@ -18,7 +18,6 @@ dataset:
 
 # Model parameters
 model:
-  model_name: "lstm"
   input_size: 2
   n_layer: 2
   gcn_n_layer: 3
