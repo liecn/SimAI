@@ -55,7 +55,7 @@ time AS_SEND_LAT=3 AS_NVLS_ENABLE=1 ./bin/SimAI_m4 -w ./example/microAllReduce_1
 ### Sweep experiments
 ```bash
 ./run_sweep.sh <flowsim | ns3> <N> <M>
-e.g., ./run_sweep.sh flowsim 0 1
+e.g., ./run_sweep.sh flowsim 16 2
 ```
 
 ## 📊 Results & Output Files
