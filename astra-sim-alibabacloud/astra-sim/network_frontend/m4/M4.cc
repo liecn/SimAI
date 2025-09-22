@@ -51,7 +51,7 @@ torch::jit::script::Module M4::gnn_layer_2;
 torch::Tensor M4::params_tensor;
 bool M4::models_loaded = false;
 int32_t M4::hidden_size_ = 200; // Model expects 214 total: 1+13+200=214 (matches main_m4_noflowsim.cpp)
-int32_t M4::n_links_max_ = 4096;
+int32_t M4::n_links_max_ = 128;
 
 // Multi-flow state management (from @inference/ ground truth)
 // NOTE: These tensors are initialized in SetupML() to avoid static initialization issues
@@ -87,6 +87,10 @@ int32_t M4::next_link_index = 0;
 std::vector<std::vector<int32_t>> M4::flowid_to_link_indices;
 std::unordered_set<int32_t> M4::current_batch_link_set;
 
+// Pre-allocated vectors for bipartite graph construction (performance optimization)
+std::vector<int32_t> M4::reusable_flow_ids_;
+std::vector<int32_t> M4::reusable_link_ids_;
+
 // FlowSim-style temporal batching
 std::vector<M4Flow*> M4::pending_flows_;
 std::list<std::unique_ptr<M4Flow>> M4::active_flows_ptrs;
@@ -108,6 +112,10 @@ void M4::Init(std::shared_ptr<EventQueue> event_queue, std::shared_ptr<Topology>
 
     // Prepare per-flow link storage
     flowid_to_link_indices.assign(n_flows_max, {});
+    
+    // Pre-allocate reusable vectors for bipartite graph construction (performance optimization)
+    reusable_flow_ids_.reserve(8192);   // Conservative upper bound for flows per batch
+    reusable_link_ids_.reserve(128);  // Conservative upper bound for links per batch
     
     std::cout << "[M4] Init() completed successfully! models_loaded=" << models_loaded << ", n_flows_max=" << n_flows_max << ", hidden_size_=" << hidden_size_ << std::endl;
 }
@@ -185,7 +193,7 @@ void M4::SetupML() {
 
     // Parse config for hidden_size and n_links_max
     try {
-        const std::string cfg_path = "./m4/config/test_config.yaml";
+        const std::string cfg_path = "./astra-sim-alibabacloud/astra-sim/network_frontend/m4/config/test_config.yaml";
         std::ifstream infile(cfg_path);
         if (infile.good()) {
             std::ostringstream contents;
@@ -204,7 +212,7 @@ void M4::SetupML() {
     } catch (const std::exception& e) {
         std::cerr << "[M4] Config parse error: " << e.what() << std::endl;
         hidden_size_ = 64;
-        n_links_max_ = 4096;
+        n_links_max_ = 128;
     }
     
     // Initialize params tensor with ACTUAL network configuration from SimAI.conf
@@ -215,14 +223,14 @@ void M4::SetupML() {
     // Create parameter vector to match inference expectation (loaded from .npy file in inference)
     // Use SimAI.conf values: CC_MODE=8 (DCTCP), BUFFER_SIZE=10, U_TARGET=0.95
     param_values[0] = 1000.0f;   // bfsz (BUFFER_SIZE from SimAI.conf)
-    param_values[1] = 150.0f;   // fwin (default from consts.py)
+    param_values[1] = 204.0f;   // fwin (default from consts.py)
     
     // Set CC type: CC_MODE=8 corresponds to DCTCP (index 0 in CC_LIST = ["dctcp", "dcqcn_paper_vwin", "hp", "timely_vwin"])
     // From consts.py: CC_DICT = {"dctcp": 8, ...} - so CC_MODE=8 is indeed DCTCP
-    param_values[2] = 1.0f;    // dctcp flag (index 2 = CC_IDX_BASE + 0)
+    param_values[2] = 1.0f;
     
     // Set DCTCP-specific parameters from SimAI.conf and consts.py defaults
-    param_values[6] = 100.0f;   // dctcp_k (default from consts.py)
+    param_values[6] = 400.0f;
     
     // Additional parameters to match @inference/ exactly
     param_values[3] = 0.0f;    // dcqcn_flag (not used for DCTCP)
@@ -453,13 +461,13 @@ void M4::process_batch_of_flows() {
         uint64_t b_bps = routing_framework_->GetPairBandwidth(flow->src, flow->dst);
         
         const uint32_t packet_payload_size = 1000u;
-        const uint32_t header_overhead = 52u; // 14(L2)+20(L3)+8(UDP)+2(pg)+8(seq)
+        const uint32_t header_overhead = 52u; //
         uint64_t num_pkts = (size + packet_payload_size - 1) / packet_payload_size;
         uint64_t total_bytes = size + num_pkts * header_overhead;
         
         // Use NS3's exact calculation: base_rtt + total_bytes * 8000000000lu / b
         double ideal_fct = (double)base_rtt + (double)(total_bytes * 8000000000ULL) / (double)b_bps;
-
+        // std::cout << "[M4 DBG] ideal_fct=" << ideal_fct << " base_rtt=" << base_rtt << " total_bytes=" << total_bytes << " b_bps=" << b_bps << std::endl;
         // Get route for hop count (still needed for ML features)
         std::vector<int> ns3_route = topology->find_ns3_route(flow->src, flow->dst);
         if (ns3_route.size() < 2) {
@@ -533,23 +541,23 @@ void M4::process_batch_of_flows() {
         auto flowid_active_list_cur = torch::nonzero(flowid_active_mask).flatten();
         if (flowid_active_list_cur.numel() > 0) {
             int n_flows_active_cur = flowid_active_list_cur.size(0);
-            std::vector<int32_t> flow_ids, link_ids;
-            flow_ids.reserve(1024);
-            link_ids.reserve(4096);
+            // Use pre-allocated reusable vectors for performance
+            reusable_flow_ids_.clear();
+            reusable_link_ids_.clear();
             for (int i = 0; i < n_flows_active_cur; i++) {
                 int32_t fid = flowid_active_list_cur[i].item<int32_t>();
                 if (fid < flowid_to_link_indices.size()) {
                     for (int32_t lid : flowid_to_link_indices[fid]) {
                         if (current_batch_link_set.find(lid) != current_batch_link_set.end()) {
-                            flow_ids.push_back(i);
-                            link_ids.push_back(lid);
+                            reusable_flow_ids_.push_back(i);
+                            reusable_link_ids_.push_back(lid);
                         }
                     }
                 }
             }
-            if (!flow_ids.empty()) {
-                auto edge_flow_tensor = torch::from_blob(flow_ids.data(), {(int)flow_ids.size()}, torch::TensorOptions().dtype(torch::kInt32)).to(torch::kInt64).to(device).clone();
-                auto edge_link_tensor = torch::from_blob(link_ids.data(), {(int)link_ids.size()}, torch::TensorOptions().dtype(torch::kInt32)).to(torch::kInt64).to(device).clone();
+            if (!reusable_flow_ids_.empty()) {
+                auto edge_flow_tensor = torch::from_blob(reusable_flow_ids_.data(), {(int)reusable_flow_ids_.size()}, torch::TensorOptions().dtype(torch::kInt32)).to(torch::kInt64).to(device).clone();
+                auto edge_link_tensor = torch::from_blob(reusable_link_ids_.data(), {(int)reusable_link_ids_.size()}, torch::TensorOptions().dtype(torch::kInt32)).to(torch::kInt64).to(device).clone();
                 // Compact interacting flows and remap indices (exactly like @inference)
                 auto unique_flows_tuple = torch::_unique(edge_flow_tensor, true, true);
                 auto flow_pos_unique = std::get<0>(unique_flows_tuple);

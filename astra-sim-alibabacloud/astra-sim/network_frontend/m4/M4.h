@@ -108,6 +108,10 @@ private:
     // Links touched by the current temporal batch (for interaction filtering)
     static std::unordered_set<int32_t> current_batch_link_set;
     
+    // Pre-allocated vectors for bipartite graph construction (performance optimization)
+    static std::vector<int32_t> reusable_flow_ids_;
+    static std::vector<int32_t> reusable_link_ids_;
+    
     // FlowSim-style temporal batching
     static std::vector<M4Flow*> pending_flows_;
     static std::list<std::unique_ptr<M4Flow>> active_flows_ptrs;
