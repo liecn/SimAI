@@ -63,8 +63,6 @@ Workload::Workload(
   this->registered_for_finished_streams = false;
   #ifndef PHY_MTP
   if (generator->id == 0 && seprate_log) {
-    std::cout << "stat path: " << path << " ,total rows: " << total_rows
-              << " ,stat row: " << stat_row << std::endl;
     detailed = new CSVWriter(path, "detailed_"+std::to_string(generator->total_nodes)+".csv");
     end_to_end = new CSVWriter(path, "EndToEnd.csv");
     dimension_utilization =
@@ -1033,8 +1031,6 @@ int Workload::get_layer_numbers(std::string workload_input) {
     std::cerr << "This error is fatal. Please check your path and filename."
               << std::endl;
     exit(1);
-  } else {
-    std::cout << "Success in opening workload file" << std::endl;
   }
   std::string dummyLine;
   std::getline(inFile, dummyLine);
@@ -1144,10 +1140,6 @@ bool Workload::initialize_workload(std::string name) {
     std::cerr << "This error is fatal. Please check your path and filename."
               << std::endl;
     exit(1);
-  } else {
-    if (generator->id == 0) {
-      std::cout << "Success in opening workload file" << std::endl;
-    }
   }
  std::string firstline;
   std::getline(inFile,firstline);

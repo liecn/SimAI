@@ -37,7 +37,6 @@ void CSVWriter::write_res(std::string data) {
   myFile.close();
 }
 void CSVWriter::initialize_csv(int rows, int cols) {
-  std::cout << "CSV path and filename: " << path + name << std::endl;
   int trial = 10000;
   do {
     myFile.open(path + name, std::ios::out | std::ios::trunc);
@@ -56,7 +55,6 @@ void CSVWriter::initialize_csv(int rows, int cols) {
 }
 void CSVWriter::finalize_csv(
     std::list<std::list<std::pair<uint64_t, double>>> dims) {
-  std::cout << "path to create csvs is: " << path << std::endl;
   int trial = 10000;
   do {
     myFile.open(path + name, std::fstream::out);
@@ -83,8 +81,6 @@ void CSVWriter::finalize_csv(
         << "This error is fatal. Please make sure the CSV write path exists."
         << std::endl;
     exit(1);
-  } else {
-    std::cout << "success in openning file" << std::endl;
   }
   myFile.seekp(0, std::ios_base::beg);
   myFile.seekg(0, std::ios_base::beg);

@@ -262,7 +262,6 @@ Sys::Sys(
   stream_counter = 0;
   if (id == 0) {
     std::atexit(exiting);
-    std::cout << "total nodes: " << total_nodes << std::endl;
   }
   NI->sim_init(MEM);
   memBus = new MemBus(
@@ -871,10 +870,6 @@ bool Sys::initialize_sys(std::string name) {
                 << std::endl;
     }
     exit(1);
-  } else {
-    if (id == 0) {
-      std::cout << "Success in opening system file" << std::endl;
-    }
   }
   std::string var;
   std::string value;

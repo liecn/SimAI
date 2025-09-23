@@ -114,15 +114,14 @@ int main(int argc,char *argv[]) {
   }
   
   std::cout << "[M4] Starting SimAI-M4" << std::endl;
-  std::cout << "[M4] Workload: " << user_param.workload << " topo: " << user_param.network_topo << " results: " << user_param.result_dir << std::endl;
-  
-  // M4 always uses custom routing
-  std::cout << "[CUSTOM ROUTING] Custom routing enabled via command line argument" << std::endl;
+  std::cout << "[M4] Workload: " << user_param.workload << std::endl;
+  std::cout << "[M4] Network: " << user_param.network_topo << std::endl;
+  std::cout << "[M4] Results: " << user_param.result_dir << std::endl;
   
   // Initialize routing framework early (same position as FlowSim)
   if (!user_param.network_topo.empty()) {
-    // Add system routing logging to match FlowSim
-    std::cout << "[SYSTEM ROUTING] Routing framework initialized with topology: " << user_param.network_topo << std::endl;
+    // Add routing logging to match FlowSim
+    std::cout << "[ROUTING] Routing framework initialized with topology: " << user_param.network_topo << std::endl;
     
     // Create routing framework instance
     auto routing_framework = std::make_unique<AstraSim::RoutingFramework>();
@@ -140,12 +139,9 @@ int main(int argc,char *argv[]) {
         uint32_t temp_node_num, temp_gpus_per_server, temp_nvswitch_num, temp_switch_num, temp_link_num;
         std::string temp_gpu_type_str;
         temp_topof >> temp_node_num >> temp_gpus_per_server >> temp_nvswitch_num >> temp_switch_num >> temp_link_num >> temp_gpu_type_str;
-        std::cout << "[SYSTEM ROUTING] Topology has " << temp_node_num << " nodes" << std::endl;
         temp_topof.close();
       }
       
-      std::cout << "[ROUTING] M4 routing framework setup completed" << std::endl;
-
       // Hand over routing framework to M4 backend (same as FlowSim pattern)
       M4::SetRoutingFramework(std::move(routing_framework));
     }
@@ -209,7 +205,7 @@ int main(int argc,char *argv[]) {
   std::vector<M4Network *> networks;
   std::vector<AstraSim::Sys *> systems;
   for (int i = 0; i < nodes_num; i++) {
-    M4Network *network = new M4Network(i);
+    M4Network *network = new M4Network(i, user_param.result_dir);
     networks.push_back(network);
     AstraSim::Sys *system = new AstraSim::Sys(
       network,
@@ -241,7 +237,6 @@ int main(int argc,char *argv[]) {
   }
   
   // Initialize M4 BEFORE firing workloads (same order as FlowSim)
-  std::cout << "[M4] Creating event queue and topology..." << std::endl;
   std::shared_ptr<EventQueue> event_queue = std::make_shared<EventQueue>();
   std::shared_ptr<Topology> topology = construct_fat_tree_topology(user_param.network_topo);
   // Provide NS3-like node roles to Topology for BFS
@@ -268,16 +263,13 @@ int main(int argc,char *argv[]) {
     }
   }
   
-  std::cout << "[M4] Calling M4::Init..." << std::endl;
   M4::Init(event_queue, topology);
 
   // Fire workloads AFTER M4 backend is initialized (same as FlowSim)
-  std::cout << "[M4] Firing workloads..." << std::endl;
   for (int i = 0; i < nodes_num; i++) {
     systems[i]->workload->fire();
   }
   
-  std::cout << "[M4] Calling M4::Run..." << std::endl;
   M4::Run();
 
   // Print data summary once
@@ -290,8 +282,6 @@ int main(int argc,char *argv[]) {
   
   // Get actual routing statistics from M4
   const AstraSim::RoutingFramework* routing_framework = M4::GetRoutingFramework();
-  
-  std::cout << "[ROUTING] Routing framework cleaned up." << std::endl;
   
   // Clean shutdown (same as FlowSim)
   M4::Stop();

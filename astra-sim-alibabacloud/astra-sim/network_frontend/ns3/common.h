@@ -19,6 +19,7 @@
 #undef PGO_TRAINING
 #define PATH_TO_PGO_CONFIG "path_to_pgo_config"
 
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <time.h>
@@ -119,7 +120,7 @@ NodeContainer n;
 
 uint64_t nic_rate;
 
-uint64_t maxRtt, maxBdp;
+uint64_t maxRtt, maxBdp, fwin;
 
 std::vector<Ipv4Address> serverAddress;
 
@@ -705,10 +706,9 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
   g_system_routing = new AstraSim::RoutingFramework();
   if (g_system_routing->ParseTopology(topology_file)) {
     g_system_routing->PrecalculateRoutingTables();
-    std::cout << "[SYSTEM ROUTING] Routing framework initialized with topology: " << topology_file << std::endl;
-    std::cout << "[SYSTEM ROUTING] Topology has " << g_system_routing->GetTopology().GetNodeCount() << " nodes" << std::endl;
+    std::cout << "[ROUTING] Routing framework initialized with topology: " << topology_file << std::endl;
   } else {
-    std::cerr << "[SYSTEM ROUTING] Failed to load topology: " << topology_file << std::endl;
+    std::cerr << "[ROUTING] Failed to load topology: " << topology_file << std::endl;
     delete g_system_routing;
     g_system_routing = nullptr;
   }
@@ -853,7 +853,7 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
   for (uint32_t i = 0; i < node_num; i++) {
     if (n.Get(i)->GetNodeType() == 1) { 
       Ptr<SwitchNode> sw = DynamicCast<SwitchNode>(n.Get(i));
-      uint32_t shift = 3; 
+      uint32_t shift = 1; 
 
       for (uint32_t j = 1; j < sw->GetNDevices(); j++) {
         Ptr<QbbNetDevice> dev = DynamicCast<QbbNetDevice>(sw->GetDevice(j));
@@ -869,7 +869,7 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
         uint64_t delay = DynamicCast<QbbChannel>(dev->GetChannel())
                              ->GetDelay()
                              .GetTimeStep();
-        uint32_t headroom = rate * delay / 8 / 1000000000 * 3;  // Increase headroom multiplier from 3 to 8
+        uint32_t headroom = rate * delay / 8 / 1000000000 * 12;
         sw->m_mmu->ConfigHdrm(j, headroom);
         sw->m_mmu->pfc_a_shift[j] = shift;
         while (rate > nic_rate && sw->m_mmu->pfc_a_shift[j] > 0) {
@@ -882,14 +882,14 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
       sw->m_mmu->node_id = sw->GetId();
     } else if(n.Get(i)->GetNodeType() == 2){ 
 			Ptr<NVSwitchNode> sw = DynamicCast<NVSwitchNode>(n.Get(i));
-      uint32_t shift = 3; 
+      uint32_t shift = 1; 
       for (uint32_t j = 1; j < sw->GetNDevices(); j++) {
         Ptr<QbbNetDevice> dev = DynamicCast<QbbNetDevice>(sw->GetDevice(j));
         uint64_t rate = dev->GetDataRate().GetBitRate();
         uint64_t delay = DynamicCast<QbbChannel>(dev->GetChannel())
                              ->GetDelay()
                              .GetTimeStep();
-        uint32_t headroom = rate * delay / 8 / 1000000000 * 3;  // Increase headroom multiplier from 3 to 8
+        uint32_t headroom = rate * delay / 8 / 1000000000 * 12;
         sw->m_mmu->ConfigHdrm(j, headroom);
         sw->m_mmu->pfc_a_shift[j] = shift;
         while (rate > nic_rate && sw->m_mmu->pfc_a_shift[j] > 0) {
@@ -984,7 +984,7 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
     SyncFlowPathsWithBackend();
   }
 
-  maxRtt = maxBdp = 0;
+  maxRtt = maxBdp = fwin = 0;
   for (uint32_t i = 0; i < node_num; i++) {
     if (n.Get(i)->GetNodeType() != 0)
       continue;
@@ -1004,7 +1004,16 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
         maxRtt = rtt;
     }
   }
-  printf("maxRtt=%lu maxBdp=%lu\n", maxRtt, maxBdp);
+  fwin=maxBdp;
+  
+  // Check for AS_FWIN environment variable override
+  const char* fwin_env = std::getenv("AS_FWIN");
+  if (fwin_env) {
+    fwin = std::stoull(fwin_env) * 1000;  // Convert to proper units (multiply by 1000)
+    fwin = std::min(fwin, (uint64_t)40000);  // Cap fwin to prevent excessive values
+  }
+  
+  printf("maxRtt=%lu maxBdp=%lu fwin=%lu, buffer_size=%lu\n", maxRtt, maxBdp, fwin, buffer_size);
 
   for (uint32_t i = 0; i < node_num; i++) {
     if (n.Get(i)->GetNodeType() == 1) { 
@@ -1041,7 +1050,7 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
         sim_setting.port_speed[node][intf] = bps;
       }
     }
-    sim_setting.win = maxBdp;
+    sim_setting.win = fwin;
     sim_setting.Serialize(trace_output);
   }
 
@@ -1072,7 +1081,6 @@ void CleanupRoutingFramework() {
     if (g_system_routing) {
         delete g_system_routing;
         g_system_routing = nullptr;
-        cout << "[ROUTING] Routing framework cleaned up." << endl;
     }
 }
 

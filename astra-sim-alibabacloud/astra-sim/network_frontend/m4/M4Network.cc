@@ -38,7 +38,7 @@ std::unique_ptr<AstraSim::RoutingFramework> M4Network::s_routing = nullptr;
 // Copy FlowSim's exact globals
 // Removed unused m4_current_time - using M4::Now() instead
 static uint64_t g_fct_lines_written = 0;
-static FILE* fct_output_file = nullptr;
+// Note: fct_output_file is now instance-based (moved to M4Network class)
 
 // Copy FlowSim's exact extern declarations
 extern std::map<std::pair<std::pair<int, int>,int>, AstraSim::ncclFlowTag> receiver_pending_queue;
@@ -111,7 +111,7 @@ static void m4_completion_callback(void* arg) {
     
     bool receiver_done = is_receive_finished(data->src, data->dst, data->flowTag);
     if (receiver_done) {
-        if (fct_output_file) {
+        if (data->network->fct_output_file) {
             auto flow_key = std::make_tuple(data->flowTag.tag_id, data->flowTag.current_flow_id, data->src, data->dst);
             auto it = flow_start_times.find(flow_key);
             if (it != flow_start_times.end()) {
@@ -167,7 +167,7 @@ static void m4_completion_callback(void* arg) {
                     std::cout << os.str() << std::endl;
                 }
 
-                fprintf(fct_output_file, "%08x %08x %u %u %lu %lu %lu %lu %d\n",
+                fprintf(data->network->fct_output_file, "%08x %08x %u %u %lu %lu %lu %lu %d\n",
                         src_ip, dst_ip, src_port, dst_port, data->count, start_time, fct_ns, standalone_fct,
                         data->flowTag.current_flow_id);
                 
@@ -175,7 +175,7 @@ static void m4_completion_callback(void* arg) {
                 if (g_fct_lines_written == 0) {
                     std::cout << "[M4] First FCT: " << (fct_ns/1000.0) << "μs" << std::endl;
                 }
-                fflush(fct_output_file);
+                fflush(data->network->fct_output_file);
                 ++g_fct_lines_written;
             }
         }
@@ -190,15 +190,17 @@ static void m4_completion_callback(void* arg) {
 }
 
 M4Network::~M4Network() {
-  if (fct_output_file) {
-    fclose(fct_output_file);
-    fct_output_file = nullptr;
+  if (this->fct_output_file) {
+    fclose(this->fct_output_file);
+    this->fct_output_file = nullptr;
   }
 }
 
-M4Network::M4Network(int _local_rank) : AstraSim::AstraNetworkAPI(_local_rank) {
+M4Network::M4Network(int _local_rank, const std::string& result_dir) : AstraSim::AstraNetworkAPI(_local_rank) {
   npu_offset = 0;
   local_rank = _local_rank;
+  this->result_dir = result_dir;
+  this->fct_output_file = nullptr;
   
   // Initialize M4 core components (similar to FlowSim)
   event_queue = std::make_shared<EventQueue>();
@@ -357,13 +359,13 @@ void M4Network::notify_receiver_packet_arrived(int sender_node, int receiver_nod
         M4Task t = it->second;
         uint64_t existing_count = static_cast<uint64_t>(recvHash[key]);
         if (existing_count >= t.count) {
-            // Write per-flow FCT upon receive completion
-            if (fct_output_file == nullptr) {
-                ensure_dir("results");
-                ensure_dir("results/m4");
-                fct_output_file = fopen("results/m4/m4_fct.txt", "w");
+            // Write per-flow FCT upon receive completion  
+            if (this->fct_output_file == nullptr) {
+                std::string fct_file_path = this->result_dir + "m4_fct.txt";
+                ensure_dir(this->result_dir.c_str());
+                this->fct_output_file = fopen(fct_file_path.c_str(), "w");
             }
-            if (fct_output_file) {
+            if (this->fct_output_file) {
                 auto flow_key = std::make_tuple(flowTag.tag_id, flowTag.current_flow_id, sender_node, receiver_node);
                 auto fit = flow_start_times.find(flow_key);
                 if (fit != flow_start_times.end()) {
@@ -404,10 +406,10 @@ void M4Network::notify_receiver_packet_arrived(int sender_node, int receiver_nod
                         std::cout << os.str() << std::endl;
                     }
 
-                    fprintf(fct_output_file, "%08x %08x %u %u %lu %lu %lu %lu %d\n",
+                    fprintf(this->fct_output_file, "%08x %08x %u %u %lu %lu %lu %lu %d\n",
                             src_ip, dst_ip, src_port, dst_port, message_size, start_time, fct_ns, standalone_fct,
                             flowTag.current_flow_id);
-                    fflush(fct_output_file);
+                    fflush(this->fct_output_file);
                     ++g_fct_lines_written;
                     std::cout << "[M4 FCT-RECV] src=" << sender_node << " dst=" << receiver_node
                               << " size=" << message_size
@@ -507,8 +509,8 @@ int M4Network::sim_finish() {
     // Match FlowSim's FCT summary format exactly
     std::cout << "[FCT SUMMARY] lines=" << g_fct_lines_written << std::endl;
     
-    if (fct_output_file) {
-        fflush(fct_output_file);
+    if (this->fct_output_file) {
+        fflush(this->fct_output_file);
     }
     std::cout << "[M4] sim_finish()" << std::endl;
     return 0;

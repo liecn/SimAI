@@ -124,7 +124,6 @@ void M4::SetupML() {
     if (models_loaded) return;
     
     auto setup_start = std::chrono::high_resolution_clock::now();
-    std::cout << "[M4] SetupML() starting..." << std::endl;
     
     if (!torch::cuda::is_available()) {
         std::cerr << "[M4] ERROR: CUDA is not available!" << std::endl;
@@ -148,7 +147,6 @@ void M4::SetupML() {
     
     // Load ALL models as required by M4 inference (same as inference main_m4_noflowsim.cpp)
     try {
-        std::cout << "[M4] Loading all required models..." << std::endl;
         lstmcell_time = torch::jit::load(model_dir + "lstmcell_time.pt", device);
         lstmcell_rate = torch::jit::load(model_dir + "lstmcell_rate.pt", device);
         lstmcell_rate_link = torch::jit::load(model_dir + "lstmcell_rate_link.pt", device);
@@ -167,7 +165,6 @@ void M4::SetupML() {
     }
 
     // Set models to evaluation mode
-    std::cout << "[M4] Setting models to evaluation mode..." << std::endl;
     lstmcell_time.eval();
     lstmcell_rate.eval();
     lstmcell_rate_link.eval();
@@ -178,7 +175,6 @@ void M4::SetupML() {
     gnn_layer_2.eval();
 
     // Optimize models for inference
-    std::cout << "[M4] Optimizing models for inference..." << std::endl;
     lstmcell_time = torch::jit::optimize_for_inference(lstmcell_time);
     lstmcell_rate = torch::jit::optimize_for_inference(lstmcell_rate);
     lstmcell_time_link = torch::jit::optimize_for_inference(lstmcell_time_link);
@@ -191,7 +187,18 @@ void M4::SetupML() {
 
     models_loaded = true;
 
-    // Parse config for hidden_size and n_links_max
+    // Parse config for model and network parameters
+    float buffer_size_cfg = 1000.0f;  // Default fallback
+    float fwin_cfg = 15.0f;           // Default fallback  
+    float dctcp_k_cfg = 30.0f;        // Default fallback
+    
+    // Check for environment variable overrides first
+    const char* fwin_env = std::getenv("AS_FWIN");
+    if (fwin_env) {
+        fwin_cfg = std::stof(fwin_env);
+        fwin_cfg = std::min(fwin_cfg, 40.0f);
+    }
+    
     try {
         const std::string cfg_path = "./astra-sim-alibabacloud/astra-sim/network_frontend/m4/config/test_config.yaml";
         std::ifstream infile(cfg_path);
@@ -200,13 +207,29 @@ void M4::SetupML() {
             contents << infile.rdbuf();
             std::string config_contents = contents.str();
             ryml::Tree config = ryml::parse_in_place(ryml::to_substr(config_contents));
+            
+            // Parse existing model parameters
             ryml::NodeRef hidden_size_node = config["model"]["hidden_size"];
             ryml::NodeRef n_links_node = config["dataset"]["n_links_max"];
             hidden_size_node >> hidden_size_;
             n_links_node >> n_links_max_;
-        
+            
+            // Parse network parameters from config (environment variables take precedence)
+            try {
+                auto network_node = config["network"];
+                if (!network_node.invalid()) {
+                    try { network_node["buffer_size"] >> buffer_size_cfg; } catch(...) {}
+                    // Only use config fwin if environment variable wasn't set
+                    if (!fwin_env) {
+                        try { network_node["fwin"] >> fwin_cfg; } catch(...) {}
+                    }
+                    try { network_node["dctcp_k"] >> dctcp_k_cfg; } catch(...) {}
+                }
+            } catch(...) {
+                // network section doesn't exist, use defaults
+            }
+            
         } else {
-            std::cerr << "[M4] ERROR: cannot open config at " << cfg_path << std::endl;
             throw std::runtime_error("M4 config missing");
         }
     } catch (const std::exception& e) {
@@ -215,22 +238,20 @@ void M4::SetupML() {
         n_links_max_ = 128;
     }
     
-    // Initialize params tensor with ACTUAL network configuration from SimAI.conf
     // Structure from consts.py: [bfsz(0), fwin(1), dctcp_flag(2), dcqcn_flag(3), hp_flag(4), timely_flag(5), 
     //                           dctcp_k(6), dcqcn_k_min(7), dcqcn_k_max(8), u_tgt(9), hpai(10), timely_t_low(11), timely_t_high(12)]
     std::vector<float> param_values(13, 0.0f);
     
     // Create parameter vector to match inference expectation (loaded from .npy file in inference)
-    // Use SimAI.conf values: CC_MODE=8 (DCTCP), BUFFER_SIZE=10, U_TARGET=0.95
-    param_values[0] = 1000.0f;   // bfsz (BUFFER_SIZE from SimAI.conf)
-    param_values[1] = 204.0f;   // fwin (default from consts.py)
+    param_values[0] = buffer_size_cfg;   // bfsz (buffer size from config)
+    param_values[1] = fwin_cfg;          // fwin (flow window from config)
     
     // Set CC type: CC_MODE=8 corresponds to DCTCP (index 0 in CC_LIST = ["dctcp", "dcqcn_paper_vwin", "hp", "timely_vwin"])
     // From consts.py: CC_DICT = {"dctcp": 8, ...} - so CC_MODE=8 is indeed DCTCP
     param_values[2] = 1.0f;
     
-    // Set DCTCP-specific parameters from SimAI.conf and consts.py defaults
-    param_values[6] = 400.0f;
+    // Set DCTCP-specific parameters from config file
+    param_values[6] = dctcp_k_cfg;
     
     // Additional parameters to match @inference/ exactly
     param_values[3] = 0.0f;    // dcqcn_flag (not used for DCTCP)
@@ -249,7 +270,7 @@ void M4::SetupML() {
     float topo_bandwidth = topology->get_bandwidth(); // in bps
     float topo_latency = topology->get_latency(); // in ns
     
-    std::cout << "[M4] Loaded network parameters from SimAI.conf: bfsz=" << param_values[0] << ", fwin=" << param_values[1] 
+    std::cout << "[M4] Loaded network parameters from config: bfsz=" << param_values[0] << ", fwin=" << param_values[1] 
               << ", cc=dctcp, u_tgt=" << param_values[9] << ", dctcp_k=" << param_values[6] << ", topology_bw=" << (topo_bandwidth * 8.0) << "Gbps, topology_lat=" << topo_latency << "ns" << std::endl;
     
     // Initialize multi-flow state tensors (from @inference/ ground truth)

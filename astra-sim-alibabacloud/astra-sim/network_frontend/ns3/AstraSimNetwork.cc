@@ -558,9 +558,9 @@ int main1(string network_topo,string network_conf, bool use_custom_routing, stri
   // Set the custom routing flag - SetupNetwork will handle the actual enabling
   EnableCustomRouting(use_custom_routing);
   if (use_custom_routing) {
-    cout << "[CUSTOM ROUTING] Custom routing enabled via command line argument" << endl;
+    cout << "[ROUTING] Custom routing enabled via command line argument" << endl;
   } else {
-    cout << "[CUSTOM ROUTING] Using default NS3 ECMP routing" << endl;
+    cout << "[ROUTING] Using default NS3 ECMP routing" << endl;
   }
   
   SetupNetwork(qp_finish,send_finish,result_dir);

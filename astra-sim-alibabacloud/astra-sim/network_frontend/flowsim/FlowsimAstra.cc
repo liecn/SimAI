@@ -120,13 +120,10 @@ int main(int argc,char *argv[]) {
   std::cout << "[FLOWSIM] Network: " << user_param.network_topo << std::endl;
   std::cout << "[FLOWSIM] Results: " << user_param.result_dir << std::endl;
   
-  // FlowSim always uses custom routing
-  std::cout << "[CUSTOM ROUTING] Custom routing enabled via command line argument" << std::endl;
-  
   // Initialize routing framework early (same position as NS3)
   if (!user_param.network_topo.empty()) {
-    // Add system routing logging to match NS3
-    std::cout << "[SYSTEM ROUTING] Routing framework initialized with topology: " << user_param.network_topo << std::endl;
+    // Add routing logging to match NS3
+    std::cout << "[ROUTING] Routing framework initialized with topology: " << user_param.network_topo << std::endl;
     
     // Create routing framework instance
     auto routing_framework = std::make_unique<AstraSim::RoutingFramework>();
@@ -144,7 +141,7 @@ int main(int argc,char *argv[]) {
         uint32_t temp_node_num, temp_gpus_per_server, temp_nvswitch_num, temp_switch_num, temp_link_num;
         std::string temp_gpu_type_str;
         temp_topof >> temp_node_num >> temp_gpus_per_server >> temp_nvswitch_num >> temp_switch_num >> temp_link_num >> temp_gpu_type_str;
-        std::cout << "[SYSTEM ROUTING] Topology has " << temp_node_num << " nodes" << std::endl;
+        std::cout << "[ROUTING] Topology has " << temp_node_num << " nodes" << std::endl;
         temp_topof.close();
       }
       
@@ -277,8 +274,6 @@ int main(int argc,char *argv[]) {
   
   // Get actual routing statistics from FlowSim
   const AstraSim::RoutingFramework* routing_framework = FlowSim::GetRoutingFramework();
-  
-  std::cout << "[ROUTING] Routing framework cleaned up." << std::endl;
   
   // Clean shutdown
   FlowSim::Stop();

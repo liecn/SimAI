@@ -146,7 +146,7 @@ void SendFlow(int src, int dst, uint64_t maxPacketCount,
     NcclLog->writeLog(NcclLogLevel::DEBUG," request->flowTag 发包事件  %dSendFlow to  %d tag_id:  %d flow_id  %d srcip  %d dstip  %d size:  %d at the tick:  %d",request->flowTag.sender_node,request->flowTag.receiver_node,request->flowTag.tag_id,request->flowTag.current_flow_id,serverAddress[src],serverAddress[dst],maxPacketCount,AstraSim::Sys::boostedTick());
   RdmaClientHelper clientHelper(
       pg, serverAddress[src], serverAddress[dst], port, dport, real_PacketCount,
-      has_win ? (global_t == 1 ? maxBdp : pairBdp[n.Get(src)][n.Get(dst)]) : 0,
+      has_win ? (global_t == 1 ? fwin : pairBdp[n.Get(src)][n.Get(dst)]) : 0,
       global_t == 1 ? maxRtt : pairRtt[src][dst], msg_handler, fun_arg, tag,
       src, dst);
   if(nvls_on) clientHelper.SetAttribute("NVLS_enable", UintegerValue (1));
