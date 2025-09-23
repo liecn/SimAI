@@ -150,6 +150,7 @@ public:
     
     // (kept) flow/link bookkeeping helpers
     static void OnFlowCompleted(int flow_id);
+    static void CleanupCompletedFlow(int flow_id);
     
     // Routing framework management (same as FlowSim)
     static void SetRoutingFramework(std::unique_ptr<AstraSim::RoutingFramework> routing_framework);

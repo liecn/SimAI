@@ -24,7 +24,7 @@ case "$1" in
     time AS_SEND_LAT=3 AS_NVLS_ENABLE=1 AS_FWIN=$((120 / M)) ./bin/SimAI_simulator -t 8 -w ./example/sweep/microAllReduce.txt -n ./example/sweep/$TOPOFILE -c ./example/sweep/SimAI.conf -o ./results/ns3_${N}_${M}/ -r
     ;;
   m4)
-    time AS_SEND_LAT=3 AS_NVLS_ENABLE=1 AS_FWIN=$((120 / M)) ./bin/SimAI_m4 -w ./example/sweep/microAllReduce.txt -n ./example/sweep/$TOPOFILE -o ./results/m4_${N}_${M}/
+    time AS_SEND_LAT=3 AS_NVLS_ENABLE=1 AS_FWIN=$((200 / M)) ./bin/SimAI_m4 -w ./example/sweep/microAllReduce.txt -n ./example/sweep/$TOPOFILE -o ./results/m4_${N}_${M}/
     ;;
   *) # This is a catch-all for any other value
     echo "Error: Invalid simulator '$1'. Please choose 'flowsim', 'ns3', or 'm4'."

@@ -264,7 +264,7 @@ void M4::SetupML() {
     param_values[11] = 0.0f;   // timely_t_low (not used for DCTCP)
     param_values[12] = 0.0f;   // timely_t_high (not used for DCTCP)
     
-    params_tensor = torch::from_blob(param_values.data(), {13}, torch::TensorOptions().dtype(torch::kFloat32)).to(device).clone();
+    params_tensor = torch::tensor(param_values, torch::TensorOptions().dtype(torch::kFloat32).device(device));
     
     // Read topology parameters for logging
     float topo_bandwidth = topology->get_bandwidth(); // in bps
@@ -325,8 +325,8 @@ void M4::OnFlowCompleted(const int flow_id) {
     }
     auto options_int32 = torch::TensorOptions().dtype(torch::kInt32).device(device);
     auto options_float = torch::TensorOptions().dtype(torch::kFloat32).device(device);
-    auto idx = torch::from_blob(const_cast<int32_t*>(links.data()), {(int)links.size()}, options_int32).to(device).clone();
-    auto ones_i32 = torch::ones({(int)links.size()}, options_int32).to(device);
+    auto idx = torch::tensor(std::vector<int32_t>(links.begin(), links.end()), torch::TensorOptions().dtype(torch::kInt32).device(device));
+    auto ones_i32 = torch::ones({(int)links.size()}, options_int32);
     auto cur = link_to_nflows.index_select(0, idx);
     auto new_counts = torch::clamp(cur - ones_i32, 0);
     link_to_nflows.index_put_({idx}, new_counts);
@@ -346,6 +346,21 @@ void M4::OnFlowCompleted(const int flow_id) {
     // Clear flow state
     flowid_active_mask[flow_id] = false;
     flow_to_graph_id[flow_id] = -1;
+    
+    // Clean up completed flow from active tracking
+    CleanupCompletedFlow(flow_id);
+}
+
+void M4::CleanupCompletedFlow(const int flow_id) {
+    // Remove completed flow from active_flows_ptrs to prevent memory leak
+    auto it = std::remove_if(active_flows_ptrs.begin(), active_flows_ptrs.end(),
+        [flow_id](const std::unique_ptr<M4Flow>& flow_ptr) {
+            return flow_ptr && flow_ptr->flow_id == flow_id;
+        });
+    
+    if (it != active_flows_ptrs.end()) {
+        active_flows_ptrs.erase(it, active_flows_ptrs.end());
+    }
 }
 
 void M4::SetRoutingFramework(std::unique_ptr<AstraSim::RoutingFramework> routing_framework) {
@@ -542,13 +557,8 @@ void M4::process_batch_of_flows() {
             link_ids_vec.push_back(kv.first);
             link_incrs_vec.push_back(kv.second);
         }
-        auto link_idx64 = torch::from_blob(link_ids_vec.data(), {(int)link_ids_vec.size()}, torch::TensorOptions().dtype(torch::kInt32))
-                               .to(torch::kInt64)
-                               .to(device)
-                               .clone();
-        auto incr_i32 = torch::from_blob(link_incrs_vec.data(), {(int)link_incrs_vec.size()}, torch::TensorOptions().dtype(torch::kInt32))
-                               .to(device)
-                               .clone();
+        auto link_idx64 = torch::tensor(link_ids_vec, torch::TensorOptions().dtype(torch::kInt32).device(device)).to(torch::kInt64);
+        auto incr_i32 = torch::tensor(link_incrs_vec, torch::TensorOptions().dtype(torch::kInt32).device(device));
         auto cur_counts = link_to_nflows.index_select(0, link_idx64);
         link_to_nflows.index_put_({link_idx64}, cur_counts + incr_i32);
         auto graph_id_fill = torch::full({(int)link_ids_vec.size()}, graph_id_cur, torch::TensorOptions().dtype(torch::kInt32).device(device));
@@ -577,8 +587,8 @@ void M4::process_batch_of_flows() {
                 }
             }
             if (!reusable_flow_ids_.empty()) {
-                auto edge_flow_tensor = torch::from_blob(reusable_flow_ids_.data(), {(int)reusable_flow_ids_.size()}, torch::TensorOptions().dtype(torch::kInt32)).to(torch::kInt64).to(device).clone();
-                auto edge_link_tensor = torch::from_blob(reusable_link_ids_.data(), {(int)reusable_link_ids_.size()}, torch::TensorOptions().dtype(torch::kInt32)).to(torch::kInt64).to(device).clone();
+                auto edge_flow_tensor = torch::tensor(reusable_flow_ids_, torch::TensorOptions().dtype(torch::kInt32).device(device)).to(torch::kInt64);
+                auto edge_link_tensor = torch::tensor(reusable_link_ids_, torch::TensorOptions().dtype(torch::kInt32).device(device)).to(torch::kInt64);
                 // Compact interacting flows and remap indices (exactly like @inference)
                 auto unique_flows_tuple = torch::_unique(edge_flow_tensor, true, true);
                 auto flow_pos_unique = std::get<0>(unique_flows_tuple);
@@ -625,7 +635,7 @@ void M4::process_batch_of_flows() {
     }
 
     // Build batch input exactly like @inference/ using UPDATED h_vec
-    torch::Tensor flowid_batch = torch::from_blob(flow_ids_batch.data(), {(int)flow_ids_batch.size()}, torch::TensorOptions().dtype(torch::kInt64)).to(device).clone();
+    torch::Tensor flowid_batch = torch::tensor(flow_ids_batch, torch::TensorOptions().dtype(torch::kInt64).device(device));
     auto h_vec_batch = h_vec.index_select(0, flowid_batch);
     auto nlinks_batch = flowid_to_nlinks_tensor.index_select(0, flowid_batch).unsqueeze(1);
     auto params_batch = params_tensor.unsqueeze(0).repeat({(int)flow_ids_batch.size(), 1});
@@ -686,11 +696,8 @@ void M4::process_batch_of_flows() {
         event_queue->schedule_event(completion_time, flow->callback, flow->callbackArg);
     }
 
-    // Clear active mask immediately to avoid cross-batch GNN growth and stale contention
-    for (size_t i = 0; i < flow_ids_batch.size(); i++) {
-        int flow_id = (int)flow_ids_batch[i];
-        flowid_active_mask[flow_id] = false;
-    }
+    // DO NOT clear active mask here - flows are still running!
+    // Flows will be marked inactive when they actually complete via OnFlowCompleted()
 
     // Clear temporal batch
     pending_flows_.clear();
