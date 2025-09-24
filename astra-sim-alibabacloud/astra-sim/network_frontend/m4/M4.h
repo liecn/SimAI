@@ -92,9 +92,6 @@ private:
     
     // Flow and graph management
     static int32_t n_flows_max;
-    static int32_t n_flows_active;
-    static int32_t n_flows_completed;
-    static int32_t graph_id_counter;
     static int32_t graph_id_cur;
     static float time_clock;
     static int32_t next_flow_id;
@@ -111,6 +108,10 @@ private:
     // Pre-allocated vectors for bipartite graph construction (performance optimization)
     static std::vector<int32_t> reusable_flow_ids_;
     static std::vector<int32_t> reusable_link_ids_;
+    
+    // Performance optimization: pre-allocated GPU tensors for batch operations
+    static torch::Tensor temp_flowid_batch_gpu_;
+    static torch::Tensor temp_sldn_cpu_;
     
     // FlowSim-style temporal batching
     static std::vector<M4Flow*> pending_flows_;

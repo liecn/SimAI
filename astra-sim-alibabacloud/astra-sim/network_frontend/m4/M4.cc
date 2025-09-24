@@ -76,9 +76,6 @@ torch::Tensor M4::ones_cache;
 
 // Flow and graph management
 int32_t M4::n_flows_max = 1000000;  // Large enough for simulation
-int32_t M4::n_flows_active = 0;
-int32_t M4::n_flows_completed = 0;
-int32_t M4::graph_id_counter = 0;
 int32_t M4::graph_id_cur = 0;
 float M4::time_clock = 0.0f;
 int32_t M4::next_flow_id = 0;  // For assigning unique flow IDs
@@ -90,6 +87,10 @@ std::unordered_set<int32_t> M4::current_batch_link_set;
 // Pre-allocated vectors for bipartite graph construction (performance optimization)
 std::vector<int32_t> M4::reusable_flow_ids_;
 std::vector<int32_t> M4::reusable_link_ids_;
+
+// Performance optimization: pre-allocated GPU tensors for batch operations
+torch::Tensor M4::temp_flowid_batch_gpu_;
+torch::Tensor M4::temp_sldn_cpu_;
 
 // FlowSim-style temporal batching
 std::vector<M4Flow*> M4::pending_flows_;
@@ -309,6 +310,10 @@ void M4::SetupML() {
     edges_link_ids_tensor = torch::empty({0}, options_int32);
     ones_cache = torch::ones({1000}, options_float); // Pre-allocate for efficiency
     
+    // Pre-allocate performance optimization tensors
+    temp_flowid_batch_gpu_ = torch::zeros({8192}, torch::TensorOptions().dtype(torch::kInt64).device(device));
+    temp_sldn_cpu_ = torch::zeros({8192}, torch::TensorOptions().dtype(torch::kFloat32));
+    
     auto setup_end = std::chrono::high_resolution_clock::now();
     auto setup_duration = std::chrono::duration_cast<std::chrono::milliseconds>(setup_end - setup_start).count();
     std::cout << "[M4] SetupML() completed in " << setup_duration << "ms!" << std::endl;
@@ -348,8 +353,6 @@ void M4::OnFlowCompleted(const int flow_id) {
     flowid_active_mask[flow_id] = false;
     flow_to_graph_id[flow_id] = -1;
     
-    // CRITICAL FIX: Decrement active flow counter to maintain consistency
-    n_flows_active--;
     
     // Clean up completed flow from active tracking
     CleanupCompletedFlow(flow_id);
@@ -440,7 +443,7 @@ void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, Callb
         
         // Batch flows that arrive within a small time window
         const auto current_time = event_queue->get_current_time();
-        const uint64_t BATCH_WINDOW_NS = 100; // 100ns window to capture AllReduce flow bursts
+        const uint64_t BATCH_WINDOW_NS = 200; 
         
         // Start a new batch if no batch is pending, or if too much time has passed
         if (batch_timeout_event_id_ == 0 || (current_time - last_batch_time_) > BATCH_WINDOW_NS) {
@@ -471,9 +474,6 @@ void M4::process_batch_of_flows() {
     // Advance graph id so state evolution only touches flows in this temporal batch
     graph_id_cur++;
     
-    // Simple logging: just count active flows for this update
-    static int ml_update_counter = 0;
-    ml_update_counter++;
     
     // Initialize per-flow state for this temporal batch and collect batch IDs
     current_batch_link_set.clear();
@@ -549,7 +549,6 @@ void M4::process_batch_of_flows() {
         }
 
         flow_ids_batch.push_back(flow_id);
-        n_flows_active++;
     }
 
     // Increment link_to_nflows and tag graph id for links touched by this batch (parity with @inference)
@@ -576,6 +575,10 @@ void M4::process_batch_of_flows() {
     {
         torch::NoGradGuard no_grad;
         time_clock = static_cast<float>(current_time);
+        
+        // Find active flows that interact with current batch (matching standalone logic)
+        // Note: In temporal batching, flows in current batch all get assigned graph_id_cur
+        // But we still need to find flows that were already active and interact with current batch
         auto flowid_active_list_cur = torch::nonzero(flowid_active_mask).flatten();
         if (flowid_active_list_cur.numel() > 0) {
             int n_flows_active_cur = flowid_active_list_cur.size(0);
@@ -618,91 +621,101 @@ void M4::process_batch_of_flows() {
                 auto time_deltas = (time_clock - time_last.index_select(0, subset_indices).squeeze()).view({-1, 1});
                 auto h_vec_time_updated = h_vec.index_select(0, subset_indices);
                 auto h_vec_time_link_updated = z_t_link.index_select(0, active_link_idx);
-                auto max_time_delta = torch::max(time_deltas).item<float>();
+                auto max_time_delta = torch::max(time_deltas).template item<float>();
                 if (max_time_delta > 0.0f) {
                     time_deltas.fill_(max_time_delta / 1000.0f);
-                    h_vec_time_updated = lstmcell_time.forward({time_deltas, h_vec_time_updated}).toTensor();
+                    h_vec_time_updated = lstmcell_time.forward(std::vector<c10::IValue>{time_deltas, h_vec_time_updated}).toTensor();
                     auto time_deltas_link = torch::zeros({active_link_idx.size(0), 1}, torch::TensorOptions().dtype(torch::kFloat32).device(device));
                     time_deltas_link.fill_(max_time_delta / 1000.0f);
-                    h_vec_time_link_updated = lstmcell_time_link.forward({time_deltas_link, h_vec_time_link_updated}).toTensor();
+                    h_vec_time_link_updated = lstmcell_time_link.forward(std::vector<c10::IValue>{time_deltas_link, h_vec_time_link_updated}).toTensor();
                 }
-                auto x_combined = torch::cat({h_vec_time_updated, h_vec_time_link_updated}, 0);
-                auto gnn_output_0 = gnn_layer_0.forward({x_combined, edges_list_active}).toTensor();
-                auto gnn_output_1 = gnn_layer_1.forward({gnn_output_0, edges_list_active}).toTensor();
-                auto gnn_output_2 = gnn_layer_2.forward({gnn_output_1, edges_list_active}).toTensor();
+                std::vector<torch::Tensor> tensors_to_cat = {h_vec_time_updated, h_vec_time_link_updated};
+                auto x_combined = torch::cat(tensors_to_cat, 0);
+                auto gnn_output_0 = gnn_layer_0.forward(std::vector<c10::IValue>{x_combined, edges_list_active}).toTensor();
+                auto gnn_output_1 = gnn_layer_1.forward(std::vector<c10::IValue>{gnn_output_0, edges_list_active}).toTensor();
+                auto gnn_output_2 = gnn_layer_2.forward(std::vector<c10::IValue>{gnn_output_1, edges_list_active}).toTensor();
                 auto h_vec_rate_updated = gnn_output_2.slice(0, 0, n_flows_interacting);
                 auto h_vec_rate_link = gnn_output_2.slice(0, n_flows_interacting, gnn_output_2.size(0));
                 auto params_data = params_tensor.repeat({n_flows_interacting, 1});
-                h_vec_rate_updated = torch::cat({h_vec_rate_updated, params_data}, 1);
-                h_vec_rate_updated = lstmcell_rate.forward({h_vec_rate_updated, h_vec_time_updated}).toTensor();
-                h_vec_rate_link = lstmcell_rate_link.forward({h_vec_rate_link, h_vec_time_link_updated}).toTensor();
+                std::vector<torch::Tensor> rate_tensors = {h_vec_rate_updated, params_data};
+                h_vec_rate_updated = torch::cat(rate_tensors, 1);
+                h_vec_rate_updated = lstmcell_rate.forward(std::vector<c10::IValue>{h_vec_rate_updated, h_vec_time_updated}).toTensor();
+                h_vec_rate_link = lstmcell_rate_link.forward(std::vector<c10::IValue>{h_vec_rate_link, h_vec_time_link_updated}).toTensor();
                 h_vec.index_copy_(0, subset_indices, h_vec_rate_updated);
                 z_t_link.index_copy_(0, active_link_idx.to(torch::kInt64), h_vec_rate_link);
-                time_last.index_put_({subset_indices}, time_clock);
+                time_last.index_put_({torch::indexing::TensorIndex(subset_indices)}, time_clock);
             }
         }
     }
 
-    // Build batch input exactly like @inference/ using UPDATED h_vec
-    torch::Tensor flowid_batch = torch::from_blob(flow_ids_batch.data(), {(int)flow_ids_batch.size()}, torch::TensorOptions().dtype(torch::kInt64))
-                                      .to(device);
-    auto h_vec_batch = h_vec.index_select(0, flowid_batch);
-    auto nlinks_batch = flowid_to_nlinks_tensor.index_select(0, flowid_batch).unsqueeze(1);
-    auto params_batch = params_tensor.unsqueeze(0).repeat({(int)flow_ids_batch.size(), 1});
-    auto input_batch = torch::cat({nlinks_batch, params_batch, h_vec_batch}, 1);
+    // OPTIMIZATION 3: Use pre-allocated GPU tensor to avoid CPU->GPU transfer
+    int batch_size = static_cast<int>(flow_ids_batch.size());
+    auto flowid_batch_slice = temp_flowid_batch_gpu_.slice(0, 0, batch_size);
+    flowid_batch_slice.copy_(torch::from_blob(flow_ids_batch.data(), {batch_size}, torch::TensorOptions().dtype(torch::kInt64)));
+    // OPTIMIZATION 4: Batch tensor operations for efficiency
+    auto h_vec_batch = h_vec.index_select(0, flowid_batch_slice);
+    auto nlinks_batch = flowid_to_nlinks_tensor.index_select(0, flowid_batch_slice).unsqueeze(1);
+    auto params_batch = params_tensor.unsqueeze(0).repeat({batch_size, 1});
+    std::vector<torch::Tensor> input_tensors = {nlinks_batch, params_batch, h_vec_batch};
+    auto input_batch = torch::cat(input_tensors, 1);
 
     // Simple logging: ML update number and active flows
-    std::cout << "[ML Update " << ml_update_counter << "] " << flow_ids_batch.size() << " active flows" << std::endl;
+    // std::cout << "[ML Update " << ml_update_counter << "] " << flow_ids_batch.size() << " active flows" << std::endl;
     
     // Single MLP forward for the entire temporal batch (predict after step)
-    auto sldn_raw = output_layer.forward({input_batch}).toTensor().view(-1);
+    auto sldn_raw = output_layer.forward(std::vector<c10::IValue>{input_batch}).toTensor().view(-1);
     // Debug: print slowdown stats for first few batches only
-    static int debug_batches = 0;
-    if (debug_batches < 3) {
-        auto to_cpu = [](const torch::Tensor& t){ return t.detach().to(torch::kCPU); };
-        auto s = to_cpu(sldn_raw);
-        double s_min = s.min().item<double>();
-        double s_max = s.max().item<double>();
-        double s_mean = s.mean().item<double>();
-        auto below_one = (s < 1.0).to(torch::kFloat32);
-        double frac_below_one = below_one.mean().item<double>();
-        auto nlinks_cpu = to_cpu(nlinks_batch.squeeze(1).to(torch::kFloat32));
-        auto size_feat_cpu = to_cpu(h_vec_batch.index({torch::indexing::Slice(), 2}));
-        double nlinks_min = nlinks_cpu.min().item<double>();
-        double nlinks_max = nlinks_cpu.max().item<double>();
-        double size_min = size_feat_cpu.min().item<double>();
-        double size_max = size_feat_cpu.max().item<double>();
-        std::cout << "[M4 DBG] slowdown_raw min/mean/max=" << s_min << "/" << s_mean << "/" << s_max
-                  << " frac<1=" << frac_below_one
-                  << " nlinks[min,max]=" << nlinks_min << "," << nlinks_max
-                  << " size_feat[min,max]=" << size_min << "," << size_max
-                  << std::endl;
-        // print a small slice of the actual feature vectors fed to MLP for the first row
-        double nlinks0 = nlinks_cpu[0].item<double>();
-        double size0 = size_feat_cpu[0].item<double>();
-        std::cout << "[M4 DBG] feat nlinks0=" << nlinks0 << " size0=" << size0 << " h0[0..5]=";
-        int h_cols = (int)h_vec_batch.size(1);
-        for (int k = 0; k < std::min(6, h_cols); ++k) {
-            double v = to_cpu(h_vec_batch.index({0, k})).item<double>();
-            if (k) std::cout << ",";
-            std::cout << v;
-        }
-        std::cout << " in0[0..9]=";
-        int in_cols = (int)input_batch.size(1);
-        for (int k = 0; k < std::min(10, in_cols); ++k) {
-            double v = to_cpu(input_batch.index({0, k})).item<double>();
-            if (k) std::cout << ",";
-            std::cout << v;
-        }
-        std::cout << std::endl;
-        debug_batches++;
-    }
+    // static int debug_batches = 0;
+    // if (debug_batches < 3) {
+    //     auto to_cpu = [](const torch::Tensor& t){ return t.detach().to(torch::kCPU); };
+    //     auto s = to_cpu(sldn_raw);
+    //     double s_min = s.min().item<double>();
+    //     double s_max = s.max().item<double>();
+    //     double s_mean = s.mean().item<double>();
+    //     auto below_one = (s < 1.0).to(torch::kFloat32);
+    //     double frac_below_one = below_one.mean().item<double>();
+    //     auto nlinks_cpu = to_cpu(nlinks_batch.squeeze(1).to(torch::kFloat32));
+    //     auto size_feat_cpu = to_cpu(h_vec_batch.index({torch::indexing::Slice(), 2}));
+    //     double nlinks_min = nlinks_cpu.min().item<double>();
+    //     double nlinks_max = nlinks_cpu.max().item<double>();
+    //     double size_min = size_feat_cpu.min().item<double>();
+    //     double size_max = size_feat_cpu.max().item<double>();
+    //     std::cout << "[M4 DBG] slowdown_raw min/mean/max=" << s_min << "/" << s_mean << "/" << s_max
+    //               << " frac<1=" << frac_below_one
+    //               << " nlinks[min,max]=" << nlinks_min << "," << nlinks_max
+    //               << " size_feat[min,max]=" << size_min << "," << size_max
+    //               << std::endl;
+    //     // print a small slice of the actual feature vectors fed to MLP for the first row
+    //     double nlinks0 = nlinks_cpu[0].item<double>();
+    //     double size0 = size_feat_cpu[0].item<double>();
+    //     std::cout << "[M4 DBG] feat nlinks0=" << nlinks0 << " size0=" << size0 << " h0[0..5]=";
+    //     int h_cols = (int)h_vec_batch.size(1);
+    //     for (int k = 0; k < std::min(6, h_cols); ++k) {
+    //         double v = to_cpu(h_vec_batch.index({0, k})).item<double>();
+    //         if (k) std::cout << ",";
+    //         std::cout << v;
+    //     }
+    //     std::cout << " in0[0..9]=";
+    //     int in_cols = (int)input_batch.size(1);
+    //     for (int k = 0; k < std::min(10, in_cols); ++k) {
+    //         double v = to_cpu(input_batch.index({0, k})).item<double>();
+    //         if (k) std::cout << ",";
+    //         std::cout << v;
+    //     }
+    //     std::cout << std::endl;
+    //     debug_batches++;
+    // }
     auto sldn = torch::clamp(sldn_raw, 1.0f, std::numeric_limits<float>::infinity());
 
+    // OPTIMIZATION 5: Batch transfer GPU->CPU and avoid individual tensor access
+    auto sldn_cpu_slice = temp_sldn_cpu_.slice(0, 0, batch_size);
+    sldn_cpu_slice.copy_(sldn, /*non_blocking=*/false);
+    auto sldn_data = sldn_cpu_slice.data_ptr<float>();
+    
     // Schedule completion for every flow in this batch
     for (size_t i = 0; i < flow_ids_batch.size(); i++) {
         int flow_id = (int)flow_ids_batch[i];
-        float predicted_fct = sldn[(int)i].item<float>() * i_fct_tensor[flow_id].item<float>();
+        float predicted_fct = sldn_data[i] * i_fct_tensor[flow_id].item<float>();
         uint64_t completion_time = current_time + (uint64_t)predicted_fct;
         // pending_flows_ order matches the initialization order
         M4Flow* flow = pending_flows_[(int)i];
