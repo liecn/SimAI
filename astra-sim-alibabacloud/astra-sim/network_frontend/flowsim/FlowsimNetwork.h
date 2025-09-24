@@ -42,7 +42,9 @@ private:
   int npu_offset;
 
 public:
-    FlowSimNetWork(int _local_rank);
+  std::string result_dir;  // Store output directory for FCT files (same as M4Network)
+  
+    FlowSimNetWork(int _local_rank, const std::string& result_dir = "results/flowsim/");
     ~FlowSimNetWork();
     
     // Override backend type

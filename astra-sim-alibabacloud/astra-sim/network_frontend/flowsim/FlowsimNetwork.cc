@@ -133,8 +133,9 @@ static FlowSimNetWork* global_flowsim_network = nullptr;
 static void flowsim_completion_callback(void* arg);
 static void flowsim_receiver_callback(void* arg);
 
-FlowSimNetWork::FlowSimNetWork(int _local_rank) : AstraNetworkAPI(_local_rank) {
+FlowSimNetWork::FlowSimNetWork(int _local_rank, const std::string& result_dir) : AstraNetworkAPI(_local_rank) {
     this->npu_offset = 0;
+    this->result_dir = result_dir;
     
     // Set global instance for callback access
     global_flowsim_network = this;
@@ -276,7 +277,10 @@ static void flowsim_completion_callback(void* arg) {
     if (receiver_done) {
         // Write per-flow FCT when the receive side finishes (align with NS3's qp_finish)
         if (fct_output_file == nullptr) {
-            fct_output_file = fopen("results/flowsim/flowsim_fct.txt", "w");
+            std::string fct_file_path = global_flowsim_network->result_dir + "flowsim_fct.txt";
+            std::string mkdir_cmd = "mkdir -p " + global_flowsim_network->result_dir;
+            system(mkdir_cmd.c_str());
+            fct_output_file = fopen(fct_file_path.c_str(), "w");
         }
         if (fct_output_file) {
             // Look up actual start time recorded at send scheduling

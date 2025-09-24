@@ -221,7 +221,7 @@ int main(int argc,char *argv[]) {
   std::vector<FlowSimNetWork *> networks;
   std::vector<AstraSim::Sys *> systems;
   for (int i = 0; i < nodes_num; i++) {
-    FlowSimNetWork *network = new FlowSimNetWork(i);
+    FlowSimNetWork *network = new FlowSimNetWork(i, user_param.result_dir);
     networks.push_back(network);
     AstraSim::Sys *system = new AstraSim::Sys(
       network,

@@ -33,12 +33,9 @@
 
 // Static routing framework pointer
 std::unique_ptr<AstraSim::RoutingFramework> M4Network::s_routing = nullptr;
-// CLEANED: Removed dead ones_cache static variable
 
-// Copy FlowSim's exact globals
-// Removed unused m4_current_time - using M4::Now() instead
 static uint64_t g_fct_lines_written = 0;
-// Note: fct_output_file is now instance-based (moved to M4Network class)
+// Note: FCT file now handled globally like FlowSim
 
 // Copy FlowSim's exact extern declarations
 extern std::map<std::pair<std::pair<int, int>,int>, AstraSim::ncclFlowTag> receiver_pending_queue;
@@ -60,6 +57,8 @@ static void ensure_dir(const char* path) {
 
 // Copy FlowSim's exact flow tracking
 static std::map<std::tuple<int, int, int, int>, uint64_t> flow_start_times;
+// Copy FlowSim's simple global FCT file handle
+static FILE* g_fct_output_file = nullptr;
 static std::map<std::pair<int, std::pair<int, int>>, int> waiting_to_sent_callback;
 static std::map<std::pair<int, std::pair<int, int>>, int> waiting_to_notify_receiver;
 
@@ -94,8 +93,6 @@ bool is_receive_finished(int src, int dst, AstraSim::ncclFlowTag flowTag) {
 
 // M4 completion callback (same pattern as FlowSim)
 // Lightweight counters for concise logging (FlowSim-style)
-static int m4_callback_count = 0;
-static int m4_send_count = 0;
 
 static void m4_completion_callback(void* arg) {
     M4CallbackData* data = static_cast<M4CallbackData*>(arg);
@@ -111,27 +108,20 @@ static void m4_completion_callback(void* arg) {
     
     bool receiver_done = is_receive_finished(data->src, data->dst, data->flowTag);
     if (receiver_done) {
-        if (data->network->fct_output_file) {
+        // Copy FlowSim's simple file opening approach
+        if (g_fct_output_file == nullptr) {
+            std::string fct_file_path = data->network->result_dir + "m4_fct.txt";
+            ensure_dir(data->network->result_dir.c_str());
+            g_fct_output_file = fopen(fct_file_path.c_str(), "w");
+        }
+        if (g_fct_output_file) {
             auto flow_key = std::make_tuple(data->flowTag.tag_id, data->flowTag.current_flow_id, data->src, data->dst);
             auto it = flow_start_times.find(flow_key);
             if (it != flow_start_times.end()) {
                 uint64_t start_time = it->second;
                 
-                // Debug first flow timing
-                if (g_fct_lines_written == 0) {
-                    std::cout << "[M4 DEBUG] First flow: actual_completion_time=" << data->actual_completion_time 
-                             << ", start_time=" << start_time << std::endl;
-                }
-                
-                // Check for timing issues that could cause underflow
-                uint64_t fct_ns;
-                if (data->actual_completion_time >= start_time) {
-                    fct_ns = data->actual_completion_time - start_time;
-                } else {
-                    std::cerr << "[M4 ERROR] actual_completion_time (" << data->actual_completion_time 
-                             << ") < start_time (" << start_time << ") for flow " << data->flowTag.current_flow_id << std::endl;
-                    fct_ns = 0; // Avoid underflow
-                }
+                // Calculate FCT (same as FlowSim approach)
+                uint64_t fct_ns = data->actual_completion_time - start_time;
                 
                 flow_start_times.erase(it);
 
@@ -156,26 +146,17 @@ static void m4_completion_callback(void* arg) {
                 
                 // Use NS3's exact calculation: base_rtt + total_bytes * 8000000000lu / b
                 uint64_t standalone_fct = base_rtt + total_bytes * 8000000000lu / b_bps;
-                if (g_fct_lines_written < 3) {
-                    std::ostringstream os;
-                    os << "[M4 DEBUG SEND] flow_id=" << data->flowTag.current_flow_id
-                       << " base_rtt=" << base_rtt
-                       << " bandwidth_bps=" << b_bps
-                       << " num_pkts=" << num_pkts
-                       << " total_bytes=" << total_bytes
-                       << " standalone_fct=" << standalone_fct;
-                    std::cout << os.str() << std::endl;
-                }
 
-                fprintf(data->network->fct_output_file, "%08x %08x %u %u %lu %lu %lu %lu %d\n",
+                // Copy FlowSim's exact FCT write format
+                fprintf(g_fct_output_file, "%08x %08x %u %u %lu %lu %lu %lu %d\n",
                         src_ip, dst_ip, src_port, dst_port, data->count, start_time, fct_ns, standalone_fct,
                         data->flowTag.current_flow_id);
                 
-                // Concise logging for first flow only
+                // Log first FCT like FlowSim
                 if (g_fct_lines_written == 0) {
                     std::cout << "[M4] First FCT: " << (fct_ns/1000.0) << "μs" << std::endl;
                 }
-                fflush(data->network->fct_output_file);
+                fflush(g_fct_output_file);
                 ++g_fct_lines_written;
             }
         }
@@ -194,17 +175,13 @@ static void m4_completion_callback(void* arg) {
 }
 
 M4Network::~M4Network() {
-  if (this->fct_output_file) {
-    fclose(this->fct_output_file);
-    this->fct_output_file = nullptr;
-  }
+  // FCT file now handled globally like FlowSim
 }
 
 M4Network::M4Network(int _local_rank, const std::string& result_dir) : AstraSim::AstraNetworkAPI(_local_rank) {
   npu_offset = 0;
   local_rank = _local_rank;
   this->result_dir = result_dir;
-  this->fct_output_file = nullptr;
   
   // Initialize M4 core components (similar to FlowSim)
   event_queue = std::make_shared<EventQueue>();
@@ -363,65 +340,7 @@ void M4Network::notify_receiver_packet_arrived(int sender_node, int receiver_nod
         M4Task t = it->second;
         uint64_t existing_count = static_cast<uint64_t>(recvHash[key]);
         if (existing_count >= t.count) {
-            // Write per-flow FCT upon receive completion  
-            if (this->fct_output_file == nullptr) {
-                std::string fct_file_path = this->result_dir + "m4_fct.txt";
-                ensure_dir(this->result_dir.c_str());
-                this->fct_output_file = fopen(fct_file_path.c_str(), "w");
-            }
-            if (this->fct_output_file) {
-                auto flow_key = std::make_tuple(flowTag.tag_id, flowTag.current_flow_id, sender_node, receiver_node);
-                auto fit = flow_start_times.find(flow_key);
-                if (fit != flow_start_times.end()) {
-                    uint64_t start_time = fit->second;
-                    uint64_t fct_ns = static_cast<uint64_t>(M4::Now()) - start_time;
-                    flow_start_times.erase(fit);
-                    uint32_t src_ip = 0u;
-                    uint32_t dst_ip = 0u;
-                    unsigned int src_port = 0u;
-                    unsigned int dst_port = 0u;
-
-                    // Compute NS3-matching standalone FCT:
-                    // base_rtt = sum(link_latency along route) * 2
-                    // Use routing framework's pre-computed RTT and bandwidth (same as NS3)
-                    const AstraSim::RoutingFramework* rf = M4::GetRoutingFramework();
-                    if (!rf) {
-                        throw std::runtime_error("[M4 ERROR] RoutingFramework is null when computing standalone_fct (recv)");
-                    }
-                    
-                    uint64_t base_rtt = rf->GetPairRtt(sender_node, receiver_node);
-                    uint64_t b_bps = rf->GetPairBandwidth(sender_node, receiver_node);
-                    
-                    const uint32_t packet_payload_size = 1000u;
-                    const uint32_t header_overhead = 52u;
-                    uint64_t num_pkts = (message_size + packet_payload_size - 1) / packet_payload_size;
-                    uint64_t total_bytes = message_size + num_pkts * header_overhead;
-                    
-                    // Use NS3's exact calculation: base_rtt + total_bytes * 8000000000lu / b
-                    uint64_t standalone_fct = base_rtt + total_bytes * 8000000000lu / b_bps;
-                    if (g_fct_lines_written < 3) {
-                        std::ostringstream os;
-                        os << "[M4 DEBUG RECV] flow_id=" << flowTag.current_flow_id
-                           << " base_rtt=" << base_rtt
-                           << " bandwidth_bps=" << b_bps
-                           << " num_pkts=" << num_pkts
-                           << " total_bytes=" << total_bytes
-                           << " standalone_fct=" << standalone_fct;
-                        std::cout << os.str() << std::endl;
-                    }
-
-                    fprintf(this->fct_output_file, "%08x %08x %u %u %lu %lu %lu %lu %d\n",
-                            src_ip, dst_ip, src_port, dst_port, message_size, start_time, fct_ns, standalone_fct,
-                            flowTag.current_flow_id);
-                    fflush(this->fct_output_file);
-                    ++g_fct_lines_written;
-                    std::cout << "[M4 FCT-RECV] src=" << sender_node << " dst=" << receiver_node
-                              << " size=" << message_size
-                              << " start=" << start_time
-                              << " fct_ns=" << fct_ns
-                              << " flow_id=" << flowTag.current_flow_id << std::endl;
-                }
-            }
+            // FCT is now written in main completion callback - no duplicate writing here
             // Erase receiver state and invoke callback (FlowSim parity)
             expeRecvHash.erase(it);
 
@@ -513,13 +432,12 @@ int M4Network::sim_finish() {
     // Match FlowSim's FCT summary format exactly
     std::cout << "[FCT SUMMARY] lines=" << g_fct_lines_written << std::endl;
     
-    if (this->fct_output_file) {
-        fflush(this->fct_output_file);
+    if (g_fct_output_file) {
+        fflush(g_fct_output_file);
     }
     std::cout << "[M4] sim_finish()" << std::endl;
     return 0;
 }
 
-// ========== M4 CLEANED ==========
 // M4Network is now just an ASTRA-Sim interface layer
 // All ML inference is handled by M4::Send() -> batch processing -> GNN

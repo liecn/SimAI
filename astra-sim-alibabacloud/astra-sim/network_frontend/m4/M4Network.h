@@ -62,10 +62,9 @@ struct M4Task {
 class M4Network: public AstraSim::AstraNetworkAPI {
 private:
   int npu_offset;
-  std::string result_dir;  // Store output directory for FCT files
 
 public:
-  FILE* fct_output_file;   // Instance-based FCT output file (accessed from callback)
+  std::string result_dir;  // Store output directory for FCT files (public for callback access)
   
   // M4 Core Components (like FlowSim)
   std::shared_ptr<EventQueue> event_queue;
