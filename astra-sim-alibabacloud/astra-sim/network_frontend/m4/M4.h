@@ -117,7 +117,6 @@ private:
     static std::list<std::unique_ptr<M4Flow>> active_flows_ptrs;
     static uint64_t last_batch_time_;
     static int batch_timeout_event_id_;
-    static constexpr uint64_t BATCH_TIMEOUT_NS = 0;
     
     // (removed) inference-style single-flow tracking
 

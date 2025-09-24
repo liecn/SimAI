@@ -183,12 +183,6 @@ static void m4_completion_callback(void* arg) {
         data->network->notify_receiver_packet_arrived(data->src, data->dst, data->count, data->flowTag);
         
         // CRITICAL FIX: Notify M4 that flow has completed so it can clean up ML states
-        static int completion_count = 0;
-        completion_count++;
-        if (completion_count % 1000 == 0) {
-            std::cout << "[M4 DEBUG COMPLETION] Flow #" << data->flowTag.current_flow_id 
-                      << " completed (total completions: " << completion_count << ")" << std::endl;
-        }
         M4::OnFlowCompleted(data->flowTag.current_flow_id);
         
         // receiver_data is not used; avoid deleting to prevent invalid frees across batched callbacks

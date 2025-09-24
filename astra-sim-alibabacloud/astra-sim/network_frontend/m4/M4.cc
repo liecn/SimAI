@@ -325,7 +325,8 @@ void M4::OnFlowCompleted(const int flow_id) {
     }
     auto options_int32 = torch::TensorOptions().dtype(torch::kInt32).device(device);
     auto options_float = torch::TensorOptions().dtype(torch::kFloat32).device(device);
-    auto idx = torch::tensor(std::vector<int32_t>(links.begin(), links.end()), torch::TensorOptions().dtype(torch::kInt32).device(device));
+    std::vector<int32_t> links_vec(links.begin(), links.end());
+    auto idx = torch::from_blob(links_vec.data(), {(int)links_vec.size()}, torch::TensorOptions().dtype(torch::kInt32)).to(device);
     auto ones_i32 = torch::ones({(int)links.size()}, options_int32);
     auto cur = link_to_nflows.index_select(0, idx);
     auto new_counts = torch::clamp(cur - ones_i32, 0);
@@ -346,6 +347,9 @@ void M4::OnFlowCompleted(const int flow_id) {
     // Clear flow state
     flowid_active_mask[flow_id] = false;
     flow_to_graph_id[flow_id] = -1;
+    
+    // CRITICAL FIX: Decrement active flow counter to maintain consistency
+    n_flows_active--;
     
     // Clean up completed flow from active tracking
     CleanupCompletedFlow(flow_id);
@@ -434,13 +438,17 @@ void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, Callb
         // Keep ownership in active_flows_ptrs until batch processing
         active_flows_ptrs.push_back(std::move(m4_flow));
         
-        // Schedule batch processing if not already scheduled (like FlowSim's batch timeout)
-        if (batch_timeout_event_id_ == 0) {
-            const auto current_time = event_queue->get_current_time();
+        // Batch flows that arrive within a small time window
+        const auto current_time = event_queue->get_current_time();
+        const uint64_t BATCH_WINDOW_NS = 100; // 100ns window to capture AllReduce flow bursts
+        
+        // Start a new batch if no batch is pending, or if too much time has passed
+        if (batch_timeout_event_id_ == 0 || (current_time - last_batch_time_) > BATCH_WINDOW_NS) {
             last_batch_time_ = current_time;
-            uint64_t schedule_time = current_time + BATCH_TIMEOUT_NS; // 0 = immediate
-            batch_timeout_event_id_ = event_queue->schedule_event(schedule_time, batch_timeout_callback, nullptr);
+            // Schedule processing after the batch window expires
+            batch_timeout_event_id_ = event_queue->schedule_event(current_time + BATCH_WINDOW_NS, batch_timeout_callback, nullptr);
         }
+        // Otherwise, just add to the existing pending batch
     }
 }
 
@@ -455,20 +463,17 @@ void M4::process_batch_of_flows() {
         return;
     }
     
-    // Concise logging every 10K flows
-    static int batch_count = 0;
-    if (++batch_count % 10000 == 0) {
-        std::cout << "[M4] Processed " << batch_count << " batches (" << pending_flows_.size() << " flows in current batch)" << std::endl;
-    }
-    
-    // Reset batching state (following FlowSim)
+    // Reset batch event ID (but keep last_batch_time_ for window logic)
     batch_timeout_event_id_ = 0;
-    last_batch_time_ = 0;
     
     const auto current_time = event_queue->get_current_time();
     time_clock = static_cast<float>(current_time);
     // Advance graph id so state evolution only touches flows in this temporal batch
     graph_id_cur++;
+    
+    // Simple logging: just count active flows for this update
+    static int ml_update_counter = 0;
+    ml_update_counter++;
     
     // Initialize per-flow state for this temporal batch and collect batch IDs
     current_batch_link_set.clear();
@@ -557,8 +562,10 @@ void M4::process_batch_of_flows() {
             link_ids_vec.push_back(kv.first);
             link_incrs_vec.push_back(kv.second);
         }
-        auto link_idx64 = torch::tensor(link_ids_vec, torch::TensorOptions().dtype(torch::kInt32).device(device)).to(torch::kInt64);
-        auto incr_i32 = torch::tensor(link_incrs_vec, torch::TensorOptions().dtype(torch::kInt32).device(device));
+        auto link_idx64 = torch::from_blob(link_ids_vec.data(), {(int)link_ids_vec.size()}, torch::TensorOptions().dtype(torch::kInt32))
+                               .to(torch::kInt64).to(device);
+        auto incr_i32 = torch::from_blob(link_incrs_vec.data(), {(int)link_incrs_vec.size()}, torch::TensorOptions().dtype(torch::kInt32))
+                               .to(device);
         auto cur_counts = link_to_nflows.index_select(0, link_idx64);
         link_to_nflows.index_put_({link_idx64}, cur_counts + incr_i32);
         auto graph_id_fill = torch::full({(int)link_ids_vec.size()}, graph_id_cur, torch::TensorOptions().dtype(torch::kInt32).device(device));
@@ -587,8 +594,10 @@ void M4::process_batch_of_flows() {
                 }
             }
             if (!reusable_flow_ids_.empty()) {
-                auto edge_flow_tensor = torch::tensor(reusable_flow_ids_, torch::TensorOptions().dtype(torch::kInt32).device(device)).to(torch::kInt64);
-                auto edge_link_tensor = torch::tensor(reusable_link_ids_, torch::TensorOptions().dtype(torch::kInt32).device(device)).to(torch::kInt64);
+                auto edge_flow_tensor = torch::from_blob(reusable_flow_ids_.data(), {(int)reusable_flow_ids_.size()}, torch::TensorOptions().dtype(torch::kInt32))
+                                           .to(torch::kInt64).to(device);
+                auto edge_link_tensor = torch::from_blob(reusable_link_ids_.data(), {(int)reusable_link_ids_.size()}, torch::TensorOptions().dtype(torch::kInt32))
+                                           .to(torch::kInt64).to(device);
                 // Compact interacting flows and remap indices (exactly like @inference)
                 auto unique_flows_tuple = torch::_unique(edge_flow_tensor, true, true);
                 auto flow_pos_unique = std::get<0>(unique_flows_tuple);
@@ -635,12 +644,16 @@ void M4::process_batch_of_flows() {
     }
 
     // Build batch input exactly like @inference/ using UPDATED h_vec
-    torch::Tensor flowid_batch = torch::tensor(flow_ids_batch, torch::TensorOptions().dtype(torch::kInt64).device(device));
+    torch::Tensor flowid_batch = torch::from_blob(flow_ids_batch.data(), {(int)flow_ids_batch.size()}, torch::TensorOptions().dtype(torch::kInt64))
+                                      .to(device);
     auto h_vec_batch = h_vec.index_select(0, flowid_batch);
     auto nlinks_batch = flowid_to_nlinks_tensor.index_select(0, flowid_batch).unsqueeze(1);
     auto params_batch = params_tensor.unsqueeze(0).repeat({(int)flow_ids_batch.size(), 1});
     auto input_batch = torch::cat({nlinks_batch, params_batch, h_vec_batch}, 1);
 
+    // Simple logging: ML update number and active flows
+    std::cout << "[ML Update " << ml_update_counter << "] " << flow_ids_batch.size() << " active flows" << std::endl;
+    
     // Single MLP forward for the entire temporal batch (predict after step)
     auto sldn_raw = output_layer.forward({input_batch}).toTensor().view(-1);
     // Debug: print slowdown stats for first few batches only
