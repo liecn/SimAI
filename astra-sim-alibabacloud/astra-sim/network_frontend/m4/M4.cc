@@ -84,13 +84,7 @@ int32_t M4::next_link_index = 0;
 std::vector<std::vector<int32_t>> M4::flowid_to_link_indices;
 std::unordered_set<int32_t> M4::current_batch_link_set;
 
-// Pre-allocated vectors for bipartite graph construction (performance optimization)
-std::vector<int32_t> M4::reusable_flow_ids_;
-std::vector<int32_t> M4::reusable_link_ids_;
 
-// Performance optimization: pre-allocated GPU tensors for batch operations
-torch::Tensor M4::temp_flowid_batch_gpu_;
-torch::Tensor M4::temp_sldn_cpu_;
 
 // FlowSim-style temporal batching
 std::vector<M4Flow*> M4::pending_flows_;
@@ -114,9 +108,6 @@ void M4::Init(std::shared_ptr<EventQueue> event_queue, std::shared_ptr<Topology>
     // Prepare per-flow link storage
     flowid_to_link_indices.assign(n_flows_max, {});
     
-    // Pre-allocate reusable vectors for bipartite graph construction (performance optimization)
-    reusable_flow_ids_.reserve(8192);   // Conservative upper bound for flows per batch
-    reusable_link_ids_.reserve(128);  // Conservative upper bound for links per batch
     
     std::cout << "[M4] Init() completed successfully! models_loaded=" << models_loaded << ", n_flows_max=" << n_flows_max << ", hidden_size_=" << hidden_size_ << std::endl;
 }
@@ -310,9 +301,7 @@ void M4::SetupML() {
     edges_link_ids_tensor = torch::empty({0}, options_int32);
     ones_cache = torch::ones({1000}, options_float); // Pre-allocate for efficiency
     
-    // Pre-allocate performance optimization tensors
-    temp_flowid_batch_gpu_ = torch::zeros({8192}, torch::TensorOptions().dtype(torch::kInt64).device(device));
-    temp_sldn_cpu_ = torch::zeros({8192}, torch::TensorOptions().dtype(torch::kFloat32));
+    
     
     auto setup_end = std::chrono::high_resolution_clock::now();
     auto setup_duration = std::chrono::duration_cast<std::chrono::milliseconds>(setup_end - setup_start).count();
@@ -352,7 +341,6 @@ void M4::OnFlowCompleted(const int flow_id) {
     // Clear flow state
     flowid_active_mask[flow_id] = false;
     flow_to_graph_id[flow_id] = -1;
-    
     
     // Clean up completed flow from active tracking
     CleanupCompletedFlow(flow_id);
@@ -443,7 +431,7 @@ void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, Callb
         
         // Batch flows that arrive within a small time window
         const auto current_time = event_queue->get_current_time();
-        const uint64_t BATCH_WINDOW_NS = 200; 
+        const uint64_t BATCH_WINDOW_NS = 500; 
         
         // Start a new batch if no batch is pending, or if too much time has passed
         if (batch_timeout_event_id_ == 0 || (current_time - last_batch_time_) > BATCH_WINDOW_NS) {
@@ -582,24 +570,23 @@ void M4::process_batch_of_flows() {
         auto flowid_active_list_cur = torch::nonzero(flowid_active_mask).flatten();
         if (flowid_active_list_cur.numel() > 0) {
             int n_flows_active_cur = flowid_active_list_cur.size(0);
-            // Use pre-allocated reusable vectors for performance
-            reusable_flow_ids_.clear();
-            reusable_link_ids_.clear();
+            // Build bipartite graph edges for interacting flows and links
+            std::vector<int32_t> flow_edges, link_edges;
             for (int i = 0; i < n_flows_active_cur; i++) {
                 int32_t fid = flowid_active_list_cur[i].item<int32_t>();
                 if (fid < flowid_to_link_indices.size()) {
                     for (int32_t lid : flowid_to_link_indices[fid]) {
                         if (current_batch_link_set.find(lid) != current_batch_link_set.end()) {
-                            reusable_flow_ids_.push_back(i);
-                            reusable_link_ids_.push_back(lid);
+                            flow_edges.push_back(i);
+                            link_edges.push_back(lid);
                         }
                     }
                 }
             }
-            if (!reusable_flow_ids_.empty()) {
-                auto edge_flow_tensor = torch::from_blob(reusable_flow_ids_.data(), {(int)reusable_flow_ids_.size()}, torch::TensorOptions().dtype(torch::kInt32))
+            if (!flow_edges.empty()) {
+                auto edge_flow_tensor = torch::from_blob(flow_edges.data(), {(int)flow_edges.size()}, torch::TensorOptions().dtype(torch::kInt32))
                                            .to(torch::kInt64).to(device);
-                auto edge_link_tensor = torch::from_blob(reusable_link_ids_.data(), {(int)reusable_link_ids_.size()}, torch::TensorOptions().dtype(torch::kInt32))
+                auto edge_link_tensor = torch::from_blob(link_edges.data(), {(int)link_edges.size()}, torch::TensorOptions().dtype(torch::kInt32))
                                            .to(torch::kInt64).to(device);
                 // Compact interacting flows and remap indices (exactly like @inference)
                 auto unique_flows_tuple = torch::_unique(edge_flow_tensor, true, true);
@@ -648,13 +635,12 @@ void M4::process_batch_of_flows() {
         }
     }
 
-    // OPTIMIZATION 3: Use pre-allocated GPU tensor to avoid CPU->GPU transfer
+    // Create flow ID batch tensor for ML inference
     int batch_size = static_cast<int>(flow_ids_batch.size());
-    auto flowid_batch_slice = temp_flowid_batch_gpu_.slice(0, 0, batch_size);
-    flowid_batch_slice.copy_(torch::from_blob(flow_ids_batch.data(), {batch_size}, torch::TensorOptions().dtype(torch::kInt64)));
-    // OPTIMIZATION 4: Batch tensor operations for efficiency
-    auto h_vec_batch = h_vec.index_select(0, flowid_batch_slice);
-    auto nlinks_batch = flowid_to_nlinks_tensor.index_select(0, flowid_batch_slice).unsqueeze(1);
+    auto flowid_batch = torch::tensor(flow_ids_batch, torch::TensorOptions().dtype(torch::kInt64).device(device));
+    // Batch tensor operations for efficiency
+    auto h_vec_batch = h_vec.index_select(0, flowid_batch);
+    auto nlinks_batch = flowid_to_nlinks_tensor.index_select(0, flowid_batch).unsqueeze(1);
     auto params_batch = params_tensor.unsqueeze(0).repeat({batch_size, 1});
     std::vector<torch::Tensor> input_tensors = {nlinks_batch, params_batch, h_vec_batch};
     auto input_batch = torch::cat(input_tensors, 1);
@@ -707,10 +693,9 @@ void M4::process_batch_of_flows() {
     // }
     auto sldn = torch::clamp(sldn_raw, 1.0f, std::numeric_limits<float>::infinity());
 
-    // OPTIMIZATION 5: Batch transfer GPU->CPU and avoid individual tensor access
-    auto sldn_cpu_slice = temp_sldn_cpu_.slice(0, 0, batch_size);
-    sldn_cpu_slice.copy_(sldn, /*non_blocking=*/false);
-    auto sldn_data = sldn_cpu_slice.data_ptr<float>();
+    // Transfer slowdown predictions from GPU to CPU for processing
+    auto sldn_cpu = sldn.to(torch::kCPU);
+    auto sldn_data = sldn_cpu.data_ptr<float>();
     
     // Schedule completion for every flow in this batch
     for (size_t i = 0; i < flow_ids_batch.size(); i++) {

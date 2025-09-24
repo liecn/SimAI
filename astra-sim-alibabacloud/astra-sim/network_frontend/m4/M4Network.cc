@@ -59,6 +59,11 @@ static void ensure_dir(const char* path) {
 static std::map<std::tuple<int, int, int, int>, uint64_t> flow_start_times;
 // Copy FlowSim's simple global FCT file handle
 static FILE* g_fct_output_file = nullptr;
+
+// Static counters for logging (same as FlowSim)
+static int m4_send_count = 0;
+static int m4_callback_count = 0;
+
 static std::map<std::pair<int, std::pair<int, int>>, int> waiting_to_sent_callback;
 static std::map<std::pair<int, std::pair<int, int>>, int> waiting_to_notify_receiver;
 
