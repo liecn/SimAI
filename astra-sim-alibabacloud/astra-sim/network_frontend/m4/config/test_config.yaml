@@ -17,10 +17,15 @@ dataset:
   enable_queuelen: False
 
 # Network parameters for ML model
+# network:
+#   buffer_size: 800.0    # Buffer size (bfsz parameter)
+#   fwin: 200.0            # Flow window parameter  
+#   dctcp_k: 100.0         # DCTCP threshold parameter
+
 network:
-  buffer_size: 800.0    # Buffer size (bfsz parameter)
-  fwin: 200.0            # Flow window parameter  
-  dctcp_k: 100.0         # DCTCP threshold parameter
+  buffer_size: 16.0    # Buffer size (bfsz parameter)
+  fwin: 15.0            # Flow window parameter  
+  dctcp_k: 30.0         # DCTCP threshold parameter
 
 # Model parameters
 model:

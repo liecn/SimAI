@@ -431,7 +431,7 @@ void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, Callb
         
         // Batch flows that arrive within a small time window
         const auto current_time = event_queue->get_current_time();
-        const uint64_t BATCH_WINDOW_NS = 500; 
+        const uint64_t BATCH_WINDOW_NS = 0; 
         
         // Start a new batch if no batch is pending, or if too much time has passed
         if (batch_timeout_event_id_ == 0 || (current_time - last_batch_time_) > BATCH_WINDOW_NS) {
@@ -705,6 +705,17 @@ void M4::process_batch_of_flows() {
         // pending_flows_ order matches the initialization order
         M4Flow* flow = pending_flows_[(int)i];
         event_queue->schedule_event(completion_time, flow->callback, flow->callbackArg);
+        
+        // Debug slowdown predictions for first few flows
+        static int pred_debug_count = 0;
+        if (pred_debug_count < 10) {
+            float slowdown = sldn_data[i];
+            float ideal_fct = i_fct_tensor[flow_id].item<float>();
+            std::cout << "[M4 DBG] Flow " << flow_id << " slowdown=" << slowdown 
+                      << " ideal_fct=" << ideal_fct << " predicted_fct=" << predicted_fct 
+                      << " size=" << flow->size << std::endl;
+            pred_debug_count++;
+        }
     }
 
     // DO NOT clear active mask here - flows are still running!
