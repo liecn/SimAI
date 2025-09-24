@@ -19,8 +19,8 @@ dataset:
 # Network parameters for ML model
 network:
   buffer_size: 800.0    # Buffer size (bfsz parameter)
-  fwin: 120.0            # Flow window parameter  
-  dctcp_k: 50.0         # DCTCP threshold parameter
+  fwin: 200.0            # Flow window parameter  
+  dctcp_k: 100.0         # DCTCP threshold parameter
 
 # Model parameters
 model:

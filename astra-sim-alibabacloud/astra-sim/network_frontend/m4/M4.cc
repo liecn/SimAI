@@ -188,7 +188,7 @@ void M4::SetupML() {
     const char* fwin_env = std::getenv("AS_FWIN");
     if (fwin_env) {
         fwin_cfg = std::stof(fwin_env);
-        fwin_cfg = std::min(fwin_cfg, 40.0f);
+        // fwin_cfg = std::min(fwin_cfg, 40.0f);
     }
     
     try {

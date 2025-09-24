@@ -853,7 +853,7 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
   for (uint32_t i = 0; i < node_num; i++) {
     if (n.Get(i)->GetNodeType() == 1) { 
       Ptr<SwitchNode> sw = DynamicCast<SwitchNode>(n.Get(i));
-      uint32_t shift = 1; 
+      uint32_t shift = 3;  // More generous PFC threshold (was 1) 
 
       for (uint32_t j = 1; j < sw->GetNDevices(); j++) {
         Ptr<QbbNetDevice> dev = DynamicCast<QbbNetDevice>(sw->GetDevice(j));
@@ -869,7 +869,7 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
         uint64_t delay = DynamicCast<QbbChannel>(dev->GetChannel())
                              ->GetDelay()
                              .GetTimeStep();
-        uint32_t headroom = rate * delay / 8 / 1000000000 * 12;
+        uint32_t headroom = rate * delay / 8 / 1000000000 * 3;
         sw->m_mmu->ConfigHdrm(j, headroom);
         sw->m_mmu->pfc_a_shift[j] = shift;
         while (rate > nic_rate && sw->m_mmu->pfc_a_shift[j] > 0) {
@@ -882,14 +882,14 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
       sw->m_mmu->node_id = sw->GetId();
     } else if(n.Get(i)->GetNodeType() == 2){ 
 			Ptr<NVSwitchNode> sw = DynamicCast<NVSwitchNode>(n.Get(i));
-      uint32_t shift = 1; 
+      uint32_t shift = 3;  // More generous PFC threshold (was 1) 
       for (uint32_t j = 1; j < sw->GetNDevices(); j++) {
         Ptr<QbbNetDevice> dev = DynamicCast<QbbNetDevice>(sw->GetDevice(j));
         uint64_t rate = dev->GetDataRate().GetBitRate();
         uint64_t delay = DynamicCast<QbbChannel>(dev->GetChannel())
                              ->GetDelay()
                              .GetTimeStep();
-        uint32_t headroom = rate * delay / 8 / 1000000000 * 12;
+        uint32_t headroom = rate * delay / 8 / 1000000000 * 3;
         sw->m_mmu->ConfigHdrm(j, headroom);
         sw->m_mmu->pfc_a_shift[j] = shift;
         while (rate > nic_rate && sw->m_mmu->pfc_a_shift[j] > 0) {
@@ -1010,7 +1010,7 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
   const char* fwin_env = std::getenv("AS_FWIN");
   if (fwin_env) {
     fwin = std::stoull(fwin_env) * 1000;  // Convert to proper units (multiply by 1000)
-    fwin = std::min(fwin, (uint64_t)40000);  // Cap fwin to prevent excessive values
+    // fwin = std::min(fwin, (uint64_t)40000);  // Cap fwin to prevent excessive values
   }
   
   printf("maxRtt=%lu maxBdp=%lu fwin=%lu, buffer_size=%lu\n", maxRtt, maxBdp, fwin, buffer_size);
