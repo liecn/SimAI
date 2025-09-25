@@ -168,15 +168,10 @@ static void m4_completion_callback(void* arg) {
 
         data->network->notify_receiver_packet_arrived(data->src, data->dst, data->count, data->flowTag);
         
-        // CRITICAL FIX: Notify M4 that flow has completed so it can clean up ML states
         M4::OnFlowCompleted(data->flowTag.current_flow_id);
         
-        // receiver_data is not used; avoid deleting to prevent invalid frees across batched callbacks
-        // if (data->receiver_data) { delete data->receiver_data; }
     }
     
-    // Avoid double-free in batched completions; memory is reclaimed at process end
-    // delete data;
 }
 
 M4Network::~M4Network() {
@@ -345,8 +340,6 @@ void M4Network::notify_receiver_packet_arrived(int sender_node, int receiver_nod
         M4Task t = it->second;
         uint64_t existing_count = static_cast<uint64_t>(recvHash[key]);
         if (existing_count >= t.count) {
-            // FCT is now written in main completion callback - no duplicate writing here
-            // Erase receiver state and invoke callback (FlowSim parity)
             expeRecvHash.erase(it);
 
             // Update nodeHash for receiver accounting like FlowSim
@@ -379,7 +372,12 @@ void M4Network::notify_receiver_packet_arrived(int sender_node, int receiver_nod
         } else {
             recvHash[rkey] += static_cast<int>(message_size);
         }
-        // Minimal: avoid verbose pending logs
+        
+        if (nodeHash.find(std::make_pair(receiver_node, 1)) == nodeHash.end()) {
+            nodeHash[std::make_pair(receiver_node, 1)] = message_size;
+        } else {
+            nodeHash[std::make_pair(receiver_node, 1)] += message_size;
+        }
     }
 }
 
@@ -393,16 +391,6 @@ void M4Network::notify_sender_sending_finished(int sender_node, int receiver_nod
                   << "src=" << sender_node << " -> dst=" << receiver_node
                   << ", size=" << message_size << ", tag=" << flowTag.tag_id
                   << std::endl;
-    }
-
-    // Decrement dependency counters and invoke sender's msg_handler like FlowSim
-    auto dep_key = std::make_pair(flowTag.current_flow_id, std::make_pair(sender_node, receiver_node));
-    auto it_dep = waiting_to_sent_callback.find(dep_key);
-    if (it_dep != waiting_to_sent_callback.end()) {
-        it_dep->second -= 1;
-        if (it_dep->second <= 0) {
-            waiting_to_sent_callback.erase(it_dep);
-        }
     }
 
     int tag = flowTag.tag_id;
@@ -425,6 +413,9 @@ void M4Network::notify_sender_sending_finished(int sender_node, int receiver_nod
 }
 
 int M4Network::sim_finish() {
+    // CRITICAL FIX: Process any remaining pending flows before finishing
+    M4::process_final_batch();
+    
     // Match FlowSim's exact data transfer statistics
     for (auto it = nodeHash.begin(); it != nodeHash.end(); it++) {
         std::pair<int, int> p = it->first;
@@ -443,6 +434,3 @@ int M4Network::sim_finish() {
     std::cout << "[M4] sim_finish()" << std::endl;
     return 0;
 }
-
-// M4Network is now just an ASTRA-Sim interface layer
-// All ML inference is handled by M4::Send() -> batch processing -> GNN

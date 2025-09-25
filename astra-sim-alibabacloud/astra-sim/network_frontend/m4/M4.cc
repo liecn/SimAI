@@ -22,7 +22,6 @@
 #include <cmath>
 #include <cassert>
 #include <unordered_map>
-#include <map>
 #include <unordered_set>
 #include <algorithm>
 #include <ryml_std.hpp>
@@ -37,6 +36,7 @@
 std::shared_ptr<EventQueue> M4::event_queue = nullptr;
 std::shared_ptr<Topology> M4::topology = nullptr;
 std::unique_ptr<AstraSim::RoutingFramework> M4::routing_framework_ = nullptr;
+
 
 // M4-specific ML components
 torch::Device M4::device(torch::kCUDA, 0);
@@ -418,44 +418,28 @@ void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, Callb
     
     // Get pre-calculated path from routing framework (same as FlowSim)
     std::vector<int> node_path = routing_framework_->GetFlowSimPathByNodeIds(src, dst);
-    if (node_path.empty()) {
-        // Nothing to schedule; invoke callback immediately (same as FlowSim)
-        callback(callbackArg);
-        return;
-    }
     
-    // Convert to device route (same as FlowSim)
-    Route route;
-    for (int node_id : node_path) {
-        if (node_id >= 0 && node_id < topology->get_devices_count()) {
-            route.push_back(topology->get_device(node_id));
-        }
+    // Create M4Flow and add to pending batch (following FlowSim's temporal batching)
+    auto m4_flow = std::make_unique<M4Flow>(src, dst, size, node_path, callback, callbackArg);
+    // Try to use flowTag.current_flow_id as global flow_id if available
+    if (callbackArg) {
+        auto* cd = reinterpret_cast<M4CallbackData*>(callbackArg);
+        m4_flow->flow_id = cd->flowTag.current_flow_id;
     }
-    
-    if (route.size() >= 2) {
-        // Create M4Flow and add to pending batch (following FlowSim's temporal batching)
-        auto m4_flow = std::make_unique<M4Flow>(src, dst, size, node_path, callback, callbackArg);
-        // Try to use flowTag.current_flow_id as global flow_id if available
-        if (callbackArg) {
-            auto* cd = reinterpret_cast<M4CallbackData*>(callbackArg);
-            m4_flow->flow_id = cd->flowTag.current_flow_id;
-        }
 
-        // Add to pending batch for temporal processing (like FlowSim's pending_chunks_)
-        pending_flows_.push_back(m4_flow.get());
-        // Keep ownership in active_flows_ptrs until batch processing
-        active_flows_ptrs.push_back(std::move(m4_flow));
-        
-        // Batch flows that arrive within a small time window
-        const auto current_time = event_queue->get_current_time(); 
-        
-        // Start a new batch if no batch is pending, or if too much time has passed
-        if (batch_timeout_event_id_ == 0 || (current_time - last_batch_time_) > batch_window_ns_) {
-            last_batch_time_ = current_time;
-            // Schedule processing after the batch window expires
-            batch_timeout_event_id_ = event_queue->schedule_event(current_time + batch_window_ns_, batch_timeout_callback, nullptr);
-        }
-        // Otherwise, just add to the existing pending batch
+    // Add to pending batch for temporal processing (like FlowSim's pending_chunks_)
+    pending_flows_.push_back(m4_flow.get());
+    // Keep ownership in active_flows_ptrs until batch processing
+    active_flows_ptrs.push_back(std::move(m4_flow));
+    
+    // Batch flows that arrive within a small time window
+    const auto current_time = event_queue->get_current_time(); 
+    
+    // Start a new batch if no batch is pending, or if too much time has passed
+    if (batch_timeout_event_id_ == 0 || (current_time - last_batch_time_) > batch_window_ns_) {
+        last_batch_time_ = current_time;
+        // Schedule processing after the batch window expires
+        batch_timeout_event_id_ = event_queue->schedule_event(current_time + batch_window_ns_, batch_timeout_callback, nullptr);
     }
 }
 
@@ -464,27 +448,40 @@ void M4::batch_timeout_callback(void* arg) {
     process_batch_of_flows();
 }
 
+// Process final batch at simulation end (handles remaining flows in final time window)
+void M4::process_final_batch() {
+    if (!pending_flows_.empty()) {
+        std::cout << "[M4] Processing final batch of " << pending_flows_.size() << " remaining flows" << std::endl;
+        process_batch_of_flows();
+    }
+}
+
 // FlowSim-style batch processing with inference ML logic
 void M4::process_batch_of_flows() {
-    // Only process when there are new flows to handle (event-driven, not periodic)
     if (pending_flows_.empty()) {
         return;
     }
     
-    // Reset batch event ID (but keep last_batch_time_ for window logic)
+    // Reset batch event ID
     batch_timeout_event_id_ = 0;
+    
+    // Process ALL pending flows (same as temporal batching)
+    std::vector<M4Flow*> flows_to_process = pending_flows_;
+    
+    // Clear all pending flows
+    pending_flows_.clear();
     
     const auto current_time = event_queue->get_current_time();
     time_clock = static_cast<float>(current_time);
     // Use global graph so all flows can interact (no batch fragmentation)
     
-    // Initialize per-flow state for this temporal batch and collect batch IDs
+    // Initialize per-flow state for this batch
     current_batch_link_set.clear();
     std::unordered_map<int32_t, int32_t> batch_link_counts;
     std::vector<int64_t> flow_ids_batch;
-    flow_ids_batch.reserve(pending_flows_.size());
+    flow_ids_batch.reserve(flows_to_process.size());
     int flows_arriving_this_batch = 0;
-    for (M4Flow* flow : pending_flows_) {
+    for (M4Flow* flow : flows_to_process) {
         if (!flow) continue;
         
         // Use ASTRA-Sim's flow ID directly (already set in Send())
@@ -493,7 +490,8 @@ void M4::process_batch_of_flows() {
         // Ensure ASTRA-Sim's flow ID is within our tensor capacity
         if (flow_id < 0 || flow_id >= n_flows_max) {
             throw std::runtime_error("[M4 ERROR] ASTRA-Sim flow ID out of range: " + std::to_string(flow_id) + " (valid: 0-" + std::to_string(n_flows_max-1) + ")");
-        }  
+        }
+        
         flow->start_time = current_time;
         flows_arriving_this_batch++;
 
@@ -591,7 +589,7 @@ void M4::process_batch_of_flows() {
         
         // Batch-local graph: Only process flows that interact with the current batch
         // Step 1: Find flows that share links with the current batch
-        std::unordered_set<int32_t> interacting_flows;
+        std::set<int32_t> interacting_flows;
         // Add current batch flows
         for (int64_t fid : flow_ids_batch) {
             interacting_flows.insert((int32_t)fid);
@@ -768,33 +766,52 @@ void M4::process_batch_of_flows() {
     float batch_var = (sum_sq / n) - (batch_mean * batch_mean);
     float batch_std = std::sqrt(std::max(batch_var, 1e-8f));
     
-    // Step 2: Z-score normalization with adaptive spreading using batch_window_ns
-    for (size_t i = 0; i < flow_ids_batch.size(); i++) {
-        int flow_id = (int)flow_ids_batch[i];
-        float raw_slowdown = sldn_data[i];
+    // Step 2: Schedule flow completions (M4Network.cc handles collective completion)
+    for (size_t i = 0; i < flows_to_process.size(); i++) {
+        M4Flow* flow = flows_to_process[(int)i];
+        int flow_id = flow->flow_id;
         
-        float z_score = (raw_slowdown - batch_mean) / batch_std;
-        z_score = std::max(-1.0f, std::min(1.0f, z_score));
-        float scaled_slowdown = batch_mean * 2.0f + z_score * 4000.0f/batch_window_ns_;
+        // Handle short/empty routes (immediate completion with minimal FCT)
+        if (flow->node_path.empty() || flow->node_path.size() < 2) {
+            float minimal_fct = 1.0f; // 1ns minimal FCT for local/short flows
+            uint64_t completion_time = current_time + (uint64_t)minimal_fct;
+            event_queue->schedule_event(completion_time, flow->callback, flow->callbackArg);
+            continue; // Skip ML inference for short routes
+        }
         
-        // Only enforce physical constraint: slowdown >= 1.0
-        scaled_slowdown = std::max(scaled_slowdown, 1.0f);
+        // Find the ML prediction for this flow in the batch
+        int batch_idx = -1;
+        for (size_t j = 0; j < flow_ids_batch.size(); j++) {
+            if ((int)flow_ids_batch[j] == flow_id) {
+                batch_idx = j;
+                break;
+            }
+        }
         
-        float predicted_fct = scaled_slowdown * i_fct_tensor[flow_id].item<float>();
-        uint64_t completion_time = current_time + (uint64_t)predicted_fct;
-        
-        M4Flow* flow = pending_flows_[(int)i];
-        event_queue->schedule_event(completion_time, flow->callback, flow->callbackArg);
+        if (batch_idx >= 0) {
+            // Normal ML inference for flows with valid routes
+            float raw_slowdown = sldn_data[batch_idx];
+            
+            float z_score = (raw_slowdown - batch_mean) / batch_std;
+            z_score = std::max(-1.0f, std::min(1.0f, z_score));
+            float scaled_slowdown = raw_slowdown;
+            
+            // Only enforce physical constraint: slowdown >= 1.0
+            scaled_slowdown = std::max(scaled_slowdown, 1.0f);
+            
+            float predicted_fct = scaled_slowdown * i_fct_tensor[flow_id].item<float>();
+            uint64_t completion_time = current_time + (uint64_t)predicted_fct;
+            
+            // Schedule original callback - M4Network.cc handles collective completion correctly
+            event_queue->schedule_event(completion_time, flow->callback, flow->callbackArg);
+        }
     }
-
-    pending_flows_.clear();
+    
+    // No need to schedule next batch - all pending flows processed
 }
 
 // LSTM+GNN state evolution only (no completion selection/scheduling)
 
-bool M4::IsRoutingFrameworkLoaded() {
-    return routing_framework_ != nullptr;
-}
 
 const AstraSim::RoutingFramework* M4::GetRoutingFramework() {
     return routing_framework_.get();
@@ -808,7 +825,6 @@ void M4::Stop() {
     }
 }
 
-
 void M4::Destroy() {
     // Clear static resources in proper order (same as FlowSim)
     routing_framework_.reset();
@@ -816,17 +832,3 @@ void M4::Destroy() {
     event_queue.reset();
 }
 
-// Topology access methods for FCT calculation
-float M4::GetTopologyLatency() {
-    if (!topology) {
-        throw std::runtime_error("[M4 ERROR] topology is null in GetTopologyLatency()!");
-    }
-    return topology->get_latency();
-}
-
-float M4::GetTopologyBandwidth() {
-    if (!topology) {
-        throw std::runtime_error("[M4 ERROR] topology is null in GetTopologyBandwidth()!");
-    }
-    return topology->get_bandwidth();
-}

@@ -23,13 +23,13 @@ dataset:
 #   dctcp_k: 100.0         # DCTCP threshold parameter
 
 network:
-  buffer_size: 16.0    # Buffer size (bfsz parameter)
-  fwin: 15.0            # Flow window parameter  
-  dctcp_k: 30.0         # DCTCP threshold parameter
+  buffer_size: 50.0    # Buffer size (bfsz parameter)
+  fwin: 50.0            # Flow window parameter  
+  dctcp_k: 50.0         # DCTCP threshold parameter
 
 # M4-specific parameters
 m4:
-  batch_window_ns: 200    # Batch window in nanoseconds for temporal batching
+  batch_window_ns: 300     # Process every N flows together (deterministic batching)
 
 # Model parameters
 model:
@@ -39,7 +39,7 @@ model:
   loss_fn_type: "l1"
   hidden_size: 200
   gcn_hidden_size: 300
-  dropout: 0.2
+  dropout: 0.0
   enable_positional_encoding: False
   enable_gnn: True
   enable_lstm: True

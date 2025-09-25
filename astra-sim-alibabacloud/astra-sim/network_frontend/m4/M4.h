@@ -73,7 +73,6 @@ private:
     // M4-specific configuration parameters
     static uint64_t batch_window_ns_; // Temporal batching window in nanoseconds
     
-    // Multi-flow state management (from @inference/ ground truth)
     static torch::Tensor h_vec;
     static torch::Tensor flowid_active_mask;
     static torch::Tensor edge_index;
@@ -143,24 +142,19 @@ public:
     // FlowSim-style batch processing
     static void process_batch_of_flows();
     static void batch_timeout_callback(void* arg);
+    static void process_final_batch(); // Process remaining pending flows at simulation end
     
-    // (kept) flow/link bookkeeping helpers
+    // Flow/link bookkeeping helpers
     static void OnFlowCompleted(int flow_id);
     static void CleanupCompletedFlow(int flow_id);
     
     // Routing framework management (same as FlowSim)
     static void SetRoutingFramework(std::unique_ptr<AstraSim::RoutingFramework> routing_framework);
     static const AstraSim::RoutingFramework* GetRoutingFramework();
-    static bool IsRoutingFrameworkLoaded();
-    
-    // Topology access for FCT calculation
-    static float GetTopologyLatency();
-    static float GetTopologyBandwidth();
     static std::shared_ptr<Topology> GetTopology() { return topology; }
     
     // M4-specific ML setup
     static void SetupML();
-    // (removed) legacy completion hooks
     
 private:
 };

@@ -1010,7 +1010,6 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
   const char* fwin_env = std::getenv("AS_FWIN");
   if (fwin_env) {
     fwin = std::stoull(fwin_env) * 1000;  // Convert to proper units (multiply by 1000)
-    // fwin = std::min(fwin, (uint64_t)40000);  // Cap fwin to prevent excessive values
   }
   
   printf("maxRtt=%lu maxBdp=%lu fwin=%lu, buffer_size=%lu\n", maxRtt, maxBdp, fwin, buffer_size);
