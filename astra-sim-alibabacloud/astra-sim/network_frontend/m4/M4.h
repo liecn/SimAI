@@ -70,6 +70,9 @@ private:
     static int32_t hidden_size_;
     static int32_t n_links_max_;
     
+    // M4-specific configuration parameters
+    static uint64_t batch_window_ns_; // Temporal batching window in nanoseconds
+    
     // Multi-flow state management (from @inference/ ground truth)
     static torch::Tensor h_vec;
     static torch::Tensor flowid_active_mask;
@@ -94,7 +97,6 @@ private:
     static int32_t n_flows_max;
     static int32_t graph_id_cur;
     static float time_clock;
-    static int32_t next_flow_id;
 
     // Link indexing for graph construction (derived from RoutingFramework paths)
     static std::unordered_map<long long, int32_t> link_key_to_index; // key = ((int64_t)u<<32)|v

@@ -27,6 +27,10 @@ network:
   fwin: 15.0            # Flow window parameter  
   dctcp_k: 30.0         # DCTCP threshold parameter
 
+# M4-specific parameters
+m4:
+  batch_window_ns: 200    # Batch window in nanoseconds for temporal batching
+
 # Model parameters
 model:
   input_size: 2
@@ -35,7 +39,7 @@ model:
   loss_fn_type: "l1"
   hidden_size: 200
   gcn_hidden_size: 300
-  dropout: 0.0
+  dropout: 0.2
   enable_positional_encoding: False
   enable_gnn: True
   enable_lstm: True

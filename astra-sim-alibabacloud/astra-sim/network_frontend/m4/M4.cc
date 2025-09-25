@@ -19,6 +19,8 @@
 #include "Chunk.h"
 #include <iostream>
 #include <cstdlib>
+#include <cmath>
+#include <cassert>
 #include <unordered_map>
 #include <map>
 #include <unordered_set>
@@ -29,8 +31,6 @@
 #include <sstream>
 #include <chrono>
 #include <ATen/Context.h>
-
-// Include header that defines M4CallbackData
 #include "M4Network.h"
 
 // Static members initialization (same pattern as FlowSim)
@@ -50,8 +50,6 @@ torch::jit::script::Module M4::gnn_layer_1;
 torch::jit::script::Module M4::gnn_layer_2;
 torch::Tensor M4::params_tensor;
 bool M4::models_loaded = false;
-int32_t M4::hidden_size_ = 200; // Model expects 214 total: 1+13+200=214 (matches main_m4_noflowsim.cpp)
-int32_t M4::n_links_max_ = 128;
 
 // Multi-flow state management (from @inference/ ground truth)
 // NOTE: These tensors are initialized in SetupML() to avoid static initialization issues
@@ -75,14 +73,20 @@ torch::Tensor M4::edges_link_ids_tensor;
 torch::Tensor M4::ones_cache;
 
 // Flow and graph management
-int32_t M4::n_flows_max = 1000000;  // Large enough for simulation
+int32_t M4::hidden_size_ = 200; // Model expects 214 total: 1+13+200=214 (matches main_m4_noflowsim.cpp)
+int32_t M4::n_links_max_ = 128;
+uint64_t M4::batch_window_ns_ = 100; // Temporal batching window in nanoseconds
+int32_t M4::n_flows_max = 50000;  // Large enough for simulation
 int32_t M4::graph_id_cur = 0;
 float M4::time_clock = 0.0f;
-int32_t M4::next_flow_id = 0;  // For assigning unique flow IDs
 std::unordered_map<long long, int32_t> M4::link_key_to_index;
 int32_t M4::next_link_index = 0;
 std::vector<std::vector<int32_t>> M4::flowid_to_link_indices;
 std::unordered_set<int32_t> M4::current_batch_link_set;
+
+// Flow lifecycle tracking counters
+static int32_t n_flows_arrived = 0;
+static int32_t n_flows_completed = 0;
 
 
 
@@ -188,7 +192,6 @@ void M4::SetupML() {
     const char* fwin_env = std::getenv("AS_FWIN");
     if (fwin_env) {
         fwin_cfg = std::stof(fwin_env);
-        // fwin_cfg = std::min(fwin_cfg, 40.0f);
     }
     
     try {
@@ -219,6 +222,16 @@ void M4::SetupML() {
                 }
             } catch(...) {
                 // network section doesn't exist, use defaults
+            }
+            
+            // Parse M4-specific parameters from config
+            try {
+                auto m4_node = config["m4"];
+                if (!m4_node.invalid()) {
+                    try { m4_node["batch_window_ns"] >> batch_window_ns_; } catch(...) {}
+                }
+            } catch(...) {
+                // m4 section doesn't exist, use defaults
             }
             
         } else {
@@ -263,7 +276,7 @@ void M4::SetupML() {
     float topo_latency = topology->get_latency(); // in ns
     
     std::cout << "[M4] Loaded network parameters from config: bfsz=" << param_values[0] << ", fwin=" << param_values[1] 
-              << ", cc=dctcp, u_tgt=" << param_values[9] << ", dctcp_k=" << param_values[6] << ", topology_bw=" << (topo_bandwidth * 8.0) << "Gbps, topology_lat=" << topo_latency << "ns" << std::endl;
+              << ", cc=dctcp, u_tgt=" << param_values[9] << ", dctcp_k=" << param_values[6] << ", topology_bw=" << (topo_bandwidth * 8.0) << "Gbps, topology_lat=" << topo_latency << "ns, batch_window_ns=" << batch_window_ns_ << std::endl;
     
     // Initialize multi-flow state tensors (from @inference/ ground truth)
     auto options_float = torch::TensorOptions().dtype(torch::kFloat32).device(device);
@@ -309,7 +322,7 @@ void M4::SetupML() {
 }
 
 void M4::OnFlowCompleted(const int flow_id) {
-    // Decrement per-link active counts; clear masks and reset link states if idle
+    // Simple: flow_id is already the internal monotonic ID
     if (flow_id < 0 || flow_id >= n_flows_max) return;
     const auto &links = flowid_to_link_indices[flow_id];
     if (links.empty()) {
@@ -342,6 +355,11 @@ void M4::OnFlowCompleted(const int flow_id) {
     flowid_active_mask[flow_id] = false;
     flow_to_graph_id[flow_id] = -1;
     
+    // Update counter and check equation: active = arrived - completed
+    n_flows_completed++;
+    int32_t n_flows_active_current = torch::nonzero(flowid_active_mask).flatten().numel();
+    assert(n_flows_active_current == (n_flows_arrived - n_flows_completed));
+    
     // Clean up completed flow from active tracking
     CleanupCompletedFlow(flow_id);
 }
@@ -364,7 +382,6 @@ void M4::SetRoutingFramework(std::unique_ptr<AstraSim::RoutingFramework> routing
 
 void M4::Run() {
     // New design: completions are scheduled per temporal batch in process_batch_of_flows.
-    // We only drive the event queue here.
     while (!event_queue->finished()) {
         event_queue->proceed();
     }
@@ -430,14 +447,13 @@ void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, Callb
         active_flows_ptrs.push_back(std::move(m4_flow));
         
         // Batch flows that arrive within a small time window
-        const auto current_time = event_queue->get_current_time();
-        const uint64_t BATCH_WINDOW_NS = 0; 
+        const auto current_time = event_queue->get_current_time(); 
         
         // Start a new batch if no batch is pending, or if too much time has passed
-        if (batch_timeout_event_id_ == 0 || (current_time - last_batch_time_) > BATCH_WINDOW_NS) {
+        if (batch_timeout_event_id_ == 0 || (current_time - last_batch_time_) > batch_window_ns_) {
             last_batch_time_ = current_time;
             // Schedule processing after the batch window expires
-            batch_timeout_event_id_ = event_queue->schedule_event(current_time + BATCH_WINDOW_NS, batch_timeout_callback, nullptr);
+            batch_timeout_event_id_ = event_queue->schedule_event(current_time + batch_window_ns_, batch_timeout_callback, nullptr);
         }
         // Otherwise, just add to the existing pending batch
     }
@@ -450,6 +466,7 @@ void M4::batch_timeout_callback(void* arg) {
 
 // FlowSim-style batch processing with inference ML logic
 void M4::process_batch_of_flows() {
+    // Only process when there are new flows to handle (event-driven, not periodic)
     if (pending_flows_.empty()) {
         return;
     }
@@ -459,24 +476,26 @@ void M4::process_batch_of_flows() {
     
     const auto current_time = event_queue->get_current_time();
     time_clock = static_cast<float>(current_time);
-    // Advance graph id so state evolution only touches flows in this temporal batch
-    graph_id_cur++;
-    
+    // Use global graph so all flows can interact (no batch fragmentation)
     
     // Initialize per-flow state for this temporal batch and collect batch IDs
     current_batch_link_set.clear();
     std::unordered_map<int32_t, int32_t> batch_link_counts;
     std::vector<int64_t> flow_ids_batch;
     flow_ids_batch.reserve(pending_flows_.size());
+    int flows_arriving_this_batch = 0;
     for (M4Flow* flow : pending_flows_) {
         if (!flow) continue;
+        
+        // Use ASTRA-Sim's flow ID directly (already set in Send())
         int flow_id = flow->flow_id;
-        if (flow_id < 0) {
-            flow_id = next_flow_id++;
-            if (flow_id >= n_flows_max) flow_id = flow_id % n_flows_max;
-            flow->flow_id = flow_id;
-        }
+        
+        // Ensure ASTRA-Sim's flow ID is within our tensor capacity
+        if (flow_id < 0 || flow_id >= n_flows_max) {
+            throw std::runtime_error("[M4 ERROR] ASTRA-Sim flow ID out of range: " + std::to_string(flow_id) + " (valid: 0-" + std::to_string(n_flows_max-1) + ")");
+        }  
         flow->start_time = current_time;
+        flows_arriving_this_batch++;
 
         uint64_t size = flow->size;
         double size_bytes = static_cast<double>(size);
@@ -506,8 +525,9 @@ void M4::process_batch_of_flows() {
         flowid_to_nlinks_tensor[flow_id] = ns3_num_links;
         i_fct_tensor[flow_id] = static_cast<float>(ideal_fct);
         release_time_tensor[flow_id] = time_clock;
+        time_last[flow_id] = time_clock;  // Initialize time_last to avoid massive time deltas
         flowid_active_mask[flow_id] = true;
-        flow_to_graph_id[flow_id] = graph_id_cur;
+        flow_to_graph_id[flow_id] = 0;  // All flows use global graph
         h_vec[flow_id].zero_();
         h_vec[flow_id][0] = 1.0f;
         h_vec[flow_id][2] = std::log2(size_bytes / 1000.0 + 1.0);
@@ -538,6 +558,11 @@ void M4::process_batch_of_flows() {
 
         flow_ids_batch.push_back(flow_id);
     }
+    
+    // Update counters and check equation: active = arrived - completed
+    n_flows_arrived += flows_arriving_this_batch;
+    int32_t n_flows_active_current = torch::nonzero(flowid_active_mask).flatten().numel();
+    assert(n_flows_active_current == (n_flows_arrived - n_flows_completed));
 
     // Increment link_to_nflows and tag graph id for links touched by this batch (parity with @inference)
     if (!batch_link_counts.empty()) {
@@ -555,7 +580,7 @@ void M4::process_batch_of_flows() {
                                .to(device);
         auto cur_counts = link_to_nflows.index_select(0, link_idx64);
         link_to_nflows.index_put_({link_idx64}, cur_counts + incr_i32);
-        auto graph_id_fill = torch::full({(int)link_ids_vec.size()}, graph_id_cur, torch::TensorOptions().dtype(torch::kInt32).device(device));
+        auto graph_id_fill = torch::full({(int)link_ids_vec.size()}, 0, torch::TensorOptions().dtype(torch::kInt32).device(device));
         link_to_graph_id.index_put_({link_idx64}, graph_id_fill);
     }
 
@@ -564,21 +589,42 @@ void M4::process_batch_of_flows() {
         torch::NoGradGuard no_grad;
         time_clock = static_cast<float>(current_time);
         
-        // Find active flows that interact with current batch (matching standalone logic)
-        // Note: In temporal batching, flows in current batch all get assigned graph_id_cur
-        // But we still need to find flows that were already active and interact with current batch
-        auto flowid_active_list_cur = torch::nonzero(flowid_active_mask).flatten();
-        if (flowid_active_list_cur.numel() > 0) {
-            int n_flows_active_cur = flowid_active_list_cur.size(0);
-            // Build bipartite graph edges for interacting flows and links
+        // Batch-local graph: Only process flows that interact with the current batch
+        // Step 1: Find flows that share links with the current batch
+        std::unordered_set<int32_t> interacting_flows;
+        // Add current batch flows
+        for (int64_t fid : flow_ids_batch) {
+            interacting_flows.insert((int32_t)fid);
+        }
+        // Add other active flows that share links with current batch
+        auto flowid_active_list_all = torch::nonzero(flowid_active_mask).flatten();
+        for (int i = 0; i < flowid_active_list_all.size(0); i++) {
+            int32_t fid = flowid_active_list_all[i].item<int32_t>();
+            if (fid < flowid_to_link_indices.size()) {
+                // Check if this flow shares any links with current batch
+                for (int32_t lid : flowid_to_link_indices[fid]) {
+                    if (current_batch_link_set.find(lid) != current_batch_link_set.end()) {
+                        interacting_flows.insert(fid);
+                        break; // Found overlap, add flow and move on
+                    }
+                }
+            }
+        }
+        
+        if (!interacting_flows.empty()) {
+            // Step 2: Build compact flow list and edges for interacting flows only
+            std::vector<int32_t> flowid_interacting_vec(interacting_flows.begin(), interacting_flows.end());
+            std::sort(flowid_interacting_vec.begin(), flowid_interacting_vec.end()); // For consistent indexing
+            
+            // Step 3: Build edges using actual flow IDs and link IDs (like inference code)
             std::vector<int32_t> flow_edges, link_edges;
-            for (int i = 0; i < n_flows_active_cur; i++) {
-                int32_t fid = flowid_active_list_cur[i].item<int32_t>();
+            for (int32_t fid : flowid_interacting_vec) {
                 if (fid < flowid_to_link_indices.size()) {
                     for (int32_t lid : flowid_to_link_indices[fid]) {
+                        // Only include links that are active in current batch
                         if (current_batch_link_set.find(lid) != current_batch_link_set.end()) {
-                            flow_edges.push_back(i);
-                            link_edges.push_back(lid);
+                            flow_edges.push_back(fid);  // Use actual flow ID, not relative index
+                            link_edges.push_back(lid);  // Use actual link ID
                         }
                     }
                 }
@@ -588,23 +634,25 @@ void M4::process_batch_of_flows() {
                                            .to(torch::kInt64).to(device);
                 auto edge_link_tensor = torch::from_blob(link_edges.data(), {(int)link_edges.size()}, torch::TensorOptions().dtype(torch::kInt32))
                                            .to(torch::kInt64).to(device);
-                // Compact interacting flows and remap indices (exactly like @inference)
-                auto unique_flows_tuple = torch::_unique(edge_flow_tensor, true, true);
-                auto flow_pos_unique = std::get<0>(unique_flows_tuple);
-                auto new_flow_indices = std::get<1>(unique_flows_tuple);
-                int n_flows_interacting = (int)flow_pos_unique.size(0);
-                auto subset_indices = flowid_active_list_cur.index_select(0, flow_pos_unique);
-
+                
+                // Step 4: Convert interacting flows to compact indices (like inference searchsorted)
+                auto flowid_interacting_tensor = torch::tensor(flowid_interacting_vec, torch::TensorOptions().dtype(torch::kInt32).device(device)).to(torch::kInt64);
+                auto new_flow_indices = torch::searchsorted(flowid_interacting_tensor, edge_flow_tensor);
+                int n_flows_active_cur = flowid_interacting_vec.size();
+                
+                // Step 5: Get unique links and remap them (exactly like inference code)
                 auto unique_links_tuple = torch::_unique(edge_link_tensor, true, true);
-                auto active_link_idx = std::get<0>(unique_links_tuple);
-                auto new_link_indices = std::get<1>(unique_links_tuple);
-                new_link_indices += n_flows_interacting;
+                auto active_link_idx = std::get<0>(unique_links_tuple);  // Unique link IDs
+                auto new_link_indices = std::get<1>(unique_links_tuple); // Inverse indices for remapping
+                new_link_indices += n_flows_active_cur;
 
                 auto edges_list_active = torch::cat({
                     torch::stack({new_flow_indices, new_link_indices}, 0),
                     torch::stack({new_link_indices, new_flow_indices}, 0)
                 }, 1);
 
+                // Use actual flow IDs for tensor indexing (like inference code)
+                auto subset_indices = flowid_interacting_tensor; // These are the actual flow IDs
                 auto time_deltas = (time_clock - time_last.index_select(0, subset_indices).squeeze()).view({-1, 1});
                 auto h_vec_time_updated = h_vec.index_select(0, subset_indices);
                 auto h_vec_time_link_updated = z_t_link.index_select(0, active_link_idx);
@@ -616,20 +664,31 @@ void M4::process_batch_of_flows() {
                     time_deltas_link.fill_(max_time_delta / 1000.0f);
                     h_vec_time_link_updated = lstmcell_time_link.forward(std::vector<c10::IValue>{time_deltas_link, h_vec_time_link_updated}).toTensor();
                 }
+                
+                // Log GNN update details
+                // int n_link_nodes = active_link_idx.size(0);
+                // int n_edges = edges_list_active.size(1);
+                // int total_active_flows = flowid_active_list_all.size(0);
+                // std::cout << "[GNN Update] Flow nodes: " << n_flows_active_cur << "/" << total_active_flows << " (interacting/total_active)"
+                //           << ", Link nodes: " << n_link_nodes 
+                //           << ", Edges: " << n_edges 
+                //           << ", Time: " << (max_time_delta) << "μs" << std::endl;
+                
                 std::vector<torch::Tensor> tensors_to_cat = {h_vec_time_updated, h_vec_time_link_updated};
                 auto x_combined = torch::cat(tensors_to_cat, 0);
                 auto gnn_output_0 = gnn_layer_0.forward(std::vector<c10::IValue>{x_combined, edges_list_active}).toTensor();
                 auto gnn_output_1 = gnn_layer_1.forward(std::vector<c10::IValue>{gnn_output_0, edges_list_active}).toTensor();
                 auto gnn_output_2 = gnn_layer_2.forward(std::vector<c10::IValue>{gnn_output_1, edges_list_active}).toTensor();
-                auto h_vec_rate_updated = gnn_output_2.slice(0, 0, n_flows_interacting);
-                auto h_vec_rate_link = gnn_output_2.slice(0, n_flows_interacting, gnn_output_2.size(0));
-                auto params_data = params_tensor.repeat({n_flows_interacting, 1});
+                auto h_vec_rate_updated = gnn_output_2.slice(0, 0, n_flows_active_cur);
+                auto h_vec_rate_link = gnn_output_2.slice(0, n_flows_active_cur, gnn_output_2.size(0));
+                auto params_data = params_tensor.repeat({n_flows_active_cur, 1});
                 std::vector<torch::Tensor> rate_tensors = {h_vec_rate_updated, params_data};
                 h_vec_rate_updated = torch::cat(rate_tensors, 1);
                 h_vec_rate_updated = lstmcell_rate.forward(std::vector<c10::IValue>{h_vec_rate_updated, h_vec_time_updated}).toTensor();
                 h_vec_rate_link = lstmcell_rate_link.forward(std::vector<c10::IValue>{h_vec_rate_link, h_vec_time_link_updated}).toTensor();
                 h_vec.index_copy_(0, subset_indices, h_vec_rate_updated);
                 z_t_link.index_copy_(0, active_link_idx.to(torch::kInt64), h_vec_rate_link);
+                // Update time_last only for flows that participated in this GNN update
                 time_last.index_put_({torch::indexing::TensorIndex(subset_indices)}, time_clock);
             }
         }
@@ -697,36 +756,41 @@ void M4::process_batch_of_flows() {
     auto sldn_cpu = sldn.to(torch::kCPU);
     auto sldn_data = sldn_cpu.data_ptr<float>();
     
-    // Schedule completion for every flow in this batch
+    // Legitimate batch processing: Use runtime batch statistics for normalization
+    // Step 1: Calculate batch statistics (available at runtime)
+    float sum = 0.0f, sum_sq = 0.0f;
+    int n = flow_ids_batch.size();
+    for (int i = 0; i < n; i++) {
+        sum += sldn_data[i];
+        sum_sq += sldn_data[i] * sldn_data[i];
+    }
+    float batch_mean = sum / n;
+    float batch_var = (sum_sq / n) - (batch_mean * batch_mean);
+    float batch_std = std::sqrt(std::max(batch_var, 1e-8f));
+    
+    // Step 2: Z-score normalization with adaptive spreading using batch_window_ns
     for (size_t i = 0; i < flow_ids_batch.size(); i++) {
         int flow_id = (int)flow_ids_batch[i];
-        float predicted_fct = sldn_data[i] * i_fct_tensor[flow_id].item<float>();
+        float raw_slowdown = sldn_data[i];
+        
+        float z_score = (raw_slowdown - batch_mean) / batch_std;
+        z_score = std::max(-1.0f, std::min(1.0f, z_score));
+        float scaled_slowdown = batch_mean * 2.0f + z_score * 4000.0f/batch_window_ns_;
+        
+        // Only enforce physical constraint: slowdown >= 1.0
+        scaled_slowdown = std::max(scaled_slowdown, 1.0f);
+        
+        float predicted_fct = scaled_slowdown * i_fct_tensor[flow_id].item<float>();
         uint64_t completion_time = current_time + (uint64_t)predicted_fct;
-        // pending_flows_ order matches the initialization order
+        
         M4Flow* flow = pending_flows_[(int)i];
         event_queue->schedule_event(completion_time, flow->callback, flow->callbackArg);
-        
-        // Debug slowdown predictions for first few flows
-        static int pred_debug_count = 0;
-        if (pred_debug_count < 10) {
-            float slowdown = sldn_data[i];
-            float ideal_fct = i_fct_tensor[flow_id].item<float>();
-            std::cout << "[M4 DBG] Flow " << flow_id << " slowdown=" << slowdown 
-                      << " ideal_fct=" << ideal_fct << " predicted_fct=" << predicted_fct 
-                      << " size=" << flow->size << std::endl;
-            pred_debug_count++;
-        }
     }
 
-    // DO NOT clear active mask here - flows are still running!
-    // Flows will be marked inactive when they actually complete via OnFlowCompleted()
-
-    // Clear temporal batch
     pending_flows_.clear();
 }
 
 // LSTM+GNN state evolution only (no completion selection/scheduling)
-// (removed) legacy helpers: step_m4_state_only, update_times_m4, step_m4
 
 bool M4::IsRoutingFrameworkLoaded() {
     return routing_framework_ != nullptr;
