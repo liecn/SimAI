@@ -901,9 +901,9 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
             float raw_slowdown = sldn_data[batch_idx];
             
             float z_score = (raw_slowdown - batch_mean) / batch_std;
-            z_score = std::max(-0.8f, std::min(0.8f, z_score));
-            // float scaled_slowdown = raw_slowdown;
-            float scaled_slowdown = batch_mean+z_score*batch_std;
+            z_score = std::max(-0.5f, std::min(0.5f, z_score));
+            float scaled_slowdown = raw_slowdown;
+            // float scaled_slowdown = batch_mean+z_score*batch_std;
             
             // Only enforce physical constraint: slowdown >= 1.0
             scaled_slowdown = std::max(scaled_slowdown, 1.0f);
