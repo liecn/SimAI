@@ -75,7 +75,6 @@ private:
     
     static torch::Tensor h_vec;
     static torch::Tensor flowid_active_mask;
-    static torch::Tensor edge_index;
     static torch::Tensor z_t_link;
     static torch::Tensor link_to_graph_id;
     static torch::Tensor link_to_nflows;
@@ -84,13 +83,6 @@ private:
     static torch::Tensor release_time_tensor;
     static torch::Tensor flowid_to_nlinks_tensor;
     static torch::Tensor i_fct_tensor;
-    
-    // Additional tensors from @inference/ for complete ML pipeline
-    static torch::Tensor flowid_to_linkid_flat_tensor;
-    static torch::Tensor flowid_to_linkid_offsets_tensor;
-    static torch::Tensor edges_flow_ids_tensor;
-    static torch::Tensor edges_link_ids_tensor;
-    static torch::Tensor ones_cache;
     
     // Flow and graph management
     static int32_t n_flows_max;

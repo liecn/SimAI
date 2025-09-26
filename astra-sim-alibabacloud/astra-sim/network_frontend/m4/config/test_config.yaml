@@ -23,8 +23,8 @@ dataset:
 #   dctcp_k: 100.0         # DCTCP threshold parameter
 
 network:
-  buffer_size: 50.0    # Buffer size (bfsz parameter)
-  fwin: 50.0            # Flow window parameter  
+  buffer_size: 100.0    # Buffer size (bfsz parameter)
+  fwin: 100.0            # Flow window parameter  
   dctcp_k: 50.0         # DCTCP threshold parameter
 
 # M4-specific parameters

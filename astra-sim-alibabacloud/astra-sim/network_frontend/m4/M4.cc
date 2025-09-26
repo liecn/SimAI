@@ -55,7 +55,6 @@ bool M4::models_loaded = false;
 // NOTE: These tensors are initialized in SetupML() to avoid static initialization issues
 torch::Tensor M4::h_vec;
 torch::Tensor M4::flowid_active_mask;
-torch::Tensor M4::edge_index;
 torch::Tensor M4::z_t_link;
 torch::Tensor M4::link_to_graph_id;
 torch::Tensor M4::link_to_nflows;
@@ -64,13 +63,6 @@ torch::Tensor M4::time_last;
 torch::Tensor M4::release_time_tensor;
 torch::Tensor M4::flowid_to_nlinks_tensor;
 torch::Tensor M4::i_fct_tensor;
-
-// Additional tensors from @inference/ for complete ML pipeline
-torch::Tensor M4::flowid_to_linkid_flat_tensor;
-torch::Tensor M4::flowid_to_linkid_offsets_tensor;
-torch::Tensor M4::edges_flow_ids_tensor;
-torch::Tensor M4::edges_link_ids_tensor;
-torch::Tensor M4::ones_cache;
 
 // Flow and graph management
 int32_t M4::hidden_size_ = 200; // Model expects 214 total: 1+13+200=214 (matches main_m4_noflowsim.cpp)
@@ -294,25 +286,25 @@ void M4::SetupML() {
     flowid_to_nlinks_tensor = torch::zeros({n_flows_max}, options_int32);
     i_fct_tensor = torch::zeros({n_flows_max}, options_float);
     
-    // Initialize link state tensors
+    // Initialize per-link state
     z_t_link = torch::zeros({n_links_max_, hidden_size_}, options_float);
     z_t_link.index_put_({torch::arange(n_links_max_, device=device), 1}, 1.0f);
     z_t_link.index_put_({torch::arange(n_links_max_, device=device), 2}, 1.0f);
-    
-    // Initialize graph management tensors
     link_to_graph_id = -torch::ones({n_links_max_}, options_int32);
     link_to_nflows = torch::zeros({n_links_max_}, options_int32);
+    
+    // Initialize graph management tensors
     flow_to_graph_id = -torch::ones({n_flows_max}, options_int32);
     
     // Initialize empty edge_index - will be built dynamically as flows are added
-    edge_index = torch::empty({2, 0}, torch::TensorOptions().dtype(torch::kInt64).device(device));
+    // edge_index = torch::empty({2, 0}, torch::TensorOptions().dtype(torch::kInt64).device(device)); // This line was removed from header
     
     // Initialize additional tensors for complete ML pipeline
-    flowid_to_linkid_flat_tensor = torch::empty({0}, options_int32);
-    flowid_to_linkid_offsets_tensor = torch::empty({0}, options_int32);
-    edges_flow_ids_tensor = torch::empty({0}, options_int32);
-    edges_link_ids_tensor = torch::empty({0}, options_int32);
-    ones_cache = torch::ones({1000}, options_float); // Pre-allocate for efficiency
+    // flowid_to_linkid_flat_tensor = torch::empty({0}, options_int32); // This line was removed from header
+    // flowid_to_linkid_offsets_tensor = torch::empty({0}, options_int32); // This line was removed from header
+    // edges_flow_ids_tensor = torch::empty({0}, options_int32); // This line was removed from header
+    // edges_link_ids_tensor = torch::empty({0}, options_int32); // This line was removed from header
+    // ones_cache = torch::ones({1000}, options_float); // Pre-allocate for efficiency // This line was removed from header
     
     
     
@@ -342,13 +334,16 @@ void M4::OnFlowCompleted(const int flow_id) {
     // Links that became idle now
     auto idle_mask = (new_counts == 0);
     if (idle_mask.any().item<bool>()) {
-        auto idle_links = idx.masked_select(idle_mask);
-        // Clear graph id and reset z_t_link rows
-        link_to_graph_id.index_put_({idle_links}, -1);
-        auto reset_values = torch::zeros({idle_links.size(0), z_t_link.size(1)}, options_float);
-        z_t_link.index_put_({idle_links, torch::indexing::Slice()}, reset_values);
-        z_t_link.index_put_({idle_links, 1}, torch::ones({idle_links.size(0)}, options_float));
-        z_t_link.index_put_({idle_links, 2}, torch::ones({idle_links.size(0)}, options_float));
+        auto idle_links = torch::nonzero(idle_mask).flatten().to(torch::kInt64);
+        if (idle_links.numel() > 0) {
+            // Clear graph id and reset z_t_link rows
+            link_to_graph_id.index_put_({idle_links}, torch::full({idle_links.size(0)}, -1, options_int32));
+            auto reset_values = torch::zeros({idle_links.size(0), z_t_link.size(1)}, options_float);
+            z_t_link.index_put_({idle_links, torch::indexing::Slice()}, reset_values);
+            auto ones_vec = torch::ones({idle_links.size(0)}, options_float);
+            z_t_link.index_put_({idle_links, 1}, ones_vec);
+            z_t_link.index_put_({idle_links, 2}, ones_vec);
+        }
     }
 
     // Clear flow state
