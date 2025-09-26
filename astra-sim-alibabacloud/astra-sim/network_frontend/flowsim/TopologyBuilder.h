@@ -13,5 +13,3 @@ parse_fat_tree_topology_file(const std::string &topology_file);
  */
 [[nodiscard]] std::shared_ptr<Topology> construct_fat_tree_topology(
     const std::string& topology_file) noexcept;
-
-Bandwidth bw_GBps_to_Bpns(Bandwidth bw_GBps) noexcept;

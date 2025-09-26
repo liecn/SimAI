@@ -21,7 +21,8 @@ case "$1" in
     time AS_SEND_LAT=3 AS_NVLS_ENABLE=1 AS_FWIN=$((120 / M)) ./bin/SimAI_flowsim -w ./example/sweep/microAllReduce.txt -n ./example/sweep/$TOPOFILE -o ./results/flowsim_${N}_${M}/
     ;;
   ns3)
-    time AS_SEND_LAT=3 AS_NVLS_ENABLE=1 AS_FWIN=$((400 / M)) ./bin/SimAI_simulator -t 8 -w ./example/sweep/microAllReduce.txt -n ./example/sweep/$TOPOFILE -c ./example/sweep/SimAI.conf -o ./results/ns3_${N}_${M}/ -r
+    # time AS_SEND_LAT=3 AS_NVLS_ENABLE=1 AS_FWIN=$((400 / M)) ./bin/SimAI_simulator -t 8 -w ./example/sweep/microAllReduce.txt -n ./example/sweep/$TOPOFILE -c ./example/sweep/SimAI.conf -o ./results/ns3_${N}_${M}/ -r
+    time AS_SEND_LAT=3 AS_NVLS_ENABLE=1 AS_FWIN=100 ./bin/SimAI_simulator -t 8 -w ./example/sweep/microAllReduce.txt -n ./example/sweep/$TOPOFILE -c ./example/sweep/SimAI.conf -o ./results/ns3_${N}_${M}/ -r
     ;;
   m4)
     # time AS_SEND_LAT=3 AS_NVLS_ENABLE=1 AS_FWIN=$((200 / M)) ./bin/SimAI_m4 -w ./example/sweep/microAllReduce.txt -n ./example/sweep/$TOPOFILE -o ./results/m4_${N}_${M}/

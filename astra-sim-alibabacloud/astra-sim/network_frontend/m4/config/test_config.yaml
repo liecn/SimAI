@@ -16,12 +16,6 @@ dataset:
   enable_remainsize: False
   enable_queuelen: False
 
-# Network parameters for ML model
-# network:
-#   buffer_size: 800.0    # Buffer size (bfsz parameter)
-#   fwin: 200.0            # Flow window parameter  
-#   dctcp_k: 100.0         # DCTCP threshold parameter
-
 network:
   buffer_size: 100.0    # Buffer size (bfsz parameter)
   fwin: 100.0            # Flow window parameter  
@@ -29,7 +23,7 @@ network:
 
 # M4-specific parameters
 m4:
-  batch_size_flows: 64    # Process exactly N flows per ML update
+  batch_size_flows: 60    # Process exactly N flows per ML update
 
 # Model parameters
 model:

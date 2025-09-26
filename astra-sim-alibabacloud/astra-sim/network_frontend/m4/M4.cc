@@ -447,59 +447,30 @@ void M4::batch_timeout_callback(void* arg) {
 
 // Process final batch at simulation end (handles remaining flows in final time window)
 void M4::process_final_batch() {
-    // Stable finalize loop with safety limits to prevent infinite loops
-    int max_iterations = 1000; // Safety limit to prevent infinite loops
-    
-    while (max_iterations-- > 0) {
-        // Drain any outstanding events to enqueue delayed sends (with limit)
-        int drain_limit = 10000; // Prevent infinite event processing
-        while (!event_queue->finished() && drain_limit-- > 0) {
-            // Safety check: only proceed if event queue is in valid state
-            if (event_queue->finished()) break;
-            try {
-                event_queue->proceed();
-            } catch (...) {
-                // If proceed fails, break out of drain loop
-                break;
-            }
+    // Drain-and-process loop until no pending flows and no scheduled events remain
+    for (;;) {
+        // Fully drain all scheduled events (safe: EventQueue pops before invoke)
+        while (!event_queue->finished()) {
+            event_queue->proceed();
         }
-        
-        // If no pending flows, we are done
+
+        // If no pending flows remain after draining, we're done
         if (pending_flows_.empty()) {
             break;
         }
-        
-        // Process all full N-chunks
+
+        // Process all full batches
         while ((int)pending_flows_.size() >= batch_size_flows_) {
             process_batch_of_flows_count(batch_size_flows_);
         }
-        
-        // Process remaining partial once
+
+        // Process any remaining partial batch
         if (!pending_flows_.empty()) {
             process_batch_of_flows_count((int32_t)pending_flows_.size());
         }
-        
-        // Drain scheduled completions before checking again (with limit)
-        drain_limit = 10000;
-        while (!event_queue->finished() && drain_limit-- > 0) {
-            // Safety check: only proceed if event queue is in valid state
-            if (event_queue->finished()) break;
-            try {
-                event_queue->proceed();
-            } catch (...) {
-                // If proceed fails, break out of drain loop
-                break;
-            }
-        }
-        
-        // If nothing new arrived during completion processing, exit
-        if (pending_flows_.empty()) {
-            break;
-        }
-    }
-    
-    if (max_iterations <= 0) {
-        std::cerr << "[M4] Warning: process_final_batch() hit iteration limit, may have incomplete flows" << std::endl;
+
+        // Loop again to drain the completions we just scheduled and catch any
+        // new pending flows triggered by callbacks.
     }
 }
 
@@ -715,13 +686,13 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
                 }
                 
                 // Log GNN update details
-                int n_link_nodes = active_link_idx.size(0);
-                int n_edges = edges_list_active.size(1);
-                int total_active_flows = flowid_active_list_all.size(0);
-                std::cout << "[GNN Update] Flow nodes: " << n_flows_active_cur << "/" << total_active_flows << " (interacting/total_active)"
-                          << ", Link nodes: " << n_link_nodes 
-                          << ", Edges: " << n_edges 
-                          << ", Time: " << (max_time_delta) << "μs" << std::endl;
+                // int n_link_nodes = active_link_idx.size(0);
+                // int n_edges = edges_list_active.size(1);
+                // int total_active_flows = flowid_active_list_all.size(0);
+                // std::cout << "[GNN Update] Flow nodes: " << n_flows_active_cur << "/" << total_active_flows << " (interacting/total_active)"
+                //           << ", Link nodes: " << n_link_nodes 
+                //           << ", Edges: " << n_edges 
+                //           << ", Time: " << (max_time_delta) << "μs" << std::endl;
                 
                 std::vector<torch::Tensor> tensors_to_cat = {h_vec_time_updated, h_vec_time_link_updated};
                 auto x_combined = torch::cat(tensors_to_cat, 0);

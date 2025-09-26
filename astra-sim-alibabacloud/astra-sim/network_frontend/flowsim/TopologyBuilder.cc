@@ -11,17 +11,25 @@ std::tuple<int, int, std::vector<int>, std::vector<std::tuple<int, int, double, 
         throw std::runtime_error("Failed to open topology file");
     }
 
-    int npus_count;
-    int switch_node_count;
-    int link_count;
+    // Sweep topo header: node_num gpus_per_server nvswitch_num switch_num link_num gpu_type
+    int node_num = 0;
+    int gpus_per_server = 0;
+    int nvswitch_num = 0;
+    int switch_num = 0;
+    int link_num = 0;
     std::vector<int> switch_node_ids;
     std::vector<std::tuple<int, int, double, double, double>> links;
 
     std::string line;
     std::getline(file, line);
-    std::istringstream iss(line);
-    iss >> npus_count >> switch_node_count >> link_count;
-    npus_count-=switch_node_count;
+    {
+        std::istringstream iss(line);
+        std::string gpu_type_str;
+        iss >> node_num >> gpus_per_server >> nvswitch_num >> switch_num >> link_num >> gpu_type_str;
+        if (!iss) {
+            throw std::runtime_error("Invalid topology header: " + line);
+        }
+    }
 
     std::getline(file, line);
     std::istringstream iss_switches(line);
@@ -36,31 +44,41 @@ std::tuple<int, int, std::vector<int>, std::vector<std::tuple<int, int, double, 
         std::string rate_str, delay_str, error_rate_str;
         std::istringstream iss_link(line);
         iss_link >> src >> dst >> rate_str >> delay_str >> error_rate_str;
-        // Parse bandwidth: input is in Gbps, need to convert to Bytes/ns
-        double rate_gbps = std::stod(rate_str.substr(0, rate_str.size() - 3)); // Removing "bps", get Gbps
-        // Convert Gbps to Bytes/ns:
-        // Gbps -> GB/s: divide by 8 (bits to bytes)
-        // GB/s -> Bytes/ns: multiply by 1e9/1e9 = 1 (since 1 GB/s = 1 Byte/ns numerically)
-        rate = rate_gbps / 8.0;  // Convert Gbps to GB/s, which equals Bytes/ns numerically
-        
-        // Parse delay: input is in milliseconds (e.g., "0.000025ms"), need to convert to nanoseconds
-        double delay_ms = std::stod(delay_str.substr(0, delay_str.size() - 2)); // Removing "ms"
-        delay = delay_ms * 1e6; // Convert milliseconds to nanoseconds (1 ms = 1e6 ns)
+        if (rate_str.size() >= 4 && rate_str.substr(rate_str.size() - 4) == "Gbps") {
+            double gbps = std::stod(rate_str.substr(0, rate_str.size() - 4));
+            rate = gbps / 8.0;
+        } else {
+            throw std::runtime_error("Unsupported bandwidth unit in: " + rate_str);
+        }
+
+        if (delay_str.size() >= 2 && delay_str.substr(delay_str.size() - 2) == "ms") {
+            double ms = std::stod(delay_str.substr(0, delay_str.size() - 2));
+            delay = ms * 1e6;
+        } else if (delay_str.size() >= 2 && delay_str.substr(delay_str.size() - 2) == "ns") {
+            delay = std::stod(delay_str.substr(0, delay_str.size() - 2));
+        } else {
+            throw std::runtime_error("Unsupported latency unit in: " + delay_str);
+        }
         error_rate = std::stod(error_rate_str);
         links.emplace_back(src, dst, rate, delay, error_rate);
     }
 
-    return std::make_tuple(npus_count, switch_node_count, switch_node_ids, links);
+    int npus_count = node_num - nvswitch_num - switch_num;
+    if (npus_count <= 0) {
+        throw std::runtime_error("Invalid computed NPU count from topology header");
+    }
+    int non_npu_nodes = nvswitch_num + switch_num;
+    return std::make_tuple(npus_count, non_npu_nodes, switch_node_ids, links);
 }
 
 std::shared_ptr<Topology> construct_fat_tree_topology(const std::string& topology_file) noexcept {
     //std::cerr << "Constructing Fat-Tree topology from file: " << topology_file << std::endl;
 
     // Parse the topology file
-    auto [npus_count, switch_node_count, switch_node_ids, links] = parse_fat_tree_topology_file(topology_file);
+    auto [npus_count, non_npu_nodes, switch_node_ids, links] = parse_fat_tree_topology_file(topology_file);
 
     // Create an instance of FatTreeTopology
-    auto fat_tree_topology = std::make_shared<Topology>(npus_count + switch_node_count, npus_count);
+    auto fat_tree_topology = std::make_shared<Topology>(npus_count + non_npu_nodes, npus_count);
     for (const auto& link : links) {
         int src = std::get<0>(link);
         int dest = std::get<1>(link);
@@ -72,13 +90,4 @@ std::shared_ptr<Topology> construct_fat_tree_topology(const std::string& topolog
     }
 
     return fat_tree_topology;
-}
-
-// Convert bandwidth expressed in Gbps (gigabits per second) to Bytes per nanosecond.
-//   1 Gbit  = 1e9 bits
-//   1 Byte  = 8 bits
-//   1 second= 1e9 nanoseconds
-Bandwidth bw_GBps_to_Bpns(const Bandwidth bw_Gbps) noexcept {
-    assert(bw_Gbps > 0);
-    return bw_Gbps; // Bytes per ns
 }
