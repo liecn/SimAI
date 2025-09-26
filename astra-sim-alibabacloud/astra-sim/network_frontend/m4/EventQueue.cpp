@@ -94,3 +94,9 @@ EventId EventQueue::schedule_event(
   return event_id;
 }
 
+void EventQueue::cancel_event(EventId event_id) noexcept {
+  for (auto it = event_queue.begin(); it != event_queue.end(); ++it) {
+    it->remove_event(event_id);
+  }
+}
+

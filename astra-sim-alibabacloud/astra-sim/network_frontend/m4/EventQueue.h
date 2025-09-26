@@ -55,11 +55,9 @@ class EventQueue {
       CallbackArg callback_arg) noexcept;
 
   /**
-   * Cancel a scheduled event.
-   *
-   * @param event_id ID of the event to cancel
+   * Cancel a scheduled event by ID.
    */
-  //void cancel_event(EventId event_id) noexcept;
+  void cancel_event(EventId event_id) noexcept;
 
   void log_events();
 

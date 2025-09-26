@@ -107,6 +107,7 @@ private:
     static bool is_processing_batch_;
     
     // (removed) inference-style single-flow tracking
+    static std::unordered_map<int32_t, EventId> flow_id_to_completion_event_id;
 
 public:
     // Type definitions (same as FlowSim)

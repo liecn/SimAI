@@ -350,6 +350,12 @@ void M4::OnFlowCompleted(const int flow_id) {
     flowid_active_mask[flow_id] = false;
     flow_to_graph_id[flow_id] = -1;
     
+    // Remove any stored completion event id (should be gone already after firing)
+    auto it_e = flow_id_to_completion_event_id.find(flow_id);
+    if (it_e != flow_id_to_completion_event_id.end()) {
+        flow_id_to_completion_event_id.erase(it_e);
+    }
+    
     // Update counter and check equation: active = arrived - completed
     n_flows_completed++;
     int32_t n_flows_active_current = torch::nonzero(flowid_active_mask).flatten().numel();
@@ -627,13 +633,14 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
     }
 
     // Evolve states for interacting flows (LSTM -> GNN) before prediction
+    // Declare interacting set outside the block to reuse below for rescheduling
+    std::set<int32_t> interacting_flows;
     {
         torch::NoGradGuard no_grad;
         time_clock = static_cast<float>(current_time);
         
         // Batch-local graph: Only process flows that interact with the current batch
         // Step 1: Find flows that share links with the current batch
-        std::set<int32_t> interacting_flows;
         // Add current batch flows
         for (int64_t fid : flow_ids_batch) {
             interacting_flows.insert((int32_t)fid);
@@ -732,6 +739,63 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
                 z_t_link.index_copy_(0, active_link_idx.to(torch::kInt64), h_vec_rate_link);
                 // Update time_last only for flows that participated in this GNN update
                 time_last.index_put_({torch::indexing::TensorIndex(subset_indices)}, time_clock);
+            }
+        }
+    }
+
+    // Reschedule completions for interacting active flows (including current batch flows)
+    if (!interacting_flows.empty()) {
+        std::vector<int32_t> flowid_interacting_vec(interacting_flows.begin(), interacting_flows.end());
+        std::sort(flowid_interacting_vec.begin(), flowid_interacting_vec.end());
+        auto flowid_interacting_tensor = torch::tensor(flowid_interacting_vec, torch::TensorOptions().dtype(torch::kInt32).device(device)).to(torch::kInt64);
+
+        // Build a set of current batch flows to avoid double scheduling
+        std::unordered_set<int32_t> current_batch_set;
+        current_batch_set.reserve(flow_ids_batch.size());
+        for (int64_t fid64 : flow_ids_batch) { current_batch_set.insert((int32_t)fid64); }
+
+        // Build inputs for interacting flows using current h_vec and nlinks
+        int n_inter = (int)flowid_interacting_vec.size();
+        auto h_vec_inter = h_vec.index_select(0, flowid_interacting_tensor);
+        auto nlinks_inter = flowid_to_nlinks_tensor.index_select(0, flowid_interacting_tensor).unsqueeze(1);
+        auto params_inter = params_tensor.unsqueeze(0).repeat({n_inter, 1});
+        auto input_inter = torch::cat(std::vector<torch::Tensor>{nlinks_inter, params_inter, h_vec_inter}, 1);
+
+        auto sldn_inter = output_layer.forward(std::vector<c10::IValue>{input_inter}).toTensor().view(-1);
+        sldn_inter = torch::clamp(sldn_inter, 1.0f, std::numeric_limits<float>::infinity());
+        auto sldn_inter_cpu = sldn_inter.to(torch::kCPU);
+        auto sldn_ptr = sldn_inter_cpu.data_ptr<float>();
+
+        // Helper to find active flow pointer by id
+        auto find_flow_ptr = [&](int32_t fid) -> M4Flow* {
+            for (auto &ptr : active_flows_ptrs) {
+                if (ptr && ptr->flow_id == fid) return ptr.get();
+            }
+            return nullptr;
+        };
+
+        for (int i = 0; i < n_inter; ++i) {
+            int32_t fid = flowid_interacting_vec[i];
+            // Skip if not active or if it belongs to the current batch (will be scheduled below)
+            if (!(bool)flowid_active_mask[fid].item<bool>()) continue;
+            if (current_batch_set.find(fid) != current_batch_set.end()) continue;
+
+            float slowdown = sldn_ptr[i];
+            float predicted_fct = slowdown * i_fct_tensor[fid].item<float>();
+            uint64_t completion_time = static_cast<uint64_t>(current_time + (uint64_t)predicted_fct);
+
+            // Cancel existing scheduled completion (if any)
+            auto it_e = flow_id_to_completion_event_id.find(fid);
+            if (it_e != flow_id_to_completion_event_id.end()) {
+                event_queue->cancel_event(it_e->second);
+                flow_id_to_completion_event_id.erase(it_e);
+            }
+
+            // Schedule new completion using stored callback/arg
+            M4Flow* fptr = find_flow_ptr(fid);
+            if (fptr && fptr->callback) {
+                EventId eid = event_queue->schedule_event(completion_time, fptr->callback, fptr->callbackArg);
+                flow_id_to_completion_event_id[fid] = eid;
             }
         }
     }
@@ -837,8 +901,9 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
             float raw_slowdown = sldn_data[batch_idx];
             
             float z_score = (raw_slowdown - batch_mean) / batch_std;
-            z_score = std::max(-1.0f, std::min(1.0f, z_score));
-            float scaled_slowdown = raw_slowdown;
+            z_score = std::max(-0.8f, std::min(0.8f, z_score));
+            // float scaled_slowdown = raw_slowdown;
+            float scaled_slowdown = batch_mean+z_score*batch_std;
             
             // Only enforce physical constraint: slowdown >= 1.0
             scaled_slowdown = std::max(scaled_slowdown, 1.0f);
@@ -847,7 +912,8 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
             uint64_t completion_time = current_time + (uint64_t)predicted_fct;
             
             // Schedule original callback - M4Network.cc handles collective completion correctly
-            event_queue->schedule_event(completion_time, flow->callback, flow->callbackArg);
+            EventId eid = event_queue->schedule_event(completion_time, flow->callback, flow->callbackArg);
+            flow_id_to_completion_event_id[flow_id] = eid;
         }
     }
     
@@ -875,4 +941,8 @@ void M4::Destroy() {
     topology.reset();
     event_queue.reset();
 }
+
+std::unordered_map<int32_t, EventId> M4::flow_id_to_completion_event_id;
+
+static inline float clamp_ge1(float v) { return v < 1.0f ? 1.0f : v; }
 
