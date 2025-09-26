@@ -104,74 +104,60 @@ static void m4_completion_callback(void* arg) {
     
     // Record the actual completion time when callback is triggered
     data->actual_completion_time = M4::Now();
-    
-    // Copy FlowSim's exact logic
-    bool sender_done = is_sending_finished(data->src, data->dst, data->flowTag);
-    if (sender_done) {
-        data->network->notify_sender_sending_finished(data->src, data->dst, data->count, data->flowTag);
+
+    // In M4 we schedule exactly one completion per send; log and notify unconditionally
+    data->network->notify_sender_sending_finished(data->src, data->dst, data->count, data->flowTag);
+
+    // Open FCT file on first use
+    if (g_fct_output_file == nullptr) {
+        std::string fct_file_path = data->network->result_dir + "m4_fct.txt";
+        ensure_dir(data->network->result_dir.c_str());
+        g_fct_output_file = fopen(fct_file_path.c_str(), "w");
     }
-    
-    bool receiver_done = is_receive_finished(data->src, data->dst, data->flowTag);
-    if (receiver_done) {
-        // Copy FlowSim's simple file opening approach
-        if (g_fct_output_file == nullptr) {
-            std::string fct_file_path = data->network->result_dir + "m4_fct.txt";
-            ensure_dir(data->network->result_dir.c_str());
-            g_fct_output_file = fopen(fct_file_path.c_str(), "w");
+    if (g_fct_output_file) {
+        auto flow_key = std::make_tuple(data->flowTag.tag_id, data->flowTag.current_flow_id, data->src, data->dst);
+        auto it = flow_start_times.find(flow_key);
+        uint64_t start_time = 0;
+        if (it != flow_start_times.end()) {
+            start_time = it->second;
+            flow_start_times.erase(it);
+        } else {
+            // Fallback: use start_time stored in callback data if key was overwritten
+            start_time = data->start_time;
         }
-        if (g_fct_output_file) {
-            auto flow_key = std::make_tuple(data->flowTag.tag_id, data->flowTag.current_flow_id, data->src, data->dst);
-            auto it = flow_start_times.find(flow_key);
-            if (it != flow_start_times.end()) {
-                uint64_t start_time = it->second;
-                
-                // Calculate FCT (same as FlowSim approach)
-                uint64_t fct_ns = data->actual_completion_time - start_time;
-                
-                flow_start_times.erase(it);
+        if (start_time > 0 && data->actual_completion_time >= start_time) {
+            uint64_t fct_ns = data->actual_completion_time - start_time;
 
-                uint32_t src_ip = 0u;
-                uint32_t dst_ip = 0u;
-                unsigned int src_port = 0u;
-                unsigned int dst_port = 0u;
-                
-                // Use routing framework's pre-computed RTT and bandwidth (same as NS3)
-                const AstraSim::RoutingFramework* rf = M4::GetRoutingFramework();
-                if (!rf) {
-                    throw std::runtime_error("[M4 ERROR] RoutingFramework is null when computing standalone_fct (send)");
-                }
-                
-                uint64_t base_rtt = rf->GetPairRtt(data->src, data->dst);
-                uint64_t b_bps = rf->GetPairBandwidth(data->src, data->dst);
-                
-                const uint32_t packet_payload_size = 1000u;
-                const uint32_t header_overhead = 52u; // 14(L2)+20(L3)+8(UDP)+2(pg)+8(seq)
-                uint64_t num_pkts = (data->count + packet_payload_size - 1) / packet_payload_size;
-                uint64_t total_bytes = data->count + num_pkts * header_overhead;
-                
-                // Use NS3's exact calculation: base_rtt + total_bytes * 8000000000lu / b
-                uint64_t standalone_fct = base_rtt + total_bytes * 8000000000lu / b_bps;
+            uint32_t src_ip = 0u;
+            uint32_t dst_ip = 0u;
+            unsigned int src_port = 0u;
+            unsigned int dst_port = 0u;
 
-                // Copy FlowSim's exact FCT write format
-                fprintf(g_fct_output_file, "%08x %08x %u %u %lu %lu %lu %lu %d\n",
-                        src_ip, dst_ip, src_port, dst_port, data->count, start_time, fct_ns, standalone_fct,
-                        data->flowTag.current_flow_id);
-                
-                // Log first FCT like FlowSim
-                if (g_fct_lines_written == 0) {
-                    std::cout << "[M4] First FCT: " << (fct_ns/1000.0) << "μs" << std::endl;
-                }
-                fflush(g_fct_output_file);
-                ++g_fct_lines_written;
+            const AstraSim::RoutingFramework* rf = M4::GetRoutingFramework();
+            if (!rf) {
+                throw std::runtime_error("[M4 ERROR] RoutingFramework is null when computing standalone_fct (send)");
             }
-        }
+            uint64_t base_rtt = rf->GetPairRtt(data->src, data->dst);
+            uint64_t b_bps = rf->GetPairBandwidth(data->src, data->dst);
+            const uint32_t packet_payload_size = 1000u;
+            const uint32_t header_overhead = 52u;
+            uint64_t num_pkts = (data->count + packet_payload_size - 1) / packet_payload_size;
+            uint64_t total_bytes = data->count + num_pkts * header_overhead;
+            uint64_t standalone_fct = base_rtt + total_bytes * 8000000000lu / b_bps;
 
-        data->network->notify_receiver_packet_arrived(data->src, data->dst, data->count, data->flowTag);
-        
-        M4::OnFlowCompleted(data->flowTag.current_flow_id);
-        
+            fprintf(g_fct_output_file, "%08x %08x %u %u %lu %lu %lu %lu %d\n",
+                    src_ip, dst_ip, src_port, dst_port, data->count, start_time, fct_ns, standalone_fct,
+                    data->flowTag.current_flow_id);
+            if (g_fct_lines_written == 0) {
+                std::cout << "[M4] First FCT: " << (fct_ns/1000.0) << "μs" << std::endl;
+            }
+            fflush(g_fct_output_file);
+            ++g_fct_lines_written;
+        }
     }
-    
+
+    data->network->notify_receiver_packet_arrived(data->src, data->dst, data->count, data->flowTag);
+    M4::OnFlowCompleted(data->flowTag.current_flow_id);
 }
 
 M4Network::~M4Network() {
@@ -257,6 +243,8 @@ int M4Network::sim_send(void* buffer, uint64_t count, int type, int dst, int tag
     uint64_t actual_start_time = start + send_lat;
     auto flow_key = std::make_tuple(request->flowTag.tag_id, request->flowTag.current_flow_id, rank, dst);
     flow_start_times[flow_key] = actual_start_time;
+    // Also store in callback data for fallback logging
+    send_data->start_time = actual_start_time;
 
     // Schedule M4::Send with the same delay as FlowSim
     M4::Schedule(send_lat, [](void* arg) {
@@ -265,6 +253,7 @@ int M4Network::sim_send(void* buffer, uint64_t count, int type, int dst, int tag
         uint64_t actual_start = static_cast<uint64_t>(M4::Now());
         auto flow_key = std::make_tuple(data->flowTag.tag_id, data->flowTag.current_flow_id, data->src, data->dst);
         flow_start_times[flow_key] = actual_start;  // Update with actual start time
+        data->start_time = actual_start;            // Keep in callback data as well
         
         M4::Send(data->src, data->dst, data->count, data->flowTag.tag_id, m4_completion_callback, data);
     }, send_data);

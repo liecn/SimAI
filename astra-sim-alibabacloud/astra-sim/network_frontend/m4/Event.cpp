@@ -9,8 +9,10 @@ Event::Event(EventTime event_time, const Callback callback, const CallbackArg ca
 }
 
 void Event::invoke_event() noexcept {
-    // check the validity of the event
-    assert(callback != nullptr);
+    // check the validity of the event - return safely if null
+    if (callback == nullptr) {
+        return;
+    }
 
     // invoke the callback function
     (*callback)(callback_arg);
@@ -21,8 +23,10 @@ EventTime Event::get_time() noexcept {
 }
 
 std::pair<Callback, CallbackArg> Event::get_handler_arg() const noexcept {
-    // check the validity of the event
-    assert(callback != nullptr);
+    // check the validity of the event - return null pair if invalid
+    if (callback == nullptr) {
+        return {nullptr, nullptr};
+    }
 
     return {callback, callback_arg};
 }

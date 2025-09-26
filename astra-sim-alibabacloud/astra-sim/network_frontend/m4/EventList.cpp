@@ -25,7 +25,10 @@ void EventList::add_event(
 void EventList::invoke_events() noexcept {
   // invoke all events in the event list
   for (const auto& event : events) {
-    event.callback(event.callback_arg);
+    // Safety check for null callback before invoking
+    if (event.callback != nullptr) {
+      event.callback(event.callback_arg);
+    }
   }
   events.clear();
 }
@@ -36,7 +39,11 @@ void EventList::invoke_event() noexcept {
   }
   auto const& event = events.front();
   events.pop_front();
-  event.callback(event.callback_arg);
+  
+  // Safety check for null callback before invoking
+  if (event.callback != nullptr) {
+    event.callback(event.callback_arg);
+  }
 }
 
 bool EventList::empty() noexcept {

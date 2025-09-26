@@ -283,10 +283,10 @@ int main(int argc,char *argv[]) {
   // Get actual routing statistics from M4
   const AstraSim::RoutingFramework* routing_framework = M4::GetRoutingFramework();
   
-  // Clean shutdown (same as FlowSim)
+  // Clean shutdown: avoid exit-time destructor issues
   M4::Stop();
-  M4::Destroy();
-
+  // Skip M4::Destroy() to avoid segfault during cleanup
+  
   std::cout << "[M4] SimAI-M4 finished" << std::endl;
   return 0;
 };

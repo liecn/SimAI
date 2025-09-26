@@ -29,7 +29,7 @@ network:
 
 # M4-specific parameters
 m4:
-  batch_window_ns: 300     # Process every N flows together (deterministic batching)
+  batch_size_flows: 128    # Process exactly N flows per ML update
 
 # Model parameters
 model:

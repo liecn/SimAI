@@ -75,7 +75,7 @@ torch::Tensor M4::ones_cache;
 // Flow and graph management
 int32_t M4::hidden_size_ = 200; // Model expects 214 total: 1+13+200=214 (matches main_m4_noflowsim.cpp)
 int32_t M4::n_links_max_ = 128;
-uint64_t M4::batch_window_ns_ = 100; // Temporal batching window in nanoseconds
+int32_t M4::batch_size_flows_ = 128; // Flow-count batching size
 int32_t M4::n_flows_max = 50000;  // Large enough for simulation
 int32_t M4::graph_id_cur = 0;
 float M4::time_clock = 0.0f;
@@ -93,8 +93,8 @@ static int32_t n_flows_completed = 0;
 // FlowSim-style temporal batching
 std::vector<M4Flow*> M4::pending_flows_;
 std::list<std::unique_ptr<M4Flow>> M4::active_flows_ptrs;
-uint64_t M4::last_batch_time_ = 0;
 int M4::batch_timeout_event_id_ = 0;
+bool M4::is_processing_batch_ = false;
 
 // (removed) legacy inference-style flow completion tracking
 
@@ -228,7 +228,7 @@ void M4::SetupML() {
             try {
                 auto m4_node = config["m4"];
                 if (!m4_node.invalid()) {
-                    try { m4_node["batch_window_ns"] >> batch_window_ns_; } catch(...) {}
+                    try { m4_node["batch_size_flows"] >> batch_size_flows_; } catch(...) {}
                 }
             } catch(...) {
                 // m4 section doesn't exist, use defaults
@@ -276,7 +276,7 @@ void M4::SetupML() {
     float topo_latency = topology->get_latency(); // in ns
     
     std::cout << "[M4] Loaded network parameters from config: bfsz=" << param_values[0] << ", fwin=" << param_values[1] 
-              << ", cc=dctcp, u_tgt=" << param_values[9] << ", dctcp_k=" << param_values[6] << ", topology_bw=" << (topo_bandwidth * 8.0) << "Gbps, topology_lat=" << topo_latency << "ns, batch_window_ns=" << batch_window_ns_ << std::endl;
+              << ", cc=dctcp, u_tgt=" << param_values[9] << ", dctcp_k=" << param_values[6] << ", topology_bw=" << (topo_bandwidth * 8.0) << "Gbps, topology_lat=" << topo_latency << "ns, batch_size_flows=" << batch_size_flows_ << std::endl;
     
     // Initialize multi-flow state tensors (from @inference/ ground truth)
     auto options_float = torch::TensorOptions().dtype(torch::kFloat32).device(device);
@@ -427,49 +427,98 @@ void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, Callb
         m4_flow->flow_id = cd->flowTag.current_flow_id;
     }
 
-    // Add to pending batch for temporal processing (like FlowSim's pending_chunks_)
+    // Add to pending batch for flow-count processing
     pending_flows_.push_back(m4_flow.get());
     // Keep ownership in active_flows_ptrs until batch processing
     active_flows_ptrs.push_back(std::move(m4_flow));
     
-    // Batch flows that arrive within a small time window
-    const auto current_time = event_queue->get_current_time(); 
-    
-    // Start a new batch if no batch is pending, or if too much time has passed
-    if (batch_timeout_event_id_ == 0 || (current_time - last_batch_time_) > batch_window_ns_) {
-        last_batch_time_ = current_time;
-        // Schedule processing after the batch window expires
-        batch_timeout_event_id_ = event_queue->schedule_event(current_time + batch_window_ns_, batch_timeout_callback, nullptr);
+    // Flow-count batching: trigger when we have enough flows
+    const auto current_time = event_queue->get_current_time();
+    if (batch_timeout_event_id_ == 0 && (int)pending_flows_.size() >= batch_size_flows_) {
+        batch_timeout_event_id_ = event_queue->schedule_event(current_time, batch_timeout_callback, nullptr);
     }
 }
 
 // Batch processing callback (following FlowSim's pattern)
 void M4::batch_timeout_callback(void* arg) {
-    process_batch_of_flows();
+    process_batch_of_flows_count(batch_size_flows_);
 }
 
 // Process final batch at simulation end (handles remaining flows in final time window)
 void M4::process_final_batch() {
-    if (!pending_flows_.empty()) {
-        std::cout << "[M4] Processing final batch of " << pending_flows_.size() << " remaining flows" << std::endl;
-        process_batch_of_flows();
+    // Stable finalize loop with safety limits to prevent infinite loops
+    int max_iterations = 1000; // Safety limit to prevent infinite loops
+    
+    while (max_iterations-- > 0) {
+        // Drain any outstanding events to enqueue delayed sends (with limit)
+        int drain_limit = 10000; // Prevent infinite event processing
+        while (!event_queue->finished() && drain_limit-- > 0) {
+            // Safety check: only proceed if event queue is in valid state
+            if (event_queue->finished()) break;
+            try {
+                event_queue->proceed();
+            } catch (...) {
+                // If proceed fails, break out of drain loop
+                break;
+            }
+        }
+        
+        // If no pending flows, we are done
+        if (pending_flows_.empty()) {
+            break;
+        }
+        
+        // Process all full N-chunks
+        while ((int)pending_flows_.size() >= batch_size_flows_) {
+            process_batch_of_flows_count(batch_size_flows_);
+        }
+        
+        // Process remaining partial once
+        if (!pending_flows_.empty()) {
+            process_batch_of_flows_count((int32_t)pending_flows_.size());
+        }
+        
+        // Drain scheduled completions before checking again (with limit)
+        drain_limit = 10000;
+        while (!event_queue->finished() && drain_limit-- > 0) {
+            // Safety check: only proceed if event queue is in valid state
+            if (event_queue->finished()) break;
+            try {
+                event_queue->proceed();
+            } catch (...) {
+                // If proceed fails, break out of drain loop
+                break;
+            }
+        }
+        
+        // If nothing new arrived during completion processing, exit
+        if (pending_flows_.empty()) {
+            break;
+        }
+    }
+    
+    if (max_iterations <= 0) {
+        std::cerr << "[M4] Warning: process_final_batch() hit iteration limit, may have incomplete flows" << std::endl;
     }
 }
 
 // FlowSim-style batch processing with inference ML logic
 void M4::process_batch_of_flows() {
-    if (pending_flows_.empty()) {
+    process_batch_of_flows_count((int32_t)pending_flows_.size());
+}
+
+void M4::process_batch_of_flows_count(int32_t max_flows) {
+    if (pending_flows_.empty() || max_flows <= 0) {
         return;
     }
-    
-    // Reset batch event ID
+    // Reset batch event ID to allow next scheduling
     batch_timeout_event_id_ = 0;
-    
-    // Process ALL pending flows (same as temporal batching)
-    std::vector<M4Flow*> flows_to_process = pending_flows_;
-    
-    // Clear all pending flows
-    pending_flows_.clear();
+    // Take exactly max_flows from the front
+    int32_t take = std::min((int32_t)pending_flows_.size(), max_flows);
+    std::vector<M4Flow*> flows_to_process;
+    flows_to_process.reserve(take);
+    for (int32_t i = 0; i < take; ++i) flows_to_process.push_back(pending_flows_[i]);
+    pending_flows_.erase(pending_flows_.begin(), pending_flows_.begin() + take);
     
     const auto current_time = event_queue->get_current_time();
     time_clock = static_cast<float>(current_time);

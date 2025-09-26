@@ -39,8 +39,7 @@ class EventQueue {
    */
   void proceed() noexcept;
 
-  void schedule_arrival(EventTime arrival_time, Callback callback, CallbackArg callback_arg) noexcept;
-  void schedule_completion(EventTime completion_time, Callback callback, CallbackArg callback_arg) noexcept;
+  // M4-style single event methods removed - using FlowSim-style queue only
 
   /**
    * Schedule an event with a given event time.
@@ -62,8 +61,6 @@ class EventQueue {
    */
   //void cancel_event(EventId event_id) noexcept;
 
-  void cancel_completion();
-
   void log_events();
 
  private:
@@ -75,10 +72,6 @@ class EventQueue {
 
   /// FlowSim-style event queue for multiple concurrent events
   std::list<EventList> event_queue;
-
-  // Storage for next events (M4-style compatibility)
-  Event* next_arrival;
-  Event* next_completion;
 };
 
 #endif // _EVENTQUEUE_

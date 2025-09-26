@@ -71,7 +71,7 @@ private:
     static int32_t n_links_max_;
     
     // M4-specific configuration parameters
-    static uint64_t batch_window_ns_; // Temporal batching window in nanoseconds
+    static int32_t batch_size_flows_; // Flow-count batching size
     
     static torch::Tensor h_vec;
     static torch::Tensor flowid_active_mask;
@@ -108,11 +108,11 @@ private:
     
     
     
-    // FlowSim-style temporal batching
+    // Flow-count batching state
     static std::vector<M4Flow*> pending_flows_;
     static std::list<std::unique_ptr<M4Flow>> active_flows_ptrs;
-    static uint64_t last_batch_time_;
     static int batch_timeout_event_id_;
+    static bool is_processing_batch_;
     
     // (removed) inference-style single-flow tracking
 
@@ -139,8 +139,9 @@ public:
     static int AddActiveFlow(int src, int dst, uint64_t size, const std::vector<int>& node_path, Callback callback, CallbackArg callbackArg);
     
     // ML batch processing function (uses @inference/ approach: MLP for prediction, LSTM+GNN for state updates)
-    // FlowSim-style batch processing
+    // Flow-count batch processing
     static void process_batch_of_flows();
+    static void process_batch_of_flows_count(int32_t max_flows);
     static void batch_timeout_callback(void* arg);
     static void process_final_batch(); // Process remaining pending flows at simulation end
     
