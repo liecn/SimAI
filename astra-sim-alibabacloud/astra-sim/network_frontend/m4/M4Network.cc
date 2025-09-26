@@ -64,48 +64,17 @@ static FILE* g_fct_output_file = nullptr;
 static int m4_send_count = 0;
 static int m4_callback_count = 0;
 
-static std::map<std::pair<int, std::pair<int, int>>, int> waiting_to_sent_callback;
-static std::map<std::pair<int, std::pair<int, int>>, int> waiting_to_notify_receiver;
-
-// Copy FlowSim's exact dependency checking functions
-bool is_sending_finished(int src, int dst, AstraSim::ncclFlowTag flowTag) {
-    int dep_cur_id = flowTag.current_flow_id;
-    auto dep_key = std::make_pair(dep_cur_id, std::make_pair(src, dst));
-    if (waiting_to_sent_callback.find(dep_key) != waiting_to_sent_callback.end()) {
-        waiting_to_sent_callback[dep_key]--;
-        if (waiting_to_sent_callback[dep_key] <= 0) {
-            waiting_to_sent_callback.erase(dep_key);
-            return true;
-        }
-        return false;
-    }
-    return true;
-}
-
-bool is_receive_finished(int src, int dst, AstraSim::ncclFlowTag flowTag) {
-    int dep_cur_id = flowTag.current_flow_id;
-    auto dep_key = std::make_pair(dep_cur_id, std::make_pair(src, dst));
-    if (waiting_to_notify_receiver.find(dep_key) != waiting_to_notify_receiver.end()) {
-        waiting_to_notify_receiver[dep_key]--;
-        if (waiting_to_notify_receiver[dep_key] <= 0) {
-            waiting_to_notify_receiver.erase(dep_key);
-            return true;
-        }
-        return false;
-    }
-    return true;
-}
 
 // M4 completion callback (same pattern as FlowSim)
 // Lightweight counters for concise logging (FlowSim-style)
 
 static void m4_completion_callback(void* arg) {
     M4CallbackData* data = static_cast<M4CallbackData*>(arg);
-    
+
     // Record the actual completion time when callback is triggered
     data->actual_completion_time = M4::Now();
 
-    // In M4 we schedule exactly one completion per send; log and notify unconditionally
+    // Unconditionally notify sender completion (works with SimAI integration)
     data->network->notify_sender_sending_finished(data->src, data->dst, data->count, data->flowTag);
 
     // Open FCT file on first use
@@ -156,7 +125,10 @@ static void m4_completion_callback(void* arg) {
         }
     }
 
+    // Unconditionally notify receiver arrival (ensures SimAI/NCCL dependency chain progresses)
     data->network->notify_receiver_packet_arrived(data->src, data->dst, data->count, data->flowTag);
+
+    // Mark flow completed in M4 state
     M4::OnFlowCompleted(data->flowTag.current_flow_id);
 }
 
@@ -208,12 +180,6 @@ int M4Network::sim_send(void* buffer, uint64_t count, int type, int dst, int tag
     // Track initial request time (actual send occurs after send latency)
     uint64_t start = static_cast<uint64_t>(M4::Now());
     
-    // Copy FlowSim's exact dependency logic
-    int dep_cur_id = request->flowTag.current_flow_id;
-    auto dep_key = std::make_pair(dep_cur_id, std::make_pair(rank, dst));
-    waiting_to_sent_callback[dep_key]++;
-    waiting_to_notify_receiver[dep_key]++;
-
     // Apply send latency delay like FlowSim
     int send_lat = 0;
     const char* send_lat_env = std::getenv("AS_SEND_LAT");

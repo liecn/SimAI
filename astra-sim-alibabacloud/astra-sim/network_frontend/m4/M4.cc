@@ -715,13 +715,13 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
                 }
                 
                 // Log GNN update details
-                // int n_link_nodes = active_link_idx.size(0);
-                // int n_edges = edges_list_active.size(1);
-                // int total_active_flows = flowid_active_list_all.size(0);
-                // std::cout << "[GNN Update] Flow nodes: " << n_flows_active_cur << "/" << total_active_flows << " (interacting/total_active)"
-                //           << ", Link nodes: " << n_link_nodes 
-                //           << ", Edges: " << n_edges 
-                //           << ", Time: " << (max_time_delta) << "μs" << std::endl;
+                int n_link_nodes = active_link_idx.size(0);
+                int n_edges = edges_list_active.size(1);
+                int total_active_flows = flowid_active_list_all.size(0);
+                std::cout << "[GNN Update] Flow nodes: " << n_flows_active_cur << "/" << total_active_flows << " (interacting/total_active)"
+                          << ", Link nodes: " << n_link_nodes 
+                          << ", Edges: " << n_edges 
+                          << ", Time: " << (max_time_delta) << "μs" << std::endl;
                 
                 std::vector<torch::Tensor> tensors_to_cat = {h_vec_time_updated, h_vec_time_link_updated};
                 auto x_combined = torch::cat(tensors_to_cat, 0);
@@ -862,17 +862,6 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
     auto sldn_cpu = sldn.to(torch::kCPU);
     auto sldn_data = sldn_cpu.data_ptr<float>();
     
-    // Legitimate batch processing: Use runtime batch statistics for normalization
-    // Step 1: Calculate batch statistics (available at runtime)
-    float sum = 0.0f, sum_sq = 0.0f;
-    int n = flow_ids_batch.size();
-    for (int i = 0; i < n; i++) {
-        sum += sldn_data[i];
-        sum_sq += sldn_data[i] * sldn_data[i];
-    }
-    float batch_mean = sum / n;
-    float batch_var = (sum_sq / n) - (batch_mean * batch_mean);
-    float batch_std = std::sqrt(std::max(batch_var, 1e-8f));
     
     // Step 2: Schedule flow completions (M4Network.cc handles collective completion)
     for (size_t i = 0; i < flows_to_process.size(); i++) {
@@ -899,18 +888,11 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
         if (batch_idx >= 0) {
             // Normal ML inference for flows with valid routes
             float raw_slowdown = sldn_data[batch_idx];
-            
-            float z_score = (raw_slowdown - batch_mean) / batch_std;
-            z_score = std::max(-0.5f, std::min(0.5f, z_score));
-            float scaled_slowdown = raw_slowdown;
-            // float scaled_slowdown = batch_mean+z_score*batch_std;
-            
-            // Only enforce physical constraint: slowdown >= 1.0
-            scaled_slowdown = std::max(scaled_slowdown, 1.0f);
-            
+            float scaled_slowdown = (raw_slowdown < 1.0f) ? 1.0f : raw_slowdown; // clamp to physics
+
             float predicted_fct = scaled_slowdown * i_fct_tensor[flow_id].item<float>();
             uint64_t completion_time = current_time + (uint64_t)predicted_fct;
-            
+
             // Schedule original callback - M4Network.cc handles collective completion correctly
             EventId eid = event_queue->schedule_event(completion_time, flow->callback, flow->callbackArg);
             flow_id_to_completion_event_id[flow_id] = eid;
