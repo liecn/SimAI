@@ -13,27 +13,13 @@ std::shared_ptr<EventQueue> Topology::event_queue = nullptr;
 
 // Optional serialization overhead to mimic NS3 packetization
 static inline uint64_t fs_get_payload_size_bytes() {
-    static uint64_t cached = [](){
-        const char* e = std::getenv("FS_PAYLOAD");
-        if (e && e[0] != '\0') {
-            return static_cast<uint64_t>(strtoull(e, nullptr, 10));
-        }
-        // Default to NS3 packet_payload_size=1000 bytes if unspecified
-        return static_cast<uint64_t>(1000);
-    }();
-    return cached;
+    // Fixed to NS3 packet_payload_size=1000 bytes for parity
+    return static_cast<uint64_t>(1000);
 }
 
 static inline uint64_t fs_get_header_bytes() {
-    static uint64_t cached = [](){
-        const char* e = std::getenv("FS_HDR");
-        if (e && e[0] != '\0') {
-            return static_cast<uint64_t>(strtoull(e, nullptr, 10));
-        }
-        // Default 0 to preserve historical FlowSim behavior unless enabled by user
-        return static_cast<uint64_t>(0);
-    }();
-    return cached;
+    // Fixed to NS3/M4 header size for parity
+    return static_cast<uint64_t>(52);
 }
 
 static inline double fs_apply_serialization_overhead(double bytes) {
