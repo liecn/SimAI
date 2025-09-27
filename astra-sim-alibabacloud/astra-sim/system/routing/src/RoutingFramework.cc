@@ -137,6 +137,27 @@ void RoutingFramework::CalculateRouteNS3Style(int host_node) {
     q.push_back(host_node);
     dis[host_node] = 0;
 
+    // Prefer intra-chassis NVSwitch path for hosts sharing the same NVSwitch.
+    // If host_node is connected to NVSwitch N, then for any host H also connected
+    // to N, set the first-hop to N. BFS below will not overwrite because we only
+    // set host nextHop entries when not already present.
+    const auto& graph_pref = topology_.GetGraph();
+    if (host_node >= 0 && host_node < (int)graph_pref.size()) {
+        for (int neighbor_switch : graph_pref[host_node]) {
+            if (topology_.GetNodeType(neighbor_switch) == 2) { // NVSwitch
+                // For all neighbors of this NVSwitch, if they are hosts, prefer NVSwitch path
+                if (neighbor_switch >= 0 && neighbor_switch < (int)graph_pref.size()) {
+                    for (int maybe_host : graph_pref[neighbor_switch]) {
+                        if (maybe_host != host_node && topology_.GetNodeType(maybe_host) == 0) {
+                            nextHop[maybe_host].clear();
+                            nextHop[maybe_host].push_back(neighbor_switch);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     for (int i = 0; i < (int)q.size(); i++) {
         int now = q[i];
         int d = dis[now];

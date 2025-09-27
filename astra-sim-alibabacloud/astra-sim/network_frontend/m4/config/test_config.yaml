@@ -23,7 +23,7 @@ network:
 
 # M4-specific parameters
 m4:
-  batch_size_flows: 32    # Process exactly N flows per ML update
+  batch_size_flows: 60    # Process exactly N flows per ML update
 
 # Model parameters
 model:

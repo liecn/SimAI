@@ -72,11 +72,6 @@ class Topology {
     }
   }
 
-  // Find NS3-like route: expand only through switches/NVSwitches
-  std::vector<int> find_ns3_route(int src, int dst);
-
-
-
  protected:
   int devices_count;
   int npus_count;

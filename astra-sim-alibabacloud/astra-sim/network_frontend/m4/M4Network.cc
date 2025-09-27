@@ -64,18 +64,53 @@ static FILE* g_fct_output_file = nullptr;
 static int m4_send_count = 0;
 static int m4_callback_count = 0;
 
+// Flow dependency gating (FlowSim-style)
+static std::map<std::pair<int, std::pair<int, int>>, int> waiting_to_sent_callback;
+static std::map<std::pair<int, std::pair<int, int>>, int> waiting_to_notify_receiver;
+
+static bool is_sending_finished(int src, int dst, AstraSim::ncclFlowTag flowTag) {
+    int dep_cur_id = flowTag.current_flow_id;
+    auto dep_key = std::make_pair(dep_cur_id, std::make_pair(src, dst));
+    auto it = waiting_to_sent_callback.find(dep_key);
+    if (it != waiting_to_sent_callback.end()) {
+        it->second--;
+        if (it->second <= 0) {
+            waiting_to_sent_callback.erase(it);
+            return true;
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool is_receive_finished(int src, int dst, AstraSim::ncclFlowTag flowTag) {
+    int dep_cur_id = flowTag.current_flow_id;
+    auto dep_key = std::make_pair(dep_cur_id, std::make_pair(src, dst));
+    auto it = waiting_to_notify_receiver.find(dep_key);
+    if (it != waiting_to_notify_receiver.end()) {
+        it->second--;
+        if (it->second <= 0) {
+            waiting_to_notify_receiver.erase(it);
+            return true;
+        }
+        return false;
+    }
+    return true;
+}
 
 // M4 completion callback (same pattern as FlowSim)
 // Lightweight counters for concise logging (FlowSim-style)
 
 static void m4_completion_callback(void* arg) {
     M4CallbackData* data = static_cast<M4CallbackData*>(arg);
-
+    
     // Record the actual completion time when callback is triggered
     data->actual_completion_time = M4::Now();
 
-    // Unconditionally notify sender completion (works with SimAI integration)
-    data->network->notify_sender_sending_finished(data->src, data->dst, data->count, data->flowTag);
+    // Gate sender notify
+    if (is_sending_finished(data->src, data->dst, data->flowTag)) {
+        data->network->notify_sender_sending_finished(data->src, data->dst, data->count, data->flowTag);
+    }
 
     // Open FCT file on first use
     if (g_fct_output_file == nullptr) {
@@ -83,50 +118,53 @@ static void m4_completion_callback(void* arg) {
         ensure_dir(data->network->result_dir.c_str());
         g_fct_output_file = fopen(fct_file_path.c_str(), "w");
     }
-    if (g_fct_output_file) {
-        auto flow_key = std::make_tuple(data->flowTag.tag_id, data->flowTag.current_flow_id, data->src, data->dst);
-        auto it = flow_start_times.find(flow_key);
-        uint64_t start_time = 0;
-        if (it != flow_start_times.end()) {
-            start_time = it->second;
-            flow_start_times.erase(it);
-        } else {
-            // Fallback: use start_time stored in callback data if key was overwritten
-            start_time = data->start_time;
-        }
-        if (start_time > 0 && data->actual_completion_time >= start_time) {
-            uint64_t fct_ns = data->actual_completion_time - start_time;
 
-            uint32_t src_ip = 0u;
-            uint32_t dst_ip = 0u;
-            unsigned int src_port = 0u;
-            unsigned int dst_port = 0u;
-
-            const AstraSim::RoutingFramework* rf = M4::GetRoutingFramework();
-            if (!rf) {
-                throw std::runtime_error("[M4 ERROR] RoutingFramework is null when computing standalone_fct (send)");
+    // Gate receiver notify and FCT logging
+    if (is_receive_finished(data->src, data->dst, data->flowTag)) {
+        if (g_fct_output_file) {
+            auto flow_key = std::make_tuple(data->flowTag.tag_id, data->flowTag.current_flow_id, data->src, data->dst);
+            auto it = flow_start_times.find(flow_key);
+            uint64_t start_time = 0;
+            if (it != flow_start_times.end()) {
+                start_time = it->second;
+                flow_start_times.erase(it);
+            } else {
+                // Fallback: use start_time stored in callback data if key was overwritten
+                start_time = data->start_time;
             }
-            uint64_t base_rtt = rf->GetPairRtt(data->src, data->dst);
-            uint64_t b_bps = rf->GetPairBandwidth(data->src, data->dst);
-            const uint32_t packet_payload_size = 1000u;
-            const uint32_t header_overhead = 52u;
-            uint64_t num_pkts = (data->count + packet_payload_size - 1) / packet_payload_size;
-            uint64_t total_bytes = data->count + num_pkts * header_overhead;
-            uint64_t standalone_fct = base_rtt + total_bytes * 8000000000lu / b_bps;
+            if (start_time > 0 && data->actual_completion_time >= start_time) {
+                uint64_t fct_ns = data->actual_completion_time - start_time;
 
-            fprintf(g_fct_output_file, "%08x %08x %u %u %lu %lu %lu %lu %d\n",
-                    src_ip, dst_ip, src_port, dst_port, data->count, start_time, fct_ns, standalone_fct,
-                    data->flowTag.current_flow_id);
-            if (g_fct_lines_written == 0) {
-                std::cout << "[M4] First FCT: " << (fct_ns/1000.0) << "μs" << std::endl;
+                uint32_t src_ip = 0u;
+                uint32_t dst_ip = 0u;
+                unsigned int src_port = 0u;
+                unsigned int dst_port = 0u;
+
+                const AstraSim::RoutingFramework* rf = M4::GetRoutingFramework();
+                if (!rf) {
+                    throw std::runtime_error("[M4 ERROR] RoutingFramework is null when computing standalone_fct (send)");
+                }
+                uint64_t base_rtt = rf->GetPairRtt(data->src, data->dst);
+                uint64_t b_bps = rf->GetPairBandwidth(data->src, data->dst);
+                const uint32_t packet_payload_size = 1000u;
+                const uint32_t header_overhead = 52u;
+                uint64_t num_pkts = (data->count + packet_payload_size - 1) / packet_payload_size;
+                uint64_t total_bytes = data->count + num_pkts * header_overhead;
+                uint64_t standalone_fct = base_rtt + total_bytes * 8000000000lu / b_bps;
+
+                fprintf(g_fct_output_file, "%08x %08x %u %u %lu %lu %lu %lu %d\n",
+                        src_ip, dst_ip, src_port, dst_port, data->count, start_time, fct_ns, standalone_fct,
+                        data->flowTag.current_flow_id);
+                if (g_fct_lines_written == 0) {
+                    std::cout << "[M4] First FCT: " << (fct_ns/1000.0) << "μs" << std::endl;
+                }
+                fflush(g_fct_output_file);
+                ++g_fct_lines_written;
             }
-            fflush(g_fct_output_file);
-            ++g_fct_lines_written;
         }
+
+        data->network->notify_receiver_packet_arrived(data->src, data->dst, data->count, data->flowTag);
     }
-
-    // Unconditionally notify receiver arrival (ensures SimAI/NCCL dependency chain progresses)
-    data->network->notify_receiver_packet_arrived(data->src, data->dst, data->count, data->flowTag);
 
     // Mark flow completed in M4 state
     M4::OnFlowCompleted(data->flowTag.current_flow_id);
@@ -179,7 +217,15 @@ int M4Network::sim_send(void* buffer, uint64_t count, int type, int dst, int tag
     
     // Track initial request time (actual send occurs after send latency)
     uint64_t start = static_cast<uint64_t>(M4::Now());
-    
+
+    // Increment dependency counters (FlowSim-style)
+    {
+        int dep_cur_id = request->flowTag.current_flow_id;
+        auto dep_key = std::make_pair(dep_cur_id, std::make_pair(rank, dst));
+        waiting_to_sent_callback[dep_key]++;
+        waiting_to_notify_receiver[dep_key]++;
+    }
+
     // Apply send latency delay like FlowSim
     int send_lat = 0;
     const char* send_lat_env = std::getenv("AS_SEND_LAT");
@@ -256,7 +302,7 @@ int M4Network::sim_recv(void* buffer, uint64_t count, int type, int src, int tag
             }
             // Restore pending flowTag like FlowSim if queued before recv registered
             if(receiver_pending_queue.count(std::make_pair(std::make_pair(rank, src),tag))!= 0) {
-                AstraSim::ncclFlowTag pending_tag = receiver_pending_queue[std::make_pair(std::make_pair(rank, src),tag)];
+                AstraSim::ncclFlowTag pending_tag = receiver_pending_queue[std::make_pair(std::make_pair(rank,src),tag)];
                 receiver_pending_queue.erase(std::make_pair(std::make_pair(rank,src),tag));
                 ehd->flowTag = pending_tag;
             }

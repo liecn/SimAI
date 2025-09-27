@@ -535,11 +535,27 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
         // Use NS3's exact calculation: base_rtt + total_bytes * 8000000000lu / b
         double ideal_fct = (double)base_rtt + (double)(total_bytes * 8000000000ULL) / (double)b_bps;
         // std::cout << "[M4 DBG] ideal_fct=" << ideal_fct << " base_rtt=" << base_rtt << " total_bytes=" << total_bytes << " b_bps=" << b_bps << std::endl;
-        // Get route for hop count (still needed for ML features)
-        std::vector<int> ns3_route = topology->find_ns3_route(flow->src, flow->dst);
+        // Get route for hop count (still needed for ML features) via RoutingFramework
+        std::vector<int> ns3_route = routing_framework_->GetFlowSimPathByNodeIds(flow->src, flow->dst);
         if (ns3_route.size() < 2) {
             throw std::runtime_error("[M4 ERROR] Empty/invalid NS3 route for hop count");
         }
+        // {
+        //     static int route_debug_count = 0;
+        //     if (route_debug_count < 20) {
+        //         std::cout << "[ROUTE CHECK] src=" << flow->src
+        //                   << " dst=" << flow->dst
+        //                   << " b_bps=" << b_bps
+        //                   << " rtt_ns=" << base_rtt
+        //                   << " path=";
+        //         for (size_t k = 0; k < ns3_route.size(); ++k) {
+        //             if (k) std::cout << "->";
+        //             std::cout << ns3_route[k];
+        //         }
+        //         std::cout << std::endl;
+        //         route_debug_count++;
+        //     }
+        // }
         int ns3_num_links = static_cast<int>(ns3_route.size()) - 1;
         flowid_to_nlinks_tensor[flow_id] = ns3_num_links;
         i_fct_tensor[flow_id] = static_cast<float>(ideal_fct);
