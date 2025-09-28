@@ -80,20 +80,14 @@ std::unordered_set<int32_t> M4::current_batch_link_set;
 static int32_t n_flows_arrived = 0;
 static int32_t n_flows_completed = 0;
 
-// Track scheduled completion time (ns) to ensure reschedules never pull a flow earlier
-// (removed) monotonic scheduled-time guard
+// Monotonic scheduled-time guard: do not allow reschedules to pull completion earlier
+static std::unordered_map<int32_t, uint64_t> g_flow_id_to_scheduled_time;
 
-
-
-// FlowSim-style temporal batching
+// Define static batching state declared in M4.h
 std::vector<M4Flow*> M4::pending_flows_;
 std::list<std::unique_ptr<M4Flow>> M4::active_flows_ptrs;
 int M4::batch_timeout_event_id_ = 0;
 bool M4::is_processing_batch_ = false;
-
-// (removed) legacy inference-style flow completion tracking
-
-// Remove old scheduling logic - now handled by event-driven processing
 
 void M4::Init(std::shared_ptr<EventQueue> event_queue, std::shared_ptr<Topology> topo) {
 
@@ -109,6 +103,7 @@ void M4::Init(std::shared_ptr<EventQueue> event_queue, std::shared_ptr<Topology>
     
     
     std::cout << "[M4] Init() completed successfully! models_loaded=" << models_loaded << ", n_flows_max=" << n_flows_max << ", hidden_size_=" << hidden_size_ << std::endl;
+
 }
 
 void M4::SetupML() {
@@ -366,6 +361,12 @@ void M4::OnFlowCompleted(const int flow_id) {
     
     // Clean up completed flow from active tracking
     CleanupCompletedFlow(flow_id);
+
+    // Clear any stored monotonic guard state for this flow
+    auto it_guard = g_flow_id_to_scheduled_time.find(flow_id);
+    if (it_guard != g_flow_id_to_scheduled_time.end()) {
+        g_flow_id_to_scheduled_time.erase(it_guard);
+    }
 }
 
 void M4::CleanupCompletedFlow(const int flow_id) {
@@ -788,6 +789,12 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
             remain_ns = std::max<uint64_t>(remain_ns, static_cast<uint64_t>(1));
             uint64_t completion_time = current_time + remain_ns;
 
+            // Apply monotonic completion guard
+            auto it_prev = g_flow_id_to_scheduled_time.find(fid);
+            if (it_prev != g_flow_id_to_scheduled_time.end() && completion_time < it_prev->second) {
+                completion_time = it_prev->second;
+            }
+
             // Cancel existing scheduled completion (if any)
             auto it_e = flow_id_to_completion_event_id.find(fid);
             if (it_e != flow_id_to_completion_event_id.end()) {
@@ -799,6 +806,7 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
             if (fptr && fptr->callback) {
                 EventId eid = event_queue->schedule_event(completion_time, fptr->callback, fptr->callbackArg);
                 flow_id_to_completion_event_id[fid] = eid;
+                g_flow_id_to_scheduled_time[fid] = completion_time;
             }
         }
     }
@@ -908,9 +916,16 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
             remain_ns = std::max<uint64_t>(remain_ns, static_cast<uint64_t>(1));
             uint64_t completion_time = current_time + remain_ns;
 
+            // Apply monotonic completion guard
+            auto it_prev = g_flow_id_to_scheduled_time.find(flow_id);
+            if (it_prev != g_flow_id_to_scheduled_time.end() && completion_time < it_prev->second) {
+                completion_time = it_prev->second;
+            }
+
             // Schedule original callback - M4Network.cc handles collective completion correctly
             EventId eid = event_queue->schedule_event(completion_time, flow->callback, flow->callbackArg);
             flow_id_to_completion_event_id[flow_id] = eid;
+            g_flow_id_to_scheduled_time[flow_id] = completion_time;
         }
     }
     
