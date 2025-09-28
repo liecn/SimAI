@@ -435,6 +435,7 @@ void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, Callb
     
     // Flow-count batching: trigger when we have enough flows
     const auto current_time = event_queue->get_current_time();
+    // Revert to immediate scheduling when threshold met to avoid hangs
     if (batch_timeout_event_id_ == 0 && (int)pending_flows_.size() >= batch_size_flows_) {
         batch_timeout_event_id_ = event_queue->schedule_event(current_time, batch_timeout_callback, nullptr);
     }
@@ -769,7 +770,19 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
 
             float slowdown = sldn_ptr[i];
             float predicted_fct = slowdown * i_fct_tensor[fid].item<float>();
-            uint64_t completion_time = static_cast<uint64_t>(current_time + (uint64_t)predicted_fct);
+            // Use each flow's true network start time from callbackArg
+            M4Flow* fptr = find_flow_ptr(fid);
+            uint64_t start_ns = 0ULL;
+            if (fptr && fptr->callbackArg) {
+                auto* cd = reinterpret_cast<M4CallbackData*>(fptr->callbackArg);
+                start_ns = cd->start_time;
+            } else {
+                start_ns = (uint64_t)release_time_tensor[fid].item<float>();
+            }
+            uint64_t elapsed_ns = current_time > start_ns ? (current_time - start_ns) : 0ULL;
+            uint64_t total_pred_ns = (uint64_t)predicted_fct;
+            uint64_t remain_ns = total_pred_ns > elapsed_ns ? (total_pred_ns - elapsed_ns) : 1ULL;
+            uint64_t completion_time = current_time + remain_ns;
 
             // Cancel existing scheduled completion (if any)
             auto it_e = flow_id_to_completion_event_id.find(fid);
@@ -779,7 +792,6 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
             }
 
             // Schedule new completion using stored callback/arg
-            M4Flow* fptr = find_flow_ptr(fid);
             if (fptr && fptr->callback) {
                 EventId eid = event_queue->schedule_event(completion_time, fptr->callback, fptr->callbackArg);
                 flow_id_to_completion_event_id[fid] = eid;
@@ -878,7 +890,18 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
             float scaled_slowdown = (raw_slowdown < 1.0f) ? 1.0f : raw_slowdown; // clamp to physics
 
             float predicted_fct = scaled_slowdown * i_fct_tensor[flow_id].item<float>();
-            uint64_t completion_time = current_time + (uint64_t)predicted_fct;
+            // Remaining time scheduling using true network start time from callbackArg
+            uint64_t start_ns = 0ULL;
+            if (flow->callbackArg) {
+                auto* cd = reinterpret_cast<M4CallbackData*>(flow->callbackArg);
+                start_ns = cd->start_time;
+            } else {
+                start_ns = (uint64_t)release_time_tensor[flow_id].item<float>();
+            }
+            uint64_t elapsed_ns = current_time > start_ns ? (current_time - start_ns) : 0ULL;
+            uint64_t total_pred_ns = (uint64_t)predicted_fct;
+            uint64_t remain_ns = total_pred_ns > elapsed_ns ? (total_pred_ns - elapsed_ns) : 1ULL;
+            uint64_t completion_time = current_time + remain_ns;
 
             // Schedule original callback - M4Network.cc handles collective completion correctly
             EventId eid = event_queue->schedule_event(completion_time, flow->callback, flow->callbackArg);
