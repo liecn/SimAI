@@ -80,6 +80,9 @@ std::unordered_set<int32_t> M4::current_batch_link_set;
 static int32_t n_flows_arrived = 0;
 static int32_t n_flows_completed = 0;
 
+// Track scheduled completion time (ns) to ensure reschedules never pull a flow earlier
+// (removed) monotonic scheduled-time guard
+
 
 
 // FlowSim-style temporal batching
@@ -435,7 +438,7 @@ void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, Callb
     
     // Flow-count batching: trigger when we have enough flows
     const auto current_time = event_queue->get_current_time();
-    // Revert to immediate scheduling when threshold met to avoid hangs
+    // Trigger batch only when threshold is met (avoid over-fragmentation)
     if (batch_timeout_event_id_ == 0 && (int)pending_flows_.size() >= batch_size_flows_) {
         batch_timeout_event_id_ = event_queue->schedule_event(current_time, batch_timeout_callback, nullptr);
     }
@@ -781,7 +784,8 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
             }
             uint64_t elapsed_ns = current_time > start_ns ? (current_time - start_ns) : 0ULL;
             uint64_t total_pred_ns = (uint64_t)predicted_fct;
-            uint64_t remain_ns = total_pred_ns > elapsed_ns ? (total_pred_ns - elapsed_ns) : 1ULL;
+            uint64_t remain_ns = total_pred_ns > elapsed_ns ? (total_pred_ns - elapsed_ns) : 0ULL;
+            remain_ns = std::max<uint64_t>(remain_ns, static_cast<uint64_t>(1));
             uint64_t completion_time = current_time + remain_ns;
 
             // Cancel existing scheduled completion (if any)
@@ -900,7 +904,8 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
             }
             uint64_t elapsed_ns = current_time > start_ns ? (current_time - start_ns) : 0ULL;
             uint64_t total_pred_ns = (uint64_t)predicted_fct;
-            uint64_t remain_ns = total_pred_ns > elapsed_ns ? (total_pred_ns - elapsed_ns) : 1ULL;
+            uint64_t remain_ns = total_pred_ns > elapsed_ns ? (total_pred_ns - elapsed_ns) : 0ULL;
+            remain_ns = std::max<uint64_t>(remain_ns, static_cast<uint64_t>(1));
             uint64_t completion_time = current_time + remain_ns;
 
             // Schedule original callback - M4Network.cc handles collective completion correctly

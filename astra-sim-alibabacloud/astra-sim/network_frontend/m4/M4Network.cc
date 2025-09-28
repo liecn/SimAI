@@ -68,12 +68,6 @@ static int m4_callback_count = 0;
 static std::map<std::pair<int, std::pair<int, int>>, int> waiting_to_sent_callback;
 static std::map<std::pair<int, std::pair<int, int>>, int> waiting_to_notify_receiver;
 
-// Strict group barrier: track per-tag batch flow counts and buffer notifications
-static std::map<int, int> group_total_by_tag;       // tag_id -> total flows in batch
-static std::map<int, int> group_remaining_by_tag;   // tag_id -> remaining flows not yet completed
-static std::map<int, std::vector<std::tuple<int,int,uint64_t,AstraSim::ncclFlowTag>>> pending_sender_notifies;  // tag -> list of (src,dst,count,flowTag)
-static std::map<int, std::vector<std::tuple<int,int,uint64_t,AstraSim::ncclFlowTag>>> pending_receiver_notifies; // tag -> list of (src,dst,count,flowTag)
-
 static bool is_sending_finished(int src, int dst, AstraSim::ncclFlowTag flowTag) {
     int dep_cur_id = flowTag.current_flow_id;
     auto dep_key = std::make_pair(dep_cur_id, std::make_pair(src, dst));
@@ -113,11 +107,9 @@ static void m4_completion_callback(void* arg) {
     // Record the actual completion time when callback is triggered
     data->actual_completion_time = M4::Now();
 
-    // Gate sender notify (buffer until group completion)
-    bool sender_done = is_sending_finished(data->src, data->dst, data->flowTag);
-    if (sender_done) {
-        int tag = data->flowTag.tag_id;
-        pending_sender_notifies[tag].emplace_back(data->src, data->dst, data->count, data->flowTag);
+    // Gate sender notify (no buffering)
+    if (is_sending_finished(data->src, data->dst, data->flowTag)) {
+        data->network->notify_sender_sending_finished(data->src, data->dst, data->count, data->flowTag);
     }
 
     // Open FCT file on first use
@@ -127,7 +119,7 @@ static void m4_completion_callback(void* arg) {
         g_fct_output_file = fopen(fct_file_path.c_str(), "w");
     }
 
-    // Gate receiver notify and FCT logging (buffer until group completion)
+    // Gate receiver notify and FCT logging (no buffering)
     if (is_receive_finished(data->src, data->dst, data->flowTag)) {
         if (g_fct_output_file) {
             auto flow_key = std::make_tuple(data->flowTag.tag_id, data->flowTag.current_flow_id, data->src, data->dst);
@@ -171,36 +163,7 @@ static void m4_completion_callback(void* arg) {
             }
         }
 
-        int tag = data->flowTag.tag_id;
-        pending_receiver_notifies[tag].emplace_back(data->src, data->dst, data->count, data->flowTag);
-
-        // Decrement group remaining and flush when zero
-        if (group_remaining_by_tag.find(tag) != group_remaining_by_tag.end()) {
-            group_remaining_by_tag[tag] -= 1;
-            if (group_remaining_by_tag[tag] <= 0) {
-                // Flush buffered notifies for this group in deterministic order
-                auto itS = pending_sender_notifies.find(tag);
-                if (itS != pending_sender_notifies.end()) {
-                    for (const auto &tup : itS->second) {
-                        int s = std::get<0>(tup); int r = std::get<1>(tup);
-                        uint64_t c = std::get<2>(tup); auto ft = std::get<3>(tup);
-                        data->network->notify_sender_sending_finished(s, r, c, ft);
-                    }
-                    pending_sender_notifies.erase(itS);
-                }
-                auto itR = pending_receiver_notifies.find(tag);
-                if (itR != pending_receiver_notifies.end()) {
-                    for (const auto &tup : itR->second) {
-                        int s = std::get<0>(tup); int r = std::get<1>(tup);
-                        uint64_t c = std::get<2>(tup); auto ft = std::get<3>(tup);
-                        data->network->notify_receiver_packet_arrived(s, r, c, ft);
-                    }
-                    pending_receiver_notifies.erase(itR);
-                }
-                group_total_by_tag.erase(tag);
-                group_remaining_by_tag.erase(tag);
-            }
-        }
+        data->network->notify_receiver_packet_arrived(data->src, data->dst, data->count, data->flowTag);
     }
 
     // Mark flow completed in M4 state
@@ -263,12 +226,7 @@ int M4Network::sim_send(void* buffer, uint64_t count, int type, int dst, int tag
         waiting_to_notify_receiver[dep_key]++;
     }
 
-    // Group barrier accounting
-    {
-        int tag_id = request->flowTag.tag_id;
-        group_total_by_tag[tag_id] += 1;
-        group_remaining_by_tag[tag_id] += 1;
-    }
+    // No extra group barrier accounting; FlowSim-style dependency counters are sufficient
 
     // Apply send latency delay like FlowSim
     int send_lat = 0;
