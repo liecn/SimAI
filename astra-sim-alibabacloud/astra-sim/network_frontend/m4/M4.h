@@ -97,6 +97,10 @@ private:
     static std::vector<std::vector<int32_t>> flowid_to_link_indices;
     // Links touched by the current temporal batch (for interaction filtering)
     static std::unordered_set<int32_t> current_batch_link_set;
+
+    // Track per-flow start time and last scheduled completion time (ns)
+    static std::unordered_map<int32_t, uint64_t> flow_id_to_start_time_ns;
+    static std::unordered_map<int32_t, uint64_t> flow_id_to_scheduled_time_ns;
     
     
     

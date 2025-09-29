@@ -562,6 +562,7 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
         flowid_to_nlinks_tensor[flow_id] = ns3_num_links;
         i_fct_tensor[flow_id] = static_cast<float>(ideal_fct);
         release_time_tensor[flow_id] = time_clock;
+        flow_id_to_start_time_ns[flow_id] = (uint64_t)time_clock;
         time_last[flow_id] = time_clock;  // Initialize time_last to avoid massive time deltas
         flowid_active_mask[flow_id] = true;
         flow_to_graph_id[flow_id] = 0;  // All flows use global graph
@@ -702,6 +703,36 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
                 h_vec.index_copy_(0, subset_indices, h_vec_rate_updated);
                 z_t_link.index_copy_(0, active_link_idx.to(torch::kInt64), h_vec_rate_link);
                 time_last.index_put_({torch::indexing::TensorIndex(subset_indices)}, time_clock);
+
+                // MLP prediction for ALL active flows and growth-only push-out
+                auto nlinks_batch_all = flowid_to_nlinks_tensor.index_select(0, subset_indices).unsqueeze(1);
+                auto params_batch_all = params_tensor.unsqueeze(0).repeat({n_flows_active_cur, 1});
+                auto input_batch_all = torch::cat({nlinks_batch_all, params_batch_all, h_vec_rate_updated}, 1);
+                auto sldn_all = output_layer.forward(std::vector<c10::IValue>{input_batch_all}).toTensor().view(-1);
+                sldn_all = torch::clamp(sldn_all, 1.0f, std::numeric_limits<float>::infinity());
+
+                // Iterate and push later if needed
+                for (int i = 0; i < n_flows_active_cur; i++) {
+                    int fid = subset_indices[i].item<int32_t>();
+                    float predicted_fct = sldn_all[i].item<float>() * i_fct_tensor[fid].item<float>();
+                    uint64_t start_ns = flow_id_to_start_time_ns.count(fid) ? flow_id_to_start_time_ns[fid] : (uint64_t)time_clock;
+                    uint64_t target_end = start_ns + (uint64_t)predicted_fct;
+                    auto it_ev = flow_id_to_completion_event_id.find(fid);
+                    if (it_ev != flow_id_to_completion_event_id.end()) {
+                        // Cancel and reschedule to later time only
+                        // Find the active flow to recover its callback
+                        M4Flow* fptr = nullptr;
+                        for (auto &uptr : active_flows_ptrs) {
+                            if (uptr && uptr->flow_id == fid) { fptr = uptr.get(); break; }
+                        }
+                        if (fptr) {
+                            event_queue->cancel_event(it_ev->second);
+                            EventId new_eid = event_queue->schedule_event(target_end, fptr->callback, fptr->callbackArg);
+                            it_ev->second = new_eid;
+                            flow_id_to_scheduled_time_ns[fid] = target_end;
+                        }
+                    }
+                }
             }
         }
     }
@@ -799,13 +830,32 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
             float scaled_slowdown = (raw_slowdown < 1.0f) ? 1.0f : raw_slowdown; // clamp to physics
 
             float predicted_fct = scaled_slowdown * i_fct_tensor[flow_id].item<float>();
-            // Anchor completion to actual network start to avoid adding batch wait to FCT
-            uint64_t target_end = flow->start_time + (uint64_t)predicted_fct;
-            uint64_t completion_time = target_end > current_time ? target_end : (current_time + 1ULL);
+            // Remaining-time scheduling: credit elapsed time since start
+            if (!flow_id_to_start_time_ns.count(flow_id)) {
+                flow_id_to_start_time_ns[flow_id] = flow->start_time;
+            }
+            uint64_t start_ns = flow_id_to_start_time_ns[flow_id];
+            uint64_t now_ns = current_time;
+            uint64_t elapsed = (now_ns > start_ns) ? (now_ns - start_ns) : 0ULL;
+            uint64_t predicted_total = (uint64_t)predicted_fct;
+            uint64_t remaining = (predicted_total > elapsed) ? (predicted_total - elapsed) : 1ULL;
+            uint64_t completion_time = now_ns + remaining;
 
-            // Schedule original callback - M4Network.cc handles collective completion correctly
-            EventId eid = event_queue->schedule_event(completion_time, flow->callback, flow->callbackArg);
-            flow_id_to_completion_event_id[flow_id] = eid;
+            // Growth-only rescheduling: only push later than previously scheduled
+            auto it_e = flow_id_to_completion_event_id.find(flow_id);
+            if (it_e != flow_id_to_completion_event_id.end()) {
+                uint64_t prev_sched = flow_id_to_scheduled_time_ns.count(flow_id) ? flow_id_to_scheduled_time_ns[flow_id] : 0ULL;
+                if (completion_time > prev_sched) {
+                    event_queue->cancel_event(it_e->second);
+                    EventId new_eid = event_queue->schedule_event(completion_time, flow->callback, flow->callbackArg);
+                    it_e->second = new_eid;
+                    flow_id_to_scheduled_time_ns[flow_id] = completion_time;
+                }
+            } else {
+                EventId eid = event_queue->schedule_event(completion_time, flow->callback, flow->callbackArg);
+                flow_id_to_completion_event_id[flow_id] = eid;
+                flow_id_to_scheduled_time_ns[flow_id] = completion_time;
+            }
         }
     }
     
@@ -838,4 +888,8 @@ std::unordered_map<int32_t, EventId> M4::flow_id_to_completion_event_id;
 // (reverted) monotonic guard map removed
 
 static inline float clamp_ge1(float v) { return v < 1.0f ? 1.0f : v; }
+
+// New: track per-flow times for MLP push-out
+std::unordered_map<int32_t, uint64_t> M4::flow_id_to_start_time_ns;
+std::unordered_map<int32_t, uint64_t> M4::flow_id_to_scheduled_time_ns;
 
