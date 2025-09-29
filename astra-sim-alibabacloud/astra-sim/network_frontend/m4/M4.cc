@@ -66,7 +66,7 @@ torch::Tensor M4::i_fct_tensor;
 
 // Flow and graph management
 int32_t M4::hidden_size_ = 200; // Model expects 214 total: 1+13+200=214 (matches main_m4_noflowsim.cpp)
-int32_t M4::n_links_max_ = 128;
+int32_t M4::n_links_max_ = 1024;
 uint64_t M4::batch_time_ns_ = 300; // Default temporal batching interval
 int32_t M4::n_flows_max = 50000;  // Large enough for simulation
 int32_t M4::graph_id_cur = 0;
@@ -231,10 +231,9 @@ void M4::SetupML() {
         }
     } catch (const std::exception& e) {
         std::cerr << "[M4] Config parse error: " << e.what() << std::endl;
-        hidden_size_ = 64;
-        n_links_max_ = 128;
     }
-    
+    std::cout << "[M4] Loaded network parameters from config: n_links_max=" << n_links_max_ << ", hidden_size=" << hidden_size_ << std::endl;
+
     // Structure from consts.py: [bfsz(0), fwin(1), dctcp_flag(2), dcqcn_flag(3), hp_flag(4), timely_flag(5), 
     //                           dctcp_k(6), dcqcn_k_min(7), dcqcn_k_max(8), u_tgt(9), hpai(10), timely_t_low(11), timely_t_high(12)]
     std::vector<float> param_values(13, 0.0f);
@@ -637,34 +636,17 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
         }
         // Add other active flows that share links with current batch
         auto flowid_active_list_all = torch::nonzero(flowid_active_mask).flatten();
-        for (int i = 0; i < flowid_active_list_all.size(0); i++) {
-            int32_t fid = flowid_active_list_all[i].item<int32_t>();
-            if (fid < flowid_to_link_indices.size()) {
-                // Check if this flow shares any links with current batch
-                for (int32_t lid : flowid_to_link_indices[fid]) {
-                    if (current_batch_link_set.find(lid) != current_batch_link_set.end()) {
-                        interacting_flows.insert(fid);
-                        break; // Found overlap, add flow and move on
-                    }
-                }
-            }
-        }
-        
-        if (!interacting_flows.empty()) {
-            // Step 2: Build compact flow list and edges for interacting flows only
-            std::vector<int32_t> flowid_interacting_vec(interacting_flows.begin(), interacting_flows.end());
-            std::sort(flowid_interacting_vec.begin(), flowid_interacting_vec.end()); // For consistent indexing
-            
-            // Step 3: Build edges using actual flow IDs and link IDs (like inference code)
-            std::vector<int32_t> flow_edges, link_edges;
-            for (int32_t fid : flowid_interacting_vec) {
-                if (fid < flowid_to_link_indices.size()) {
-                    for (int32_t lid : flowid_to_link_indices[fid]) {
-                        // Only include links that are active in current batch
-                        if (current_batch_link_set.find(lid) != current_batch_link_set.end()) {
-                            flow_edges.push_back(fid);  // Use actual flow ID, not relative index
-                            link_edges.push_back(lid);  // Use actual link ID
-                        }
+        if (flowid_active_list_all.numel() > 0) {
+            // Build edges over ALL active flows and all their links (match inference main_m4_noflowsim)
+            std::vector<int32_t> flow_edges;
+            std::vector<int32_t> link_edges;
+            for (int i = 0; i < flowid_active_list_all.size(0); i++) {
+                int32_t fid = flowid_active_list_all[i].item<int32_t>();
+                if (fid < (int32_t)flowid_to_link_indices.size()) {
+                    const auto &links = flowid_to_link_indices[fid];
+                    for (int32_t lid : links) {
+                        flow_edges.push_back(fid);
+                        link_edges.push_back(lid);
                     }
                 }
             }
@@ -673,16 +655,15 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
                                            .to(torch::kInt64).to(device);
                 auto edge_link_tensor = torch::from_blob(link_edges.data(), {(int)link_edges.size()}, torch::TensorOptions().dtype(torch::kInt32))
                                            .to(torch::kInt64).to(device);
-                
-                // Step 4: Convert interacting flows to compact indices (like inference searchsorted)
-                auto flowid_interacting_tensor = torch::tensor(flowid_interacting_vec, torch::TensorOptions().dtype(torch::kInt32).device(device)).to(torch::kInt64);
-                auto new_flow_indices = torch::searchsorted(flowid_interacting_tensor, edge_flow_tensor);
-                int n_flows_active_cur = flowid_interacting_vec.size();
-                
-                // Step 5: Get unique links and remap them (exactly like inference code)
+
+                // Map to compact indices for active flows/links
+                auto flowid_active_tensor = flowid_active_list_all.to(torch::kInt64);
+                auto new_flow_indices = torch::searchsorted(flowid_active_tensor, edge_flow_tensor);
+                int n_flows_active_cur = (int)flowid_active_tensor.size(0);
+
                 auto unique_links_tuple = torch::_unique(edge_link_tensor, true, true);
-                auto active_link_idx = std::get<0>(unique_links_tuple);  // Unique link IDs
-                auto new_link_indices = std::get<1>(unique_links_tuple); // Inverse indices for remapping
+                auto active_link_idx = std::get<0>(unique_links_tuple);
+                auto new_link_indices = std::get<1>(unique_links_tuple);
                 new_link_indices += n_flows_active_cur;
 
                 auto edges_list_active = torch::cat({
@@ -690,8 +671,7 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
                     torch::stack({new_link_indices, new_flow_indices}, 0)
                 }, 1);
 
-                // Use actual flow IDs for tensor indexing (like inference code)
-                auto subset_indices = flowid_interacting_tensor; // These are the actual flow IDs
+                auto subset_indices = flowid_active_tensor;
                 auto time_deltas = (time_clock - time_last.index_select(0, subset_indices).squeeze()).view({-1, 1});
                 auto h_vec_time_updated = h_vec.index_select(0, subset_indices);
                 auto h_vec_time_link_updated = z_t_link.index_select(0, active_link_idx);
@@ -703,31 +683,24 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
                     time_deltas_link.fill_(max_time_delta / 1000.0f);
                     h_vec_time_link_updated = lstmcell_time_link.forward(std::vector<c10::IValue>{time_deltas_link, h_vec_time_link_updated}).toTensor();
                 }
-                
-                // Log GNN update details
-                int n_link_nodes = active_link_idx.size(0);
-                int n_edges = edges_list_active.size(1);
-                int total_active_flows = flowid_active_list_all.size(0);
-                std::cout << "[GNN Update] Flow nodes: " << n_flows_active_cur << "/" << total_active_flows << " (interacting/total_active)"
-                          << ", Link nodes: " << n_link_nodes 
-                          << ", Edges: " << n_edges 
-                          << ", Time: " << (max_time_delta) << "μs" << std::endl;
-                
-                std::vector<torch::Tensor> tensors_to_cat = {h_vec_time_updated, h_vec_time_link_updated};
-                auto x_combined = torch::cat(tensors_to_cat, 0);
+
+                // Optional debug
+                // std::cout << "[GNN Update] Flow nodes: " << n_flows_active_cur
+                //           << ", Link nodes: " << active_link_idx.size(0)
+                //           << ", Edges: " << edges_list_active.size(1) << std::endl;
+
+                auto x_combined = torch::cat({h_vec_time_updated, h_vec_time_link_updated}, 0);
                 auto gnn_output_0 = gnn_layer_0.forward(std::vector<c10::IValue>{x_combined, edges_list_active}).toTensor();
                 auto gnn_output_1 = gnn_layer_1.forward(std::vector<c10::IValue>{gnn_output_0, edges_list_active}).toTensor();
                 auto gnn_output_2 = gnn_layer_2.forward(std::vector<c10::IValue>{gnn_output_1, edges_list_active}).toTensor();
                 auto h_vec_rate_updated = gnn_output_2.slice(0, 0, n_flows_active_cur);
                 auto h_vec_rate_link = gnn_output_2.slice(0, n_flows_active_cur, gnn_output_2.size(0));
                 auto params_data = params_tensor.repeat({n_flows_active_cur, 1});
-                std::vector<torch::Tensor> rate_tensors = {h_vec_rate_updated, params_data};
-                h_vec_rate_updated = torch::cat(rate_tensors, 1);
+                h_vec_rate_updated = torch::cat({h_vec_rate_updated, params_data}, 1);
                 h_vec_rate_updated = lstmcell_rate.forward(std::vector<c10::IValue>{h_vec_rate_updated, h_vec_time_updated}).toTensor();
                 h_vec_rate_link = lstmcell_rate_link.forward(std::vector<c10::IValue>{h_vec_rate_link, h_vec_time_link_updated}).toTensor();
                 h_vec.index_copy_(0, subset_indices, h_vec_rate_updated);
                 z_t_link.index_copy_(0, active_link_idx.to(torch::kInt64), h_vec_rate_link);
-                // Update time_last only for flows that participated in this GNN update
                 time_last.index_put_({torch::indexing::TensorIndex(subset_indices)}, time_clock);
             }
         }

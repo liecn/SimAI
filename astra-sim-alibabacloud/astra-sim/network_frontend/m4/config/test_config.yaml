@@ -4,10 +4,7 @@
 dataset:
   shard: 0
   lr: 10
-  # n_links_max: 96
   n_links_max: 768
-  # n_links_max: 16896
-  # n_links_max: 135168
   train_frac: 0.9
   topo_type: "_topology_flows"
   sampling_method: "balanced" # weighted, uniform, balanced
@@ -23,7 +20,7 @@ network:
 
 # M4-specific parameters
 m4:
-  batch_time_ns: 100000       # Temporal batching interval (ns)
+  batch_time_ns: 300       # Temporal batching interval (ns)
 
 # Model parameters
 model:
