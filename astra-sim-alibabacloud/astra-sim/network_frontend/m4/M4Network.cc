@@ -73,6 +73,15 @@ static bool is_sending_finished(int src, int dst, AstraSim::ncclFlowTag flowTag)
     auto dep_key = std::make_pair(dep_cur_id, std::make_pair(src, dst));
     auto it = waiting_to_sent_callback.find(dep_key);
     if (it != waiting_to_sent_callback.end()) {
+        // SAFETY CHECK: Prevent underflow corruption (like FlowSim)
+        if (it->second <= 0) {
+            std::cerr << "[M4 DEPENDENCY ERROR] Sender counter already at " << it->second 
+                      << " for cur_id=" << dep_cur_id << " src=" << src << " dst=" << dst 
+                      << " at time=" << M4::Now() << "ns" << std::endl;
+            waiting_to_sent_callback.erase(it);
+            return true; // Force completion to avoid deadlock
+        }
+        
         it->second--;
         if (it->second <= 0) {
             waiting_to_sent_callback.erase(it);
@@ -89,6 +98,15 @@ static bool is_receive_finished(int src, int dst, AstraSim::ncclFlowTag flowTag)
     auto dep_key = std::make_pair(dep_cur_id, std::make_pair(src, dst));
     auto it = waiting_to_notify_receiver.find(dep_key);
     if (it != waiting_to_notify_receiver.end()) {
+        // SAFETY CHECK: Prevent underflow corruption (like FlowSim)  
+        if (it->second <= 0) {
+            std::cerr << "[M4 DEPENDENCY ERROR] Receiver counter already at " << it->second 
+                      << " for cur_id=" << dep_cur_id << " src=" << src << " dst=" << dst 
+                      << " at time=" << M4::Now() << "ns" << std::endl;
+            waiting_to_notify_receiver.erase(it);
+            return true; // Force completion
+        }
+        
         it->second--;
         if (it->second <= 0) {
             waiting_to_notify_receiver.erase(it);
