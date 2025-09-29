@@ -433,7 +433,7 @@ void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, Callb
     // Keep ownership in active_flows_ptrs until batch processing
     active_flows_ptrs.push_back(std::move(m4_flow));
     
-    // Temporal batching: arm/update a timer to fire at now+batch_time_ns_
+    // Temporal batching: schedule one ML update at now + batch_time_ns_ if none is pending
     const auto current_time = event_queue->get_current_time();
     if (batch_timeout_event_id_ == 0) {
         batch_timeout_event_id_ = event_queue->schedule_event(current_time + batch_time_ns_, batch_timeout_callback, nullptr);
@@ -442,9 +442,8 @@ void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, Callb
 
 // Batch processing callback (following FlowSim's pattern)
 void M4::batch_timeout_callback(void* arg) {
-    // Drain all pending flows seen in this window
+    // Drain all pending flows in a single update, then re-arm timer for temporal batching
     process_batch_of_flows_count((int32_t)pending_flows_.size());
-    // Re-arm timer if more flows arrive later
     const auto now = event_queue->get_current_time();
     if (batch_timeout_event_id_ == 0) {
         batch_timeout_event_id_ = event_queue->schedule_event(now + batch_time_ns_, batch_timeout_callback, nullptr);
@@ -731,68 +730,7 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
         }
     }
 
-    // Reschedule completions for interacting active flows (including current batch flows)
-    if (!interacting_flows.empty()) {
-        std::vector<int32_t> flowid_interacting_vec(interacting_flows.begin(), interacting_flows.end());
-        std::sort(flowid_interacting_vec.begin(), flowid_interacting_vec.end());
-        auto flowid_interacting_tensor = torch::tensor(flowid_interacting_vec, torch::TensorOptions().dtype(torch::kInt32).device(device)).to(torch::kInt64);
-
-        // Build a set of current batch flows to avoid double scheduling
-        std::unordered_set<int32_t> current_batch_set;
-        current_batch_set.reserve(flow_ids_batch.size());
-        for (int64_t fid64 : flow_ids_batch) { current_batch_set.insert((int32_t)fid64); }
-
-        // Build inputs for interacting flows using current h_vec and nlinks
-        int n_inter = (int)flowid_interacting_vec.size();
-        auto h_vec_inter = h_vec.index_select(0, flowid_interacting_tensor);
-        auto nlinks_inter = flowid_to_nlinks_tensor.index_select(0, flowid_interacting_tensor).unsqueeze(1);
-        auto params_inter = params_tensor.unsqueeze(0).repeat({n_inter, 1});
-        auto input_inter = torch::cat(std::vector<torch::Tensor>{nlinks_inter, params_inter, h_vec_inter}, 1);
-
-        auto sldn_inter = output_layer.forward(std::vector<c10::IValue>{input_inter}).toTensor().view(-1);
-        sldn_inter = torch::clamp(sldn_inter, 1.0f, std::numeric_limits<float>::infinity());
-        auto sldn_inter_cpu = sldn_inter.to(torch::kCPU);
-        auto sldn_ptr = sldn_inter_cpu.data_ptr<float>();
-
-        // Helper to find active flow pointer by id
-        auto find_flow_ptr = [&](int32_t fid) -> M4Flow* {
-            for (auto &ptr : active_flows_ptrs) {
-                if (ptr && ptr->flow_id == fid) return ptr.get();
-            }
-            return nullptr;
-        };
-
-        for (int i = 0; i < n_inter; ++i) {
-            int32_t fid = flowid_interacting_vec[i];
-            // Skip if not active or if it belongs to the current batch (will be scheduled below)
-            if (!(bool)flowid_active_mask[fid].item<bool>()) continue;
-            if (current_batch_set.find(fid) != current_batch_set.end()) continue;
-
-            float slowdown = sldn_ptr[i];
-            float predicted_fct = slowdown * i_fct_tensor[fid].item<float>();
-            // Only reschedule if we can access the flow pointer safely
-            M4Flow* fptr = find_flow_ptr(fid);
-            if (!(fptr && fptr->callback)) {
-                continue; // keep existing schedule intact
-            }
-            // Remaining-time reschedule (FlowSim-style): do not recompute total-from-now
-            uint64_t flow_start_ns = fptr->start_time;
-            uint64_t elapsed_ns = (current_time > flow_start_ns) ? (current_time - flow_start_ns) : 0ULL;
-            uint64_t total_pred_ns = static_cast<uint64_t>(predicted_fct);
-            uint64_t remain_ns = (total_pred_ns > elapsed_ns) ? (total_pred_ns - elapsed_ns) : 0ULL;
-            if (remain_ns < 1ULL) remain_ns = 1ULL;
-            uint64_t completion_time = static_cast<uint64_t>(current_time + remain_ns);
-
-            // Cancel existing scheduled completion (if any), then reschedule
-            auto it_e = flow_id_to_completion_event_id.find(fid);
-            if (it_e != flow_id_to_completion_event_id.end()) {
-                event_queue->cancel_event(it_e->second);
-                flow_id_to_completion_event_id.erase(it_e);
-            }
-            EventId eid = event_queue->schedule_event(completion_time, fptr->callback, fptr->callbackArg);
-            flow_id_to_completion_event_id[fid] = eid;
-        }
-    }
+    // No rescheduling of previously active flows: predictions are applied only to new arrivals
 
     // Create flow ID batch tensor for ML inference
     int batch_size = static_cast<int>(flow_ids_batch.size());
