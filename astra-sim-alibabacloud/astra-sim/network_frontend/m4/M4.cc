@@ -422,10 +422,13 @@ void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, Callb
     
     // Create M4Flow and add to pending batch (following FlowSim's temporal batching)
     auto m4_flow = std::make_unique<M4Flow>(src, dst, size, node_path, callback, callbackArg);
-    // Try to use flowTag.current_flow_id as global flow_id if available
+    // Use ASTRA-Sim flow id and actual send start time if available
     if (callbackArg) {
         auto* cd = reinterpret_cast<M4CallbackData*>(callbackArg);
         m4_flow->flow_id = cd->flowTag.current_flow_id;
+        m4_flow->start_time = cd->start_time; // actual network start after AS_SEND_LAT
+    } else {
+        m4_flow->start_time = static_cast<uint64_t>(event_queue->get_current_time());
     }
 
     // Add to pending batch for flow-count processing
@@ -513,7 +516,7 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
             throw std::runtime_error("[M4 ERROR] ASTRA-Sim flow ID out of range: " + std::to_string(flow_id) + " (valid: 0-" + std::to_string(n_flows_max-1) + ")");
         }
         
-        flow->start_time = current_time;
+        // Do not overwrite actual start_time set at send; just count arrivals
         flows_arriving_this_batch++;
 
         uint64_t size = flow->size;
@@ -823,7 +826,9 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
             float scaled_slowdown = (raw_slowdown < 1.0f) ? 1.0f : raw_slowdown; // clamp to physics
 
             float predicted_fct = scaled_slowdown * i_fct_tensor[flow_id].item<float>();
-            uint64_t completion_time = current_time + (uint64_t)predicted_fct;
+            // Anchor completion to actual network start to avoid adding batch wait to FCT
+            uint64_t target_end = flow->start_time + (uint64_t)predicted_fct;
+            uint64_t completion_time = target_end > current_time ? target_end : (current_time + 1ULL);
 
             // Schedule original callback - M4Network.cc handles collective completion correctly
             EventId eid = event_queue->schedule_event(completion_time, flow->callback, flow->callbackArg);
