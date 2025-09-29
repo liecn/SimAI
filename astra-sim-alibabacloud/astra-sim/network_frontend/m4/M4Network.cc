@@ -80,7 +80,8 @@ static bool is_sending_finished(int src, int dst, AstraSim::ncclFlowTag flowTag)
         }
         return false;
     }
-    return true;
+    // Mirror FlowSim/NS3: if no counter is registered, do NOT advance
+    return false;
 }
 
 static bool is_receive_finished(int src, int dst, AstraSim::ncclFlowTag flowTag) {
@@ -95,7 +96,8 @@ static bool is_receive_finished(int src, int dst, AstraSim::ncclFlowTag flowTag)
         }
         return false;
     }
-    return true;
+    // Mirror FlowSim/NS3: if no counter is registered, do NOT advance
+    return false;
 }
 
 // M4 completion callback (same pattern as FlowSim)

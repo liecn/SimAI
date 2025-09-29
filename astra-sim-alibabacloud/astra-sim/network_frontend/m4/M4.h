@@ -72,6 +72,7 @@ private:
     
     // M4-specific configuration parameters
     static int32_t batch_size_flows_; // Flow-count batching size
+    static uint64_t batch_time_ns_;   // Time-based batching window (ns)
     
     static torch::Tensor h_vec;
     static torch::Tensor flowid_active_mask;

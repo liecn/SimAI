@@ -68,6 +68,7 @@ torch::Tensor M4::i_fct_tensor;
 int32_t M4::hidden_size_ = 200; // Model expects 214 total: 1+13+200=214 (matches main_m4_noflowsim.cpp)
 int32_t M4::n_links_max_ = 128;
 int32_t M4::batch_size_flows_ = 128; // Flow-count batching size
+uint64_t M4::batch_time_ns_ = 1000ULL; // 1us default time-based batching window
 int32_t M4::n_flows_max = 50000;  // Large enough for simulation
 int32_t M4::graph_id_cur = 0;
 float M4::time_clock = 0.0f;
@@ -219,6 +220,15 @@ void M4::SetupML() {
                 auto m4_node = config["m4"];
                 if (!m4_node.invalid()) {
                     try { m4_node["batch_size_flows"] >> batch_size_flows_; } catch(...) {}
+                    try {
+                        uint64_t cfg_batch_time_ns = 0ULL;
+                        try { m4_node["batch_time_ns"] >> cfg_batch_time_ns; } catch(...) {}
+                        if (cfg_batch_time_ns == 0ULL) { // backward compatibility
+                            try { m4_node["batch_time_us"] >> cfg_batch_time_ns; } catch(...) {}
+                        }
+                        if (cfg_batch_time_ns > 0ULL) batch_time_ns_ = cfg_batch_time_ns;
+                    } catch(...) {}
+                    // No environment override for batch time; YAML is the single source of truth
                 }
             } catch(...) {
                 // m4 section doesn't exist, use defaults
@@ -437,17 +447,32 @@ void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, Callb
     // Keep ownership in active_flows_ptrs until batch processing
     active_flows_ptrs.push_back(std::move(m4_flow));
     
-    // Flow-count batching: trigger when we have enough flows
+    // Coexisting batching: time-based OR flow-count
     const auto current_time = event_queue->get_current_time();
-    // Trigger batch only when threshold is met (avoid over-fragmentation)
-    if (batch_timeout_event_id_ == 0 && (int)pending_flows_.size() >= batch_size_flows_) {
+    if (batch_timeout_event_id_ == 0) {
+        if ((int)pending_flows_.size() >= batch_size_flows_) {
+            // Flow threshold met: flush immediately
+            batch_timeout_event_id_ = event_queue->schedule_event(current_time, batch_timeout_callback, nullptr);
+        } else {
+            // First arrival (or timer expired): arm time window
+            batch_timeout_event_id_ = event_queue->schedule_event(current_time + batch_time_ns_, batch_timeout_callback, nullptr);
+        }
+    } else if ((int)pending_flows_.size() >= batch_size_flows_) {
+        // Flow threshold reached before timer: flush now, cancel old timer
+        event_queue->cancel_event(batch_timeout_event_id_);
         batch_timeout_event_id_ = event_queue->schedule_event(current_time, batch_timeout_callback, nullptr);
     }
 }
 
 // Batch processing callback (following FlowSim's pattern)
 void M4::batch_timeout_callback(void* arg) {
-    process_batch_of_flows_count(batch_size_flows_);
+    // Drain all pending flows in one update and clear timer
+    batch_timeout_event_id_ = 0;
+    while (!pending_flows_.empty()) {
+        int32_t to_process = std::min<int32_t>(batch_size_flows_, static_cast<int32_t>(pending_flows_.size()));
+        process_batch_of_flows_count(to_process);
+    }
+    // Do not re-arm here; the next arrival will arm the timer or trigger immediate flush
 }
 
 // Process final batch at simulation end (handles remaining flows in final time window)
@@ -920,6 +945,13 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
             auto it_prev = g_flow_id_to_scheduled_time.find(flow_id);
             if (it_prev != g_flow_id_to_scheduled_time.end() && completion_time < it_prev->second) {
                 completion_time = it_prev->second;
+            }
+
+            // Cancel existing scheduled completion (if any) to avoid earlier stale events
+            auto it_e = flow_id_to_completion_event_id.find(flow_id);
+            if (it_e != flow_id_to_completion_event_id.end()) {
+                event_queue->cancel_event(it_e->second);
+                flow_id_to_completion_event_id.erase(it_e);
             }
 
             // Schedule original callback - M4Network.cc handles collective completion correctly
