@@ -71,6 +71,8 @@ static std::map<std::pair<int, std::pair<int, int>>, int> waiting_to_notify_rece
 // Runtime dependency accounting per tag (sanity checks)
 static std::unordered_map<int,int> g_expected_sends_per_tag;      // incremented in sim_send
 static std::unordered_map<int,int> g_completed_recvs_per_tag;     // incremented when receiver gate fires
+static std::unordered_map<int,int> g_seen_sends_per_tag;         // incremented in notify_sender_sending_finished
+static std::unordered_map<int,int> g_expected_recvs_per_tag;     // incremented in sim_send
 
 static bool is_sending_finished(int src, int dst, AstraSim::ncclFlowTag flowTag) {
     int dep_cur_id = flowTag.current_flow_id;
@@ -125,8 +127,7 @@ static void m4_completion_callback(void* arg) {
 
     // Gate receiver notify and FCT logging
     if (is_receive_finished(data->src, data->dst, data->flowTag)) {
-        // Sanity: count a completed recv for this tag
-        g_completed_recvs_per_tag[data->flowTag.tag_id]++;
+        // Counter increment moved to notify_receiver_packet_arrived to avoid double-counting
         if (g_fct_output_file) {
             auto flow_key = std::make_tuple(data->flowTag.tag_id, data->flowTag.current_flow_id, data->src, data->dst);
             auto it = flow_start_times.find(flow_key);
@@ -146,17 +147,9 @@ static void m4_completion_callback(void* arg) {
                 unsigned int src_port = 0u;
                 unsigned int dst_port = 0u;
 
-                const AstraSim::RoutingFramework* rf = M4::GetRoutingFramework();
-                if (!rf) {
-                    throw std::runtime_error("[M4 ERROR] RoutingFramework is null when computing standalone_fct (send)");
-                }
-                uint64_t base_rtt = rf->GetPairRtt(data->src, data->dst);
-                uint64_t b_bps = rf->GetPairBandwidth(data->src, data->dst);
-                const uint32_t packet_payload_size = 1000u;
-                const uint32_t header_overhead = 52u;
-                uint64_t num_pkts = (data->count + packet_payload_size - 1) / packet_payload_size;
-                uint64_t total_bytes = data->count + num_pkts * header_overhead;
-                uint64_t standalone_fct = base_rtt + total_bytes * 8000000000lu / b_bps;
+                // CRITICAL FIX: Use shared ideal FCT calculation
+                uint64_t standalone_fct = M4::CalculateIdealFCT(data->src, data->dst, data->count);
+                
 
                 fprintf(g_fct_output_file, "%08x %08x %u %u %lu %lu %lu %lu %d\n",
                         src_ip, dst_ip, src_port, dst_port, data->count, start_time, fct_ns, standalone_fct,
@@ -220,8 +213,9 @@ int M4Network::sim_send(void* buffer, uint64_t count, int type, int dst, int tag
     // Store using FlowSim key (tag_id, (src,dst))
     auto sh_key = make_pair(request->flowTag.tag_id, make_pair(t.src, t.dest));
     sentHash[sh_key] = t;
-    // Sanity: increment expected sends per tag
+    // Sanity: increment expected sends/recvs per tag
     g_expected_sends_per_tag[request->flowTag.tag_id]++;
+    g_expected_recvs_per_tag[request->flowTag.tag_id]++;
     
     // Track initial request time (actual send occurs after send latency)
     uint64_t start = static_cast<uint64_t>(M4::Now());
@@ -371,6 +365,14 @@ void M4Network::notify_receiver_packet_arrived(int sender_node, int receiver_nod
             }
 
             t.msg_handler(t.fun_arg);
+            
+            // Increment completed recvs counter and verify dependency consistency
+            g_completed_recvs_per_tag[tag]++;
+            if (g_completed_recvs_per_tag[tag] > g_expected_recvs_per_tag[tag]) {
+                std::cout << "[DEP ERROR] Tag " << tag << " completed_recvs=" << g_completed_recvs_per_tag[tag] 
+                         << " > expected_recvs=" << g_expected_recvs_per_tag[tag] << std::endl;
+                assert(false && "Dependency leak: more recvs completed than expected");
+            }
         }
     } else {
         // Receiver not yet registered: queue flowTag and accumulate received size
@@ -417,6 +419,14 @@ void M4Network::notify_sender_sending_finished(int sender_node, int receiver_nod
             }
             // Call sender handler directly to continue AstraSim chain
             t2.msg_handler(t2.fun_arg);
+            
+            // Increment seen sends counter and verify dependency consistency
+            g_seen_sends_per_tag[tag]++;
+            if (g_seen_sends_per_tag[tag] > g_expected_sends_per_tag[tag]) {
+                std::cout << "[DEP ERROR] Tag " << tag << " seen_sends=" << g_seen_sends_per_tag[tag] 
+                         << " > expected_sends=" << g_expected_sends_per_tag[tag] << std::endl;
+                assert(false && "Dependency leak: more sends completed than expected");
+            }
         }
     }
 }
@@ -436,6 +446,22 @@ int M4Network::sim_finish() {
     }
     // Match FlowSim's FCT summary format exactly
     std::cout << "[FCT SUMMARY] lines=" << g_fct_lines_written << std::endl;
+    
+    // Print dependency counter summary for debugging
+    std::cout << "[DEP SUMMARY] Dependency counter verification:" << std::endl;
+    for (auto& [tag, expected_sends] : g_expected_sends_per_tag) {
+        int seen_sends = g_seen_sends_per_tag[tag];
+        int expected_recvs = g_expected_recvs_per_tag[tag];
+        int completed_recvs = g_completed_recvs_per_tag[tag];
+        std::cout << "[DEP SUMMARY] Tag " << tag << ": sends=" << seen_sends << "/" << expected_sends
+                  << ", recvs=" << completed_recvs << "/" << expected_recvs << std::endl;
+        if (seen_sends != expected_sends) {
+            std::cout << "[DEP WARNING] Tag " << tag << " send count mismatch!" << std::endl;
+        }
+        if (completed_recvs != expected_recvs) {
+            std::cout << "[DEP WARNING] Tag " << tag << " recv count mismatch!" << std::endl;
+        }
+    }
     
     if (g_fct_output_file) {
         fflush(g_fct_output_file);

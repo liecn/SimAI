@@ -398,6 +398,53 @@ double M4::Now() {
     return event_queue->get_current_time();
 }
 
+// CRITICAL FIX: Single ideal FCT calculation function
+// This ensures ML processing and FCT logging use identical values
+uint64_t M4::CalculateIdealFCT(int src, int dst, uint64_t size) {
+    if (!routing_framework_) {
+        throw std::runtime_error("[M4 ERROR] RoutingFramework is null when computing ideal FCT");
+    }
+    
+    uint64_t base_rtt = routing_framework_->GetPairRtt(src, dst);
+    uint64_t b_bps = routing_framework_->GetPairBandwidth(src, dst);
+    
+    const uint32_t packet_payload_size = 1000u;
+    const uint32_t header_overhead = 52u;
+    uint64_t num_pkts = (size + packet_payload_size - 1) / packet_payload_size;
+    uint64_t total_bytes = size + num_pkts * header_overhead;
+    
+    return base_rtt + total_bytes * 8000000000lu / b_bps;
+}
+
+// Unified scheduling helper used everywhere we schedule/reschedule a flow
+void M4::ScheduleWithRemainingTime(int32_t flow_id, uint64_t now_ns, uint64_t remaining_ns) {
+    if (remaining_ns == 0) remaining_ns = 1ULL;
+    uint64_t completion_time = now_ns + remaining_ns;
+
+    // Find flow object to access callback/callbackArg
+    M4Flow* fptr = nullptr;
+    for (auto &uptr : active_flows_ptrs) {
+        if (uptr && uptr->flow_id == flow_id) { fptr = uptr.get(); break; }
+    }
+    if (!fptr) return; // flow might have completed; nothing to schedule
+
+    auto it_e = flow_id_to_completion_event_id.find(flow_id);
+    if (it_e != flow_id_to_completion_event_id.end()) {
+        // Push-only: do not pull earlier than already scheduled
+        uint64_t prev = flow_id_to_scheduled_time_ns[flow_id];
+        if (completion_time > prev) {
+            event_queue->cancel_event(it_e->second);
+            EventId new_eid = event_queue->schedule_event(completion_time, fptr->callback, fptr->callbackArg);
+            it_e->second = new_eid;
+            flow_id_to_scheduled_time_ns[flow_id] = completion_time;
+        }
+    } else {
+        EventId eid = event_queue->schedule_event(completion_time, fptr->callback, fptr->callbackArg);
+        flow_id_to_completion_event_id[flow_id] = eid;
+        flow_id_to_scheduled_time_ns[flow_id] = completion_time;
+    }
+}
+
 // Remove old completion callback - now handled by event-driven processing
 
 void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, CallbackArg callbackArg) {
@@ -419,6 +466,9 @@ void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, Callb
     // Get pre-calculated path from routing framework (same as FlowSim)
     std::vector<int> node_path = routing_framework_->GetFlowSimPathByNodeIds(src, dst);
     
+    // CRITICAL FIX: Use shared ideal FCT calculation
+    uint64_t correct_ideal_fct = CalculateIdealFCT(src, dst, size);
+
     // Create M4Flow and add to pending batch (following FlowSim's temporal batching)
     auto m4_flow = std::make_unique<M4Flow>(src, dst, size, node_path, callback, callbackArg);
     // Use ASTRA-Sim flow id and actual send start time if available
@@ -426,6 +476,14 @@ void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, Callb
         auto* cd = reinterpret_cast<M4CallbackData*>(callbackArg);
         m4_flow->flow_id = cd->flowTag.current_flow_id;
         m4_flow->start_time = cd->start_time; // actual network start after AS_SEND_LAT
+        
+        // Store start time
+        flow_id_to_start_time_ns[cd->flowTag.current_flow_id] = cd->start_time;
+        // Baseline scheduling at ideal FCT; ML will only push later
+        uint64_t base_completion = cd->start_time + correct_ideal_fct;
+        EventId base_eid = event_queue->schedule_event(base_completion, callback, callbackArg);
+        flow_id_to_completion_event_id[cd->flowTag.current_flow_id] = base_eid;
+        flow_id_to_scheduled_time_ns[cd->flowTag.current_flow_id] = base_completion;
     } else {
         m4_flow->start_time = static_cast<uint64_t>(event_queue->get_current_time());
     }
@@ -445,9 +503,13 @@ void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, Callb
 // Batch processing callback (following FlowSim's pattern)
 void M4::batch_timeout_callback(void* arg) {
     // Drain all pending flows in a single update, then re-arm timer for temporal batching
+    // Clear the current timer id to allow re-arming
+    batch_timeout_event_id_ = 0;
     process_batch_of_flows_count((int32_t)pending_flows_.size());
     const auto now = event_queue->get_current_time();
-    if (batch_timeout_event_id_ == 0) {
+    // Re-arm only if there is work (active or pending flows)
+    bool has_work = !pending_flows_.empty() || (torch::nonzero(flowid_active_mask).flatten().numel() > 0);
+    if (has_work) {
         batch_timeout_event_id_ = event_queue->schedule_event(now + batch_time_ns_, batch_timeout_callback, nullptr);
     }
 }
@@ -521,22 +583,8 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
         uint64_t size = flow->size;
         double size_bytes = static_cast<double>(size);
         
-        // Use routing framework's pre-computed RTT and bandwidth (same as NS3)
-        if (!routing_framework_) {
-            throw std::runtime_error("[M4 ERROR] RoutingFramework is null when computing ideal FCT");
-        }
-        
-        uint64_t base_rtt = routing_framework_->GetPairRtt(flow->src, flow->dst);
-        uint64_t b_bps = routing_framework_->GetPairBandwidth(flow->src, flow->dst);
-        
-        const uint32_t packet_payload_size = 1000u;
-        const uint32_t header_overhead = 52u; //
-        uint64_t num_pkts = (size + packet_payload_size - 1) / packet_payload_size;
-        uint64_t total_bytes = size + num_pkts * header_overhead;
-        
-        // Use NS3's exact calculation: base_rtt + total_bytes * 8000000000lu / b
-        double ideal_fct = (double)base_rtt + (double)(total_bytes * 8000000000ULL) / (double)b_bps;
-        // std::cout << "[M4 DBG] ideal_fct=" << ideal_fct << " base_rtt=" << base_rtt << " total_bytes=" << total_bytes << " b_bps=" << b_bps << std::endl;
+        // CRITICAL FIX: Use shared ideal FCT calculation
+        double ideal_fct = (double)CalculateIdealFCT(flow->src, flow->dst, size);
         // Get route for hop count (still needed for ML features) via RoutingFramework
         std::vector<int> ns3_route = routing_framework_->GetFlowSimPathByNodeIds(flow->src, flow->dst);
         if (ns3_route.size() < 2) {
@@ -714,24 +762,9 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
                 // Iterate and push later if needed
                 for (int i = 0; i < n_flows_active_cur; i++) {
                     int fid = subset_indices[i].item<int32_t>();
-                    float predicted_fct = sldn_all[i].item<float>() * i_fct_tensor[fid].item<float>();
-                    uint64_t start_ns = flow_id_to_start_time_ns.count(fid) ? flow_id_to_start_time_ns[fid] : (uint64_t)time_clock;
-                    uint64_t target_end = start_ns + (uint64_t)predicted_fct;
-                    auto it_ev = flow_id_to_completion_event_id.find(fid);
-                    if (it_ev != flow_id_to_completion_event_id.end()) {
-                        // Cancel and reschedule to later time only
-                        // Find the active flow to recover its callback
-                        M4Flow* fptr = nullptr;
-                        for (auto &uptr : active_flows_ptrs) {
-                            if (uptr && uptr->flow_id == fid) { fptr = uptr.get(); break; }
-                        }
-                        if (fptr) {
-                            event_queue->cancel_event(it_ev->second);
-                            EventId new_eid = event_queue->schedule_event(target_end, fptr->callback, fptr->callbackArg);
-                            it_ev->second = new_eid;
-                            flow_id_to_scheduled_time_ns[fid] = target_end;
-                        }
-                    }
+                    float predicted_remaining_fct = sldn_all[i].item<float>() * i_fct_tensor[fid].item<float>();
+                    uint64_t now_ns = (uint64_t)time_clock;
+                    ScheduleWithRemainingTime(fid, now_ns, (uint64_t)predicted_remaining_fct);
                 }
             }
         }
@@ -828,34 +861,17 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
             // Normal ML inference for flows with valid routes
             float raw_slowdown = sldn_data[batch_idx];
             float scaled_slowdown = (raw_slowdown < 1.0f) ? 1.0f : raw_slowdown; // clamp to physics
-
-            float predicted_fct = scaled_slowdown * i_fct_tensor[flow_id].item<float>();
-            // Remaining-time scheduling: credit elapsed time since start
+            
+            float ideal_fct = i_fct_tensor[flow_id].item<float>();
+            float predicted_remaining_fct = scaled_slowdown * ideal_fct;
+            
+            // CORRECT: ML predicts remaining time from current moment
+            // Store start time for final FCT calculation
             if (!flow_id_to_start_time_ns.count(flow_id)) {
                 flow_id_to_start_time_ns[flow_id] = flow->start_time;
             }
-            uint64_t start_ns = flow_id_to_start_time_ns[flow_id];
             uint64_t now_ns = current_time;
-            uint64_t elapsed = (now_ns > start_ns) ? (now_ns - start_ns) : 0ULL;
-            uint64_t predicted_total = (uint64_t)predicted_fct;
-            uint64_t remaining = (predicted_total > elapsed) ? (predicted_total - elapsed) : 1ULL;
-            uint64_t completion_time = now_ns + remaining;
-
-            // Growth-only rescheduling: only push later than previously scheduled
-            auto it_e = flow_id_to_completion_event_id.find(flow_id);
-            if (it_e != flow_id_to_completion_event_id.end()) {
-                uint64_t prev_sched = flow_id_to_scheduled_time_ns.count(flow_id) ? flow_id_to_scheduled_time_ns[flow_id] : 0ULL;
-                if (completion_time > prev_sched) {
-                    event_queue->cancel_event(it_e->second);
-                    EventId new_eid = event_queue->schedule_event(completion_time, flow->callback, flow->callbackArg);
-                    it_e->second = new_eid;
-                    flow_id_to_scheduled_time_ns[flow_id] = completion_time;
-                }
-            } else {
-                EventId eid = event_queue->schedule_event(completion_time, flow->callback, flow->callbackArg);
-                flow_id_to_completion_event_id[flow_id] = eid;
-                flow_id_to_scheduled_time_ns[flow_id] = completion_time;
-            }
+            ScheduleWithRemainingTime(flow_id, now_ns, (uint64_t)predicted_remaining_fct);
         }
     }
     

@@ -127,6 +127,13 @@ public:
     static void Stop();
     static void Destroy();
     
+    // CRITICAL FIX: Single ideal FCT calculation function used by both ML and FCT logging
+    static uint64_t CalculateIdealFCT(int src, int dst, uint64_t size);
+
+    // Unified scheduling helper: schedule (or reschedule) a flow using remaining time prediction
+    // Schedules completion at (now_ns + remaining_ns), updates internal maps consistently
+    static void ScheduleWithRemainingTime(int32_t flow_id, uint64_t now_ns, uint64_t remaining_ns);
+    
     // Scheduling and sending (same interface as FlowSim)
     static void Schedule(uint64_t delay, void (*fun_ptr)(void* fun_arg), void* fun_arg);
     static void Send(int src, int dst, uint64_t size, int tag, Callback callback, CallbackArg callbackArg);
