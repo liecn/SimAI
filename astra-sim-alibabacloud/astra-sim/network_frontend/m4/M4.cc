@@ -67,7 +67,7 @@ torch::Tensor M4::i_fct_tensor;
 // Flow and graph management
 int32_t M4::hidden_size_ = 200; // Model expects 214 total: 1+13+200=214 (matches main_m4_noflowsim.cpp)
 int32_t M4::n_links_max_ = 128;
-int32_t M4::batch_size_flows_ = 128; // Flow-count batching size
+uint64_t M4::batch_time_ns_ = 300; // Default temporal batching interval
 int32_t M4::n_flows_max = 50000;  // Large enough for simulation
 int32_t M4::graph_id_cur = 0;
 float M4::time_clock = 0.0f;
@@ -220,7 +220,7 @@ void M4::SetupML() {
             try {
                 auto m4_node = config["m4"];
                 if (!m4_node.invalid()) {
-                    try { m4_node["batch_size_flows"] >> batch_size_flows_; } catch(...) {}
+                    try { m4_node["batch_time_ns"] >> batch_time_ns_; } catch(...) {}
                 }
             } catch(...) {
                 // m4 section doesn't exist, use defaults
@@ -268,7 +268,7 @@ void M4::SetupML() {
     float topo_latency = topology->get_latency(); // in ns
     
     std::cout << "[M4] Loaded network parameters from config: bfsz=" << param_values[0] << ", fwin=" << param_values[1] 
-              << ", cc=dctcp, u_tgt=" << param_values[9] << ", dctcp_k=" << param_values[6] << ", topology_bw=" << (topo_bandwidth * 8.0) << "Gbps, topology_lat=" << topo_latency << "ns, batch_size_flows=" << batch_size_flows_ << std::endl;
+              << ", cc=dctcp, u_tgt=" << param_values[9] << ", dctcp_k=" << param_values[6] << ", topology_bw=" << (topo_bandwidth * 8.0) << "Gbps, topology_lat=" << topo_latency << "ns, batch_time_ns=" << batch_time_ns_ << std::endl;
     
     // Initialize multi-flow state tensors (from @inference/ ground truth)
     auto options_float = torch::TensorOptions().dtype(torch::kFloat32).device(device);
@@ -433,16 +433,22 @@ void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, Callb
     // Keep ownership in active_flows_ptrs until batch processing
     active_flows_ptrs.push_back(std::move(m4_flow));
     
-    // Flow-count batching: trigger when we have enough flows
+    // Temporal batching: arm/update a timer to fire at now+batch_time_ns_
     const auto current_time = event_queue->get_current_time();
-    if (batch_timeout_event_id_ == 0 && (int)pending_flows_.size() >= batch_size_flows_) {
-        batch_timeout_event_id_ = event_queue->schedule_event(current_time, batch_timeout_callback, nullptr);
+    if (batch_timeout_event_id_ == 0) {
+        batch_timeout_event_id_ = event_queue->schedule_event(current_time + batch_time_ns_, batch_timeout_callback, nullptr);
     }
 }
 
 // Batch processing callback (following FlowSim's pattern)
 void M4::batch_timeout_callback(void* arg) {
-    process_batch_of_flows_count(batch_size_flows_);
+    // Drain all pending flows seen in this window
+    process_batch_of_flows_count((int32_t)pending_flows_.size());
+    // Re-arm timer if more flows arrive later
+    const auto now = event_queue->get_current_time();
+    if (batch_timeout_event_id_ == 0) {
+        batch_timeout_event_id_ = event_queue->schedule_event(now + batch_time_ns_, batch_timeout_callback, nullptr);
+    }
 }
 
 // Process final batch at simulation end (handles remaining flows in final time window)
@@ -459,12 +465,7 @@ void M4::process_final_batch() {
             break;
         }
 
-        // Process all full batches
-        while ((int)pending_flows_.size() >= batch_size_flows_) {
-            process_batch_of_flows_count(batch_size_flows_);
-        }
-
-        // Process any remaining partial batch
+        // Drain all remaining flows regardless of size
         if (!pending_flows_.empty()) {
             process_batch_of_flows_count((int32_t)pending_flows_.size());
         }
@@ -702,13 +703,13 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
                 }
                 
                 // Log GNN update details
-                // int n_link_nodes = active_link_idx.size(0);
-                // int n_edges = edges_list_active.size(1);
-                // int total_active_flows = flowid_active_list_all.size(0);
-                // std::cout << "[GNN Update] Flow nodes: " << n_flows_active_cur << "/" << total_active_flows << " (interacting/total_active)"
-                //           << ", Link nodes: " << n_link_nodes 
-                //           << ", Edges: " << n_edges 
-                //           << ", Time: " << (max_time_delta) << "μs" << std::endl;
+                int n_link_nodes = active_link_idx.size(0);
+                int n_edges = edges_list_active.size(1);
+                int total_active_flows = flowid_active_list_all.size(0);
+                std::cout << "[GNN Update] Flow nodes: " << n_flows_active_cur << "/" << total_active_flows << " (interacting/total_active)"
+                          << ", Link nodes: " << n_link_nodes 
+                          << ", Edges: " << n_edges 
+                          << ", Time: " << (max_time_delta) << "μs" << std::endl;
                 
                 std::vector<torch::Tensor> tensors_to_cat = {h_vec_time_updated, h_vec_time_link_updated};
                 auto x_combined = torch::cat(tensors_to_cat, 0);
