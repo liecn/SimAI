@@ -68,6 +68,10 @@ static int m4_callback_count = 0;
 static std::map<std::pair<int, std::pair<int, int>>, int> waiting_to_sent_callback;
 static std::map<std::pair<int, std::pair<int, int>>, int> waiting_to_notify_receiver;
 
+// Runtime dependency accounting per tag (sanity checks)
+static std::unordered_map<int,int> g_expected_sends_per_tag;      // incremented in sim_send
+static std::unordered_map<int,int> g_completed_recvs_per_tag;     // incremented when receiver gate fires
+
 static bool is_sending_finished(int src, int dst, AstraSim::ncclFlowTag flowTag) {
     int dep_cur_id = flowTag.current_flow_id;
     auto dep_key = std::make_pair(dep_cur_id, std::make_pair(src, dst));
@@ -121,6 +125,8 @@ static void m4_completion_callback(void* arg) {
 
     // Gate receiver notify and FCT logging
     if (is_receive_finished(data->src, data->dst, data->flowTag)) {
+        // Sanity: count a completed recv for this tag
+        g_completed_recvs_per_tag[data->flowTag.tag_id]++;
         if (g_fct_output_file) {
             auto flow_key = std::make_tuple(data->flowTag.tag_id, data->flowTag.current_flow_id, data->src, data->dst);
             auto it = flow_start_times.find(flow_key);
@@ -214,6 +220,8 @@ int M4Network::sim_send(void* buffer, uint64_t count, int type, int dst, int tag
     // Store using FlowSim key (tag_id, (src,dst))
     auto sh_key = make_pair(request->flowTag.tag_id, make_pair(t.src, t.dest));
     sentHash[sh_key] = t;
+    // Sanity: increment expected sends per tag
+    g_expected_sends_per_tag[request->flowTag.tag_id]++;
     
     // Track initial request time (actual send occurs after send latency)
     uint64_t start = static_cast<uint64_t>(M4::Now());

@@ -14,13 +14,13 @@ dataset:
   enable_queuelen: False
 
 network:
-  buffer_size: 20.0    # Buffer size (bfsz parameter)
-  fwin: 5.0            # Flow window parameter  
-  dctcp_k: 20.0         # DCTCP threshold parameter
+  buffer_size: 16.0    # Buffer size (bfsz parameter)
+  fwin: 15.0            # Flow window parameter  
+  dctcp_k: 30.0         # DCTCP threshold parameter
 
 # M4-specific parameters
 m4:
-  batch_time_ns: 1000       # Temporal batching interval (ns)
+  batch_time_ns: 3000       # Temporal batching interval (ns)
 
 # Model parameters
 model:
