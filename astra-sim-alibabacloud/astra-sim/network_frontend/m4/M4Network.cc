@@ -73,15 +73,6 @@ static bool is_sending_finished(int src, int dst, AstraSim::ncclFlowTag flowTag)
     auto dep_key = std::make_pair(dep_cur_id, std::make_pair(src, dst));
     auto it = waiting_to_sent_callback.find(dep_key);
     if (it != waiting_to_sent_callback.end()) {
-        // SAFETY CHECK: Prevent underflow corruption (like FlowSim)
-        if (it->second <= 0) {
-            std::cerr << "[M4 DEPENDENCY ERROR] Sender counter already at " << it->second 
-                      << " for cur_id=" << dep_cur_id << " src=" << src << " dst=" << dst 
-                      << " at time=" << M4::Now() << "ns" << std::endl;
-            waiting_to_sent_callback.erase(it);
-            return true; // Force completion to avoid deadlock
-        }
-        
         it->second--;
         if (it->second <= 0) {
             waiting_to_sent_callback.erase(it);
@@ -89,7 +80,6 @@ static bool is_sending_finished(int src, int dst, AstraSim::ncclFlowTag flowTag)
         }
         return false;
     }
-    // Mirror FlowSim/NS3: if no counter is registered, do NOT advance
     return false;
 }
 
@@ -98,15 +88,6 @@ static bool is_receive_finished(int src, int dst, AstraSim::ncclFlowTag flowTag)
     auto dep_key = std::make_pair(dep_cur_id, std::make_pair(src, dst));
     auto it = waiting_to_notify_receiver.find(dep_key);
     if (it != waiting_to_notify_receiver.end()) {
-        // SAFETY CHECK: Prevent underflow corruption (like FlowSim)  
-        if (it->second <= 0) {
-            std::cerr << "[M4 DEPENDENCY ERROR] Receiver counter already at " << it->second 
-                      << " for cur_id=" << dep_cur_id << " src=" << src << " dst=" << dst 
-                      << " at time=" << M4::Now() << "ns" << std::endl;
-            waiting_to_notify_receiver.erase(it);
-            return true; // Force completion
-        }
-        
         it->second--;
         if (it->second <= 0) {
             waiting_to_notify_receiver.erase(it);
@@ -114,7 +95,6 @@ static bool is_receive_finished(int src, int dst, AstraSim::ncclFlowTag flowTag)
         }
         return false;
     }
-    // Mirror FlowSim/NS3: if no counter is registered, do NOT advance
     return false;
 }
 
@@ -127,7 +107,7 @@ static void m4_completion_callback(void* arg) {
     // Record the actual completion time when callback is triggered
     data->actual_completion_time = M4::Now();
 
-    // Gate sender notify (no buffering)
+    // Gate sender notify
     if (is_sending_finished(data->src, data->dst, data->flowTag)) {
         data->network->notify_sender_sending_finished(data->src, data->dst, data->count, data->flowTag);
     }
@@ -139,7 +119,7 @@ static void m4_completion_callback(void* arg) {
         g_fct_output_file = fopen(fct_file_path.c_str(), "w");
     }
 
-    // Gate receiver notify and FCT logging (no buffering)
+    // Gate receiver notify and FCT logging
     if (is_receive_finished(data->src, data->dst, data->flowTag)) {
         if (g_fct_output_file) {
             auto flow_key = std::make_tuple(data->flowTag.tag_id, data->flowTag.current_flow_id, data->src, data->dst);
@@ -245,8 +225,6 @@ int M4Network::sim_send(void* buffer, uint64_t count, int type, int dst, int tag
         waiting_to_sent_callback[dep_key]++;
         waiting_to_notify_receiver[dep_key]++;
     }
-
-    // No extra group barrier accounting; FlowSim-style dependency counters are sufficient
 
     // Apply send latency delay like FlowSim
     int send_lat = 0;

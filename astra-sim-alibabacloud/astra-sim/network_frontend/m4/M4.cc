@@ -68,7 +68,6 @@ torch::Tensor M4::i_fct_tensor;
 int32_t M4::hidden_size_ = 200; // Model expects 214 total: 1+13+200=214 (matches main_m4_noflowsim.cpp)
 int32_t M4::n_links_max_ = 128;
 int32_t M4::batch_size_flows_ = 128; // Flow-count batching size
-uint64_t M4::batch_time_ns_ = 1000ULL; // 1us default time-based batching window
 int32_t M4::n_flows_max = 50000;  // Large enough for simulation
 int32_t M4::graph_id_cur = 0;
 float M4::time_clock = 0.0f;
@@ -81,14 +80,17 @@ std::unordered_set<int32_t> M4::current_batch_link_set;
 static int32_t n_flows_arrived = 0;
 static int32_t n_flows_completed = 0;
 
-// Monotonic scheduled-time guard: do not allow reschedules to pull completion earlier
-static std::unordered_map<int32_t, uint64_t> g_flow_id_to_scheduled_time;
 
-// Define static batching state declared in M4.h
+
+// FlowSim-style temporal batching
 std::vector<M4Flow*> M4::pending_flows_;
 std::list<std::unique_ptr<M4Flow>> M4::active_flows_ptrs;
 int M4::batch_timeout_event_id_ = 0;
 bool M4::is_processing_batch_ = false;
+
+// (removed) legacy inference-style flow completion tracking
+
+// Remove old scheduling logic - now handled by event-driven processing
 
 void M4::Init(std::shared_ptr<EventQueue> event_queue, std::shared_ptr<Topology> topo) {
 
@@ -104,7 +106,6 @@ void M4::Init(std::shared_ptr<EventQueue> event_queue, std::shared_ptr<Topology>
     
     
     std::cout << "[M4] Init() completed successfully! models_loaded=" << models_loaded << ", n_flows_max=" << n_flows_max << ", hidden_size_=" << hidden_size_ << std::endl;
-
 }
 
 void M4::SetupML() {
@@ -220,15 +221,6 @@ void M4::SetupML() {
                 auto m4_node = config["m4"];
                 if (!m4_node.invalid()) {
                     try { m4_node["batch_size_flows"] >> batch_size_flows_; } catch(...) {}
-                    try {
-                        uint64_t cfg_batch_time_ns = 0ULL;
-                        try { m4_node["batch_time_ns"] >> cfg_batch_time_ns; } catch(...) {}
-                        if (cfg_batch_time_ns == 0ULL) { // backward compatibility
-                            try { m4_node["batch_time_us"] >> cfg_batch_time_ns; } catch(...) {}
-                        }
-                        if (cfg_batch_time_ns > 0ULL) batch_time_ns_ = cfg_batch_time_ns;
-                    } catch(...) {}
-                    // No environment override for batch time; YAML is the single source of truth
                 }
             } catch(...) {
                 // m4 section doesn't exist, use defaults
@@ -371,12 +363,6 @@ void M4::OnFlowCompleted(const int flow_id) {
     
     // Clean up completed flow from active tracking
     CleanupCompletedFlow(flow_id);
-
-    // Clear any stored monotonic guard state for this flow
-    auto it_guard = g_flow_id_to_scheduled_time.find(flow_id);
-    if (it_guard != g_flow_id_to_scheduled_time.end()) {
-        g_flow_id_to_scheduled_time.erase(it_guard);
-    }
 }
 
 void M4::CleanupCompletedFlow(const int flow_id) {
@@ -447,32 +433,16 @@ void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, Callb
     // Keep ownership in active_flows_ptrs until batch processing
     active_flows_ptrs.push_back(std::move(m4_flow));
     
-    // Coexisting batching: time-based OR flow-count
+    // Flow-count batching: trigger when we have enough flows
     const auto current_time = event_queue->get_current_time();
-    if (batch_timeout_event_id_ == 0) {
-        if ((int)pending_flows_.size() >= batch_size_flows_) {
-            // Flow threshold met: flush immediately
-            batch_timeout_event_id_ = event_queue->schedule_event(current_time, batch_timeout_callback, nullptr);
-        } else {
-            // First arrival (or timer expired): arm time window
-            batch_timeout_event_id_ = event_queue->schedule_event(current_time + batch_time_ns_, batch_timeout_callback, nullptr);
-        }
-    } else if ((int)pending_flows_.size() >= batch_size_flows_) {
-        // Flow threshold reached before timer: flush now, cancel old timer
-        event_queue->cancel_event(batch_timeout_event_id_);
+    if (batch_timeout_event_id_ == 0 && (int)pending_flows_.size() >= batch_size_flows_) {
         batch_timeout_event_id_ = event_queue->schedule_event(current_time, batch_timeout_callback, nullptr);
     }
 }
 
 // Batch processing callback (following FlowSim's pattern)
 void M4::batch_timeout_callback(void* arg) {
-    // Drain all pending flows in one update and clear timer
-    batch_timeout_event_id_ = 0;
-    while (!pending_flows_.empty()) {
-        int32_t to_process = std::min<int32_t>(batch_size_flows_, static_cast<int32_t>(pending_flows_.size()));
-        process_batch_of_flows_count(to_process);
-    }
-    // Do not re-arm here; the next arrival will arm the timer or trigger immediate flush
+    process_batch_of_flows_count(batch_size_flows_);
 }
 
 // Process final batch at simulation end (handles remaining flows in final time window)
@@ -799,40 +769,21 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
 
             float slowdown = sldn_ptr[i];
             float predicted_fct = slowdown * i_fct_tensor[fid].item<float>();
-            // Use each flow's true network start time from callbackArg
+            // Only reschedule if we can access the flow pointer safely
             M4Flow* fptr = find_flow_ptr(fid);
-            uint64_t start_ns = 0ULL;
-            if (fptr && fptr->callbackArg) {
-                auto* cd = reinterpret_cast<M4CallbackData*>(fptr->callbackArg);
-                start_ns = cd->start_time;
-            } else {
-                start_ns = (uint64_t)release_time_tensor[fid].item<float>();
+            if (!(fptr && fptr->callback)) {
+                continue; // keep existing schedule intact
             }
-            uint64_t elapsed_ns = current_time > start_ns ? (current_time - start_ns) : 0ULL;
-            uint64_t total_pred_ns = (uint64_t)predicted_fct;
-            uint64_t remain_ns = total_pred_ns > elapsed_ns ? (total_pred_ns - elapsed_ns) : 0ULL;
-            remain_ns = std::max<uint64_t>(remain_ns, static_cast<uint64_t>(1));
-            uint64_t completion_time = current_time + remain_ns;
-
-            // Apply monotonic completion guard
-            auto it_prev = g_flow_id_to_scheduled_time.find(fid);
-            if (it_prev != g_flow_id_to_scheduled_time.end() && completion_time < it_prev->second) {
-                completion_time = it_prev->second;
-            }
-
-            // Cancel existing scheduled completion (if any)
+            uint64_t completion_time = static_cast<uint64_t>(current_time + (uint64_t)predicted_fct);
+            
+            // Cancel existing scheduled completion (if any), then reschedule
             auto it_e = flow_id_to_completion_event_id.find(fid);
             if (it_e != flow_id_to_completion_event_id.end()) {
                 event_queue->cancel_event(it_e->second);
                 flow_id_to_completion_event_id.erase(it_e);
             }
-
-            // Schedule new completion using stored callback/arg
-            if (fptr && fptr->callback) {
-                EventId eid = event_queue->schedule_event(completion_time, fptr->callback, fptr->callbackArg);
-                flow_id_to_completion_event_id[fid] = eid;
-                g_flow_id_to_scheduled_time[fid] = completion_time;
-            }
+            EventId eid = event_queue->schedule_event(completion_time, fptr->callback, fptr->callbackArg);
+            flow_id_to_completion_event_id[fid] = eid;
         }
     }
 
@@ -927,37 +878,11 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
             float scaled_slowdown = (raw_slowdown < 1.0f) ? 1.0f : raw_slowdown; // clamp to physics
 
             float predicted_fct = scaled_slowdown * i_fct_tensor[flow_id].item<float>();
-            // Remaining time scheduling using true network start time from callbackArg
-            uint64_t start_ns = 0ULL;
-            if (flow->callbackArg) {
-                auto* cd = reinterpret_cast<M4CallbackData*>(flow->callbackArg);
-                start_ns = cd->start_time;
-            } else {
-                start_ns = (uint64_t)release_time_tensor[flow_id].item<float>();
-            }
-            uint64_t elapsed_ns = current_time > start_ns ? (current_time - start_ns) : 0ULL;
-            uint64_t total_pred_ns = (uint64_t)predicted_fct;
-            uint64_t remain_ns = total_pred_ns > elapsed_ns ? (total_pred_ns - elapsed_ns) : 0ULL;
-            remain_ns = std::max<uint64_t>(remain_ns, static_cast<uint64_t>(1));
-            uint64_t completion_time = current_time + remain_ns;
-
-            // Apply monotonic completion guard
-            auto it_prev = g_flow_id_to_scheduled_time.find(flow_id);
-            if (it_prev != g_flow_id_to_scheduled_time.end() && completion_time < it_prev->second) {
-                completion_time = it_prev->second;
-            }
-
-            // Cancel existing scheduled completion (if any) to avoid earlier stale events
-            auto it_e = flow_id_to_completion_event_id.find(flow_id);
-            if (it_e != flow_id_to_completion_event_id.end()) {
-                event_queue->cancel_event(it_e->second);
-                flow_id_to_completion_event_id.erase(it_e);
-            }
+            uint64_t completion_time = current_time + (uint64_t)predicted_fct;
 
             // Schedule original callback - M4Network.cc handles collective completion correctly
             EventId eid = event_queue->schedule_event(completion_time, flow->callback, flow->callbackArg);
             flow_id_to_completion_event_id[flow_id] = eid;
-            g_flow_id_to_scheduled_time[flow_id] = completion_time;
         }
     }
     
@@ -987,6 +912,7 @@ void M4::Destroy() {
 }
 
 std::unordered_map<int32_t, EventId> M4::flow_id_to_completion_event_id;
+// (reverted) monotonic guard map removed
 
 static inline float clamp_ge1(float v) { return v < 1.0f ? 1.0f : v; }
 
