@@ -68,6 +68,7 @@ torch::Tensor M4::i_fct_tensor;
 int32_t M4::hidden_size_ = 200; // Model expects 214 total: 1+13+200=214 (matches main_m4_noflowsim.cpp)
 int32_t M4::n_links_max_ = 1024;
 uint64_t M4::batch_time_ns_ = 300; // Default temporal batching interval
+bool M4::enable_rescheduling_ = true;
 int32_t M4::n_flows_max = 50000;  // Large enough for simulation
 int32_t M4::graph_id_cur = 0;
 float M4::time_clock = 0.0f;
@@ -221,6 +222,7 @@ void M4::SetupML() {
                 auto m4_node = config["m4"];
                 if (!m4_node.invalid()) {
                     try { m4_node["batch_time_ns"] >> batch_time_ns_; } catch(...) {}
+                    try { m4_node["enable_rescheduling"] >> enable_rescheduling_; } catch(...) {}
                 }
             } catch(...) {
                 // m4 section doesn't exist, use defaults
@@ -232,7 +234,7 @@ void M4::SetupML() {
     } catch (const std::exception& e) {
         std::cerr << "[M4] Config parse error: " << e.what() << std::endl;
     }
-    std::cout << "[M4] Loaded network parameters from config: n_links_max=" << n_links_max_ << ", hidden_size=" << hidden_size_ << std::endl;
+    std::cout << "[M4] Loaded network parameters from config: n_links_max=" << n_links_max_ << ", hidden_size=" << hidden_size_ << ", enable_rescheduling=" << enable_rescheduling_ << std::endl;
 
     // Structure from consts.py: [bfsz(0), fwin(1), dctcp_flag(2), dcqcn_flag(3), hp_flag(4), timely_flag(5), 
     //                           dctcp_k(6), dcqcn_k_min(7), dcqcn_k_max(8), u_tgt(9), hpai(10), timely_t_low(11), timely_t_high(12)]
@@ -759,12 +761,14 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
                 auto sldn_all = output_layer.forward(std::vector<c10::IValue>{input_batch_all}).toTensor().view(-1);
                 sldn_all = torch::clamp(sldn_all, 1.0f, std::numeric_limits<float>::infinity());
 
-                // Iterate and push later if needed
+            // Iterate and (optionally) reschedule active flows
                 for (int i = 0; i < n_flows_active_cur; i++) {
                     int fid = subset_indices[i].item<int32_t>();
                     float predicted_remaining_fct = sldn_all[i].item<float>() * i_fct_tensor[fid].item<float>();
                     uint64_t now_ns = (uint64_t)time_clock;
+                if (enable_rescheduling_) {
                     ScheduleWithRemainingTime(fid, now_ns, (uint64_t)predicted_remaining_fct);
+                }
                 }
             }
         }
