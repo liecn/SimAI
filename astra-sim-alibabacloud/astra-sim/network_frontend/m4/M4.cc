@@ -774,8 +774,14 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
             if (!(fptr && fptr->callback)) {
                 continue; // keep existing schedule intact
             }
-            uint64_t completion_time = static_cast<uint64_t>(current_time + (uint64_t)predicted_fct);
-            
+            // Remaining-time reschedule (FlowSim-style): do not recompute total-from-now
+            uint64_t flow_start_ns = fptr->start_time;
+            uint64_t elapsed_ns = (current_time > flow_start_ns) ? (current_time - flow_start_ns) : 0ULL;
+            uint64_t total_pred_ns = static_cast<uint64_t>(predicted_fct);
+            uint64_t remain_ns = (total_pred_ns > elapsed_ns) ? (total_pred_ns - elapsed_ns) : 0ULL;
+            if (remain_ns < 1ULL) remain_ns = 1ULL;
+            uint64_t completion_time = static_cast<uint64_t>(current_time + remain_ns);
+
             // Cancel existing scheduled completion (if any), then reschedule
             auto it_e = flow_id_to_completion_event_id.find(fid);
             if (it_e != flow_id_to_completion_event_id.end()) {
