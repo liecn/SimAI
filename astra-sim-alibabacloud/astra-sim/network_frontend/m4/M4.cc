@@ -236,7 +236,7 @@ void M4::SetupML() {
         std::cerr << "[M4] Config parse error: " << e.what() << std::endl;
     }
     std::cout << "[M4] Loaded network parameters from config: n_links_max=" << n_links_max_ << ", hidden_size=" << hidden_size_ << std::endl;
-
+    
     // Structure from consts.py: [bfsz(0), fwin(1), dctcp_flag(2), dcqcn_flag(3), hp_flag(4), timely_flag(5), 
     //                           dctcp_k(6), dcqcn_k_min(7), dcqcn_k_max(8), u_tgt(9), hpai(10), timely_t_low(11), timely_t_high(12)]
     std::vector<float> param_values(13, 0.0f);
@@ -339,10 +339,10 @@ void M4::OnFlowCompleted(const int flow_id) {
     if (idle_mask.any().item<bool>()) {
         auto idle_links = torch::nonzero(idle_mask).flatten().to(torch::kInt64);
         if (idle_links.numel() > 0) {
-            // Clear graph id and reset z_t_link rows
+        // Clear graph id and reset z_t_link rows
             link_to_graph_id.index_put_({idle_links}, torch::full({idle_links.size(0)}, -1, options_int32));
-            auto reset_values = torch::zeros({idle_links.size(0), z_t_link.size(1)}, options_float);
-            z_t_link.index_put_({idle_links, torch::indexing::Slice()}, reset_values);
+        auto reset_values = torch::zeros({idle_links.size(0), z_t_link.size(1)}, options_float);
+        z_t_link.index_put_({idle_links, torch::indexing::Slice()}, reset_values);
             auto ones_vec = torch::ones({idle_links.size(0)}, options_float);
             z_t_link.index_put_({idle_links, 1}, ones_vec);
             z_t_link.index_put_({idle_links, 2}, ones_vec);
@@ -473,12 +473,12 @@ void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, Callb
     // CRITICAL FIX: Use shared ideal FCT calculation
     uint64_t correct_ideal_fct = CalculateIdealFCT(src, dst, size);
 
-    // Create M4Flow and add to pending batch (following FlowSim's temporal batching)
-    auto m4_flow = std::make_unique<M4Flow>(src, dst, size, node_path, callback, callbackArg);
+        // Create M4Flow and add to pending batch (following FlowSim's temporal batching)
+        auto m4_flow = std::make_unique<M4Flow>(src, dst, size, node_path, callback, callbackArg);
     // Use ASTRA-Sim flow id and actual send start time if available
-    if (callbackArg) {
-        auto* cd = reinterpret_cast<M4CallbackData*>(callbackArg);
-        m4_flow->flow_id = cd->flowTag.current_flow_id;
+        if (callbackArg) {
+            auto* cd = reinterpret_cast<M4CallbackData*>(callbackArg);
+            m4_flow->flow_id = cd->flowTag.current_flow_id;
         m4_flow->start_time = cd->start_time; // actual network start after AS_SEND_LAT
         
         // Store start time
@@ -499,12 +499,12 @@ void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, Callb
     }
 
     // Add to pending batch for flow-count processing
-    pending_flows_.push_back(m4_flow.get());
-    // Keep ownership in active_flows_ptrs until batch processing
-    active_flows_ptrs.push_back(std::move(m4_flow));
-    
+        pending_flows_.push_back(m4_flow.get());
+        // Keep ownership in active_flows_ptrs until batch processing
+        active_flows_ptrs.push_back(std::move(m4_flow));
+        
     // Temporal batching: arm one update at now + batch_time_ns_
-    const auto current_time = event_queue->get_current_time();
+        const auto current_time = event_queue->get_current_time();
     if (batch_timeout_event_id_ == 0) {
         batch_timeout_event_id_ = event_queue->schedule_event(current_time + batch_time_ns_, batch_timeout_callback, nullptr);
     }
