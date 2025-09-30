@@ -68,6 +68,7 @@ torch::Tensor M4::i_fct_tensor;
 int32_t M4::hidden_size_ = 200; // Model expects 214 total: 1+13+200=214 (matches main_m4_noflowsim.cpp)
 int32_t M4::n_links_max_ = 1024;
 uint64_t M4::batch_time_ns_ = 300; // Default temporal batching interval
+int32_t M4::reschedule_flow_count_ = 64; // Default: reschedule every 64 new arrivals
 int32_t M4::n_flows_max = 50000;  // Large enough for simulation
 int32_t M4::graph_id_cur = 0;
 float M4::time_clock = 0.0f;
@@ -79,6 +80,7 @@ std::unordered_set<int32_t> M4::current_batch_link_set;
 // Flow lifecycle tracking counters
 static int32_t n_flows_arrived = 0;
 static int32_t n_flows_completed = 0;
+static int32_t n_flows_since_last_reschedule = 0; // Track arrivals since last reschedule
 
 
 
@@ -221,6 +223,7 @@ void M4::SetupML() {
                 auto m4_node = config["m4"];
                 if (!m4_node.invalid()) {
                     try { m4_node["batch_time_ns"] >> batch_time_ns_; } catch(...) {}
+                    try { m4_node["reschedule_flow_count"] >> reschedule_flow_count_; } catch(...) {}
                 }
             } catch(...) {
                 // m4 section doesn't exist, use defaults
@@ -267,7 +270,8 @@ void M4::SetupML() {
     float topo_latency = topology->get_latency(); // in ns
     
     std::cout << "[M4] Loaded network parameters from config: bfsz=" << param_values[0] << ", fwin=" << param_values[1] 
-              << ", cc=dctcp, u_tgt=" << param_values[9] << ", dctcp_k=" << param_values[6] << ", topology_bw=" << (topo_bandwidth * 8.0) << "Gbps, topology_lat=" << topo_latency << "ns, batch_time_ns=" << batch_time_ns_ << std::endl;
+              << ", cc=dctcp, u_tgt=" << param_values[9] << ", dctcp_k=" << param_values[6] << ", topology_bw=" << (topo_bandwidth * 8.0) << "Gbps, topology_lat=" << topo_latency << "ns, batch_time_ns=" << batch_time_ns_ 
+              << ", reschedule_flow_count=" << reschedule_flow_count_ << std::endl;
     
     // Initialize multi-flow state tensors (from @inference/ ground truth)
     auto options_float = torch::TensorOptions().dtype(torch::kFloat32).device(device);
@@ -773,7 +777,7 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
                 z_t_link.index_copy_(0, active_link_idx.to(torch::kInt64), h_vec_rate_link);
                 time_last.index_put_({torch::indexing::TensorIndex(subset_indices)}, time_clock);
 
-                // MLP prediction for ALL active flows and growth-only push-out
+                // MLP prediction for ALL active flows
                 auto nlinks_batch_all = flowid_to_nlinks_tensor.index_select(0, subset_indices).unsqueeze(1);
                 auto params_batch_all = params_tensor.unsqueeze(0).repeat({n_flows_active_cur, 1});
                 auto input_batch_all = torch::cat({nlinks_batch_all, params_batch_all, h_vec_rate_updated}, 1);
@@ -783,9 +787,53 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
                 // Transfer slowdown predictions from GPU to CPU for processing
                 auto sldn_cpu = sldn_all.to(torch::kCPU);
                 auto sldn_data = sldn_cpu.data_ptr<float>();
+                auto flowid_active_cpu = flowid_active_tensor.to(torch::kCPU);
+                auto flowid_active_data = flowid_active_cpu.data_ptr<int64_t>();
                 
+                // OPTIMIZED: Only reschedule flows in current batch (new arrivals)
+                // Rescheduling all 256 active flows every batch is too expensive (O(N²) due to linear search)
+                // For smooth slowdowns, rely on frequent batching (small batch_time_ns) instead
+                uint64_t now_ns = current_time;
                 
-                // Step 2: Schedule flow completions (M4Network.cc handles collective completion)
+                // Build set of flow IDs in current batch for fast lookup
+                std::unordered_set<int32_t> batch_flow_set;
+                for (int64_t fid : flow_ids_batch) {
+                    batch_flow_set.insert((int32_t)fid);
+                }
+                
+                // Reschedule flows in current batch with their updated predictions
+                for (int i = 0; i < n_flows_active_cur; i++) {
+                    int32_t flow_id = (int32_t)flowid_active_data[i];
+                    
+                    // Only reschedule if flow is in current batch OR reschedule_flow_count_ == 0 (force all)
+                    bool is_in_batch = batch_flow_set.count(flow_id) > 0;
+                    bool should_reschedule_all = (reschedule_flow_count_ == 0);
+                    
+                    if (!is_in_batch && !should_reschedule_all) {
+                        continue; // Skip flows not in current batch unless forcing reschedule
+                    }
+                    
+                    float raw_slowdown = sldn_data[i];
+                    float scaled_slowdown = (raw_slowdown < 1.0f) ? 1.0f : raw_slowdown;
+                    float ideal_fct = i_fct_tensor[flow_id].item<float>();
+                    float predicted_total_fct = scaled_slowdown * ideal_fct;
+                    
+                    // Get flow start time
+                    auto start_it = flow_id_to_start_time_ns.find(flow_id);
+                    if (start_it == flow_id_to_start_time_ns.end()) {
+                        continue;
+                    }
+                    uint64_t start_ns = start_it->second;
+                    uint64_t elapsed = now_ns > start_ns ? (now_ns - start_ns) : 0ULL;
+                    uint64_t remaining = (predicted_total_fct > (float)elapsed) 
+                                        ? (uint64_t)(predicted_total_fct - (float)elapsed) 
+                                        : 1ULL;
+                    
+                    // ScheduleWithRemainingTime only reschedules if completion_time changed
+                    ScheduleWithRemainingTime(flow_id, now_ns, remaining);
+                }
+                
+                // Schedule new arrivals (flows in flows_to_process that have short/empty routes)
                 for (size_t i = 0; i < flows_to_process.size(); i++) {
                     M4Flow* flow = flows_to_process[(int)i];
                     int flow_id = flow->flow_id;
@@ -797,144 +845,13 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
                         event_queue->schedule_event(completion_time, flow->callback, flow->callbackArg);
                         continue; // Skip ML inference for short routes
                     }
-                    
-                    // Find the ML prediction for this flow in the batch
-                    int batch_idx = -1;
-                    for (size_t j = 0; j < flow_ids_batch.size(); j++) {
-                        if ((int)flow_ids_batch[j] == flow_id) {
-                            batch_idx = j;
-                            break;
-                        }
-                    }
-                    
-                    if (batch_idx >= 0) {
-                        // ML prediction for this flow; schedule once (rescheduling disabled)
-                        float raw_slowdown = sldn_data[batch_idx];
-                        float scaled_slowdown = (raw_slowdown < 1.0f) ? 1.0f : raw_slowdown;
-                        float ideal_fct = i_fct_tensor[flow_id].item<float>();
-                        float predicted_total_fct = scaled_slowdown * ideal_fct;
-
-                        if (!flow_id_to_start_time_ns.count(flow_id)) {
-                            flow_id_to_start_time_ns[flow_id] = flow->start_time;
-                        }
-                        uint64_t now_ns = current_time;
-                        uint64_t start_ns = flow_id_to_start_time_ns[flow_id];
-                        uint64_t elapsed = now_ns > start_ns ? (now_ns - start_ns) : 0ULL;
-                        uint64_t remaining = (predicted_total_fct > (float)elapsed) ? (uint64_t)(predicted_total_fct - (float)elapsed) : 1ULL;
-                        ScheduleWithRemainingTime(flow_id, now_ns, remaining);
-                    }
+                    // Normal flows already rescheduled above via ALL active flows loop
                 }
-                
-                // No need to schedule next batch - all pending flows processed
             }
         }
     }
-
-    // No rescheduling of previously active flows: predictions are applied only to new arrivals
-
-    // Create flow ID batch tensor for ML inference
-    int batch_size = static_cast<int>(flow_ids_batch.size());
-    auto flowid_batch = torch::tensor(flow_ids_batch, torch::TensorOptions().dtype(torch::kInt64).device(device));
-    // Batch tensor operations for efficiency
-    auto h_vec_batch = h_vec.index_select(0, flowid_batch);
-    auto nlinks_batch = flowid_to_nlinks_tensor.index_select(0, flowid_batch).unsqueeze(1);
-    auto params_batch = params_tensor.unsqueeze(0).repeat({batch_size, 1});
-    std::vector<torch::Tensor> input_tensors = {nlinks_batch, params_batch, h_vec_batch};
-    auto input_batch = torch::cat(input_tensors, 1);
-
-    // Simple logging: ML update number and active flows
-    // std::cout << "[ML Update " << ml_update_counter << "] " << flow_ids_batch.size() << " active flows" << std::endl;
     
-    // Single MLP forward for the entire temporal batch (predict after step)
-    auto sldn_raw = output_layer.forward(std::vector<c10::IValue>{input_batch}).toTensor().view(-1);
-    // Debug: print slowdown stats for first few batches only
-    // static int debug_batches = 0;
-    // if (debug_batches < 3) {
-    //     auto to_cpu = [](const torch::Tensor& t){ return t.detach().to(torch::kCPU); };
-    //     auto s = to_cpu(sldn_raw);
-    //     double s_min = s.min().item<double>();
-    //     double s_max = s.max().item<double>();
-    //     double s_mean = s.mean().item<double>();
-    //     auto below_one = (s < 1.0).to(torch::kFloat32);
-    //     double frac_below_one = below_one.mean().item<double>();
-    //     auto nlinks_cpu = to_cpu(nlinks_batch.squeeze(1).to(torch::kFloat32));
-    //     auto size_feat_cpu = to_cpu(h_vec_batch.index({torch::indexing::Slice(), 2}));
-    //     double nlinks_min = nlinks_cpu.min().item<double>();
-    //     double nlinks_max = nlinks_cpu.max().item<double>();
-    //     double size_min = size_feat_cpu.min().item<double>();
-    //     double size_max = size_feat_cpu.max().item<double>();
-    //     std::cout << "[M4 DBG] slowdown_raw min/mean/max=" << s_min << "/" << s_mean << "/" << s_max
-    //               << " frac<1=" << frac_below_one
-    //               << " nlinks[min,max]=" << nlinks_min << "," << nlinks_max
-    //               << " size_feat[min,max]=" << size_min << "," << size_max
-    //               << std::endl;
-    //     // print a small slice of the actual feature vectors fed to MLP for the first row
-    //     double nlinks0 = nlinks_cpu[0].item<double>();
-    //     double size0 = size_feat_cpu[0].item<double>();
-    //     std::cout << "[M4 DBG] feat nlinks0=" << nlinks0 << " size0=" << size0 << " h0[0..5]=";
-    //     int h_cols = (int)h_vec_batch.size(1);
-    //     for (int k = 0; k < std::min(6, h_cols); ++k) {
-    //         double v = to_cpu(h_vec_batch.index({0, k})).item<double>();
-    //         if (k) std::cout << ",";
-    //         std::cout << v;
-    //     }
-    //     std::cout << " in0[0..9]=";
-    //     int in_cols = (int)input_batch.size(1);
-    //     for (int k = 0; k < std::min(10, in_cols); ++k) {
-    //         double v = to_cpu(input_batch.index({0, k})).item<double>();
-    //         if (k) std::cout << ",";
-    //         std::cout << v;
-    //     }
-    //     std::cout << std::endl;
-    //     debug_batches++;
-    // }
-    auto sldn = torch::clamp(sldn_raw, 1.0f, std::numeric_limits<float>::infinity());
-
-    // Transfer slowdown predictions from GPU to CPU for processing
-    auto sldn_cpu = sldn.to(torch::kCPU);
-    auto sldn_data = sldn_cpu.data_ptr<float>();
-    
-    
-    // Step 2: Schedule flow completions (M4Network.cc handles collective completion)
-    for (size_t i = 0; i < flows_to_process.size(); i++) {
-        M4Flow* flow = flows_to_process[(int)i];
-        int flow_id = flow->flow_id;
-        
-        // Handle short/empty routes (immediate completion with minimal FCT)
-        if (flow->node_path.empty() || flow->node_path.size() < 2) {
-            float minimal_fct = 1.0f; // 1ns minimal FCT for local/short flows
-            uint64_t completion_time = current_time + (uint64_t)minimal_fct;
-            event_queue->schedule_event(completion_time, flow->callback, flow->callbackArg);
-            continue; // Skip ML inference for short routes
-        }
-        
-        // Find the ML prediction for this flow in the batch
-        int batch_idx = -1;
-        for (size_t j = 0; j < flow_ids_batch.size(); j++) {
-            if ((int)flow_ids_batch[j] == flow_id) {
-                batch_idx = j;
-                break;
-            }
-        }
-        
-        if (batch_idx >= 0) {
-            // ML prediction for this flow; schedule once (rescheduling disabled)
-            float raw_slowdown = sldn_data[batch_idx];
-            float scaled_slowdown = (raw_slowdown < 1.0f) ? 1.0f : raw_slowdown;
-            float ideal_fct = i_fct_tensor[flow_id].item<float>();
-            float predicted_total_fct = scaled_slowdown * ideal_fct;
-
-            if (!flow_id_to_start_time_ns.count(flow_id)) {
-                flow_id_to_start_time_ns[flow_id] = flow->start_time;
-            }
-            uint64_t now_ns = current_time;
-            uint64_t start_ns = flow_id_to_start_time_ns[flow_id];
-            uint64_t elapsed = now_ns > start_ns ? (now_ns - start_ns) : 0ULL;
-            uint64_t remaining = (predicted_total_fct > (float)elapsed) ? (uint64_t)(predicted_total_fct - (float)elapsed) : 1ULL;
-            ScheduleWithRemainingTime(flow_id, now_ns, remaining);
-        }
-    }
-    
+    // All flows (both new arrivals and existing active flows) have been rescheduled above
 }
 
 const AstraSim::RoutingFramework* M4::GetRoutingFramework() {

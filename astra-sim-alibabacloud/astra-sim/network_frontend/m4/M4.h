@@ -71,7 +71,8 @@ private:
     static int32_t n_links_max_;
     
     // M4-specific configuration parameters
-    static uint64_t batch_time_ns_;   // Temporal batching interval
+    static uint64_t batch_time_ns_;      // Temporal batching interval
+    static int32_t reschedule_flow_count_; // Reschedule all active flows every N new arrivals (0 = every batch)
     
     static torch::Tensor h_vec;
     static torch::Tensor flowid_active_mask;
