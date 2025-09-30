@@ -68,7 +68,7 @@ torch::Tensor M4::i_fct_tensor;
 int32_t M4::hidden_size_ = 200; // Model expects 214 total: 1+13+200=214 (matches main_m4_noflowsim.cpp)
 int32_t M4::n_links_max_ = 1024;
 uint64_t M4::batch_time_ns_ = 300; // Default temporal batching interval
-bool M4::enable_rescheduling_ = true;
+bool M4::enable_rescheduling_ = false;
 int32_t M4::n_flows_max = 50000;  // Large enough for simulation
 int32_t M4::graph_id_cur = 0;
 float M4::time_clock = 0.0f;
@@ -432,9 +432,9 @@ void M4::ScheduleWithRemainingTime(int32_t flow_id, uint64_t now_ns, uint64_t re
 
     auto it_e = flow_id_to_completion_event_id.find(flow_id);
     if (it_e != flow_id_to_completion_event_id.end()) {
-        // Push-only: do not pull earlier than already scheduled
+        // Bidirectional: allow pull-in or push-out, but never schedule in the past
         uint64_t prev = flow_id_to_scheduled_time_ns[flow_id];
-        if (completion_time > prev) {
+        if (completion_time != prev && completion_time > now_ns) {
             event_queue->cancel_event(it_e->second);
             EventId new_eid = event_queue->schedule_event(completion_time, fptr->callback, fptr->callbackArg);
             it_e->second = new_eid;
@@ -612,7 +612,10 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
         flowid_to_nlinks_tensor[flow_id] = ns3_num_links;
         i_fct_tensor[flow_id] = static_cast<float>(ideal_fct);
         release_time_tensor[flow_id] = time_clock;
-        flow_id_to_start_time_ns[flow_id] = (uint64_t)time_clock;
+        // Preserve true start time set at send; only set if missing
+        if (!flow_id_to_start_time_ns.count(flow_id)) {
+            flow_id_to_start_time_ns[flow_id] = flow->start_time;
+        }
         time_last[flow_id] = time_clock;  // Initialize time_last to avoid massive time deltas
         flowid_active_mask[flow_id] = true;
         flow_to_graph_id[flow_id] = 0;  // All flows use global graph
@@ -679,15 +682,27 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
         torch::NoGradGuard no_grad;
         time_clock = static_cast<float>(current_time);
         
-        // Batch-local graph: Only process flows that interact with the current batch
-        // Step 1: Find flows that share links with the current batch
+        // Batch-local graph: Only reschedule flows that interact with the current batch
         // Add current batch flows
         for (int64_t fid : flow_ids_batch) {
             interacting_flows.insert((int32_t)fid);
         }
-        // Add other active flows that share links with current batch
+        // Add other active flows that share at least one link with current batch
         auto flowid_active_list_all = torch::nonzero(flowid_active_mask).flatten();
         if (flowid_active_list_all.numel() > 0) {
+            // Identify interacting active flows by link intersection
+            for (int i = 0; i < flowid_active_list_all.size(0); i++) {
+                int32_t fid = flowid_active_list_all[i].item<int32_t>();
+                if (fid < (int32_t)flowid_to_link_indices.size()) {
+                    const auto &links = flowid_to_link_indices[fid];
+                    for (int32_t lid : links) {
+                        if (current_batch_link_set.find(lid) != current_batch_link_set.end()) {
+                            interacting_flows.insert(fid);
+                            break;
+                        }
+                    }
+                }
+            }
             // Build edges over ALL active flows and all their links (match inference main_m4_noflowsim)
             std::vector<int32_t> flow_edges;
             std::vector<int32_t> link_edges;
@@ -761,14 +776,17 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
                 auto sldn_all = output_layer.forward(std::vector<c10::IValue>{input_batch_all}).toTensor().view(-1);
                 sldn_all = torch::clamp(sldn_all, 1.0f, std::numeric_limits<float>::infinity());
 
-            // Iterate and (optionally) reschedule active flows
+                // Iterate and (optionally) reschedule active flows
                 for (int i = 0; i < n_flows_active_cur; i++) {
                     int fid = subset_indices[i].item<int32_t>();
-                    float predicted_remaining_fct = sldn_all[i].item<float>() * i_fct_tensor[fid].item<float>();
+                    float predicted_total_fct = sldn_all[i].item<float>() * i_fct_tensor[fid].item<float>();
                     uint64_t now_ns = (uint64_t)time_clock;
-                if (enable_rescheduling_) {
-                    ScheduleWithRemainingTime(fid, now_ns, (uint64_t)predicted_remaining_fct);
-                }
+                    uint64_t start_ns = flow_id_to_start_time_ns.count(fid) ? flow_id_to_start_time_ns[fid] : now_ns;
+                    uint64_t elapsed = now_ns > start_ns ? (now_ns - start_ns) : 0ULL;
+                    uint64_t remaining = (predicted_total_fct > (float)elapsed) ? (uint64_t)(predicted_total_fct - (float)elapsed) : 1ULL;
+                    if (enable_rescheduling_ && (interacting_flows.find(fid) != interacting_flows.end())) {
+                        ScheduleWithRemainingTime(fid, now_ns, remaining);
+                    }
                 }
             }
         }
@@ -862,20 +880,21 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
         }
         
         if (batch_idx >= 0) {
-            // Normal ML inference for flows with valid routes
+            // ML prediction
             float raw_slowdown = sldn_data[batch_idx];
-            float scaled_slowdown = (raw_slowdown < 1.0f) ? 1.0f : raw_slowdown; // clamp to physics
-            
+            float scaled_slowdown = (raw_slowdown < 1.0f) ? 1.0f : raw_slowdown;
             float ideal_fct = i_fct_tensor[flow_id].item<float>();
-            float predicted_remaining_fct = scaled_slowdown * ideal_fct;
-            
-            // CORRECT: ML predicts remaining time from current moment
-            // Store start time for final FCT calculation
+            float predicted_total_fct = scaled_slowdown * ideal_fct;
+
+            // Preserve true start; compute remaining = predicted_total - elapsed
             if (!flow_id_to_start_time_ns.count(flow_id)) {
                 flow_id_to_start_time_ns[flow_id] = flow->start_time;
             }
             uint64_t now_ns = current_time;
-            ScheduleWithRemainingTime(flow_id, now_ns, (uint64_t)predicted_remaining_fct);
+            uint64_t start_ns = flow_id_to_start_time_ns[flow_id];
+            uint64_t elapsed = now_ns > start_ns ? (now_ns - start_ns) : 0ULL;
+            uint64_t remaining = (predicted_total_fct > (float)elapsed) ? (uint64_t)(predicted_total_fct - (float)elapsed) : 1ULL;
+            ScheduleWithRemainingTime(flow_id, now_ns, remaining);
         }
     }
     

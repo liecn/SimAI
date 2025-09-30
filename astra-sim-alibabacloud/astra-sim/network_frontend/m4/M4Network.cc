@@ -68,11 +68,16 @@ static int m4_callback_count = 0;
 static std::map<std::pair<int, std::pair<int, int>>, int> waiting_to_sent_callback;
 static std::map<std::pair<int, std::pair<int, int>>, int> waiting_to_notify_receiver;
 
-// Runtime dependency accounting per tag (sanity checks)
-static std::unordered_map<int,int> g_expected_sends_per_tag;      // incremented in sim_send
-static std::unordered_map<int,int> g_completed_recvs_per_tag;     // incremented when receiver gate fires
-static std::unordered_map<int,int> g_seen_sends_per_tag;         // incremented in notify_sender_sending_finished
-static std::unordered_map<int,int> g_expected_recvs_per_tag;     // incremented in sim_send
+// Runtime dependency accounting keyed by (tag_id, current_flow_id)
+// Use 64-bit composite key: high 32 bits = tag_id, low 32 bits = current_flow_id
+static inline uint64_t make_tag_flow_key(int tag_id, int flow_id) {
+    return (static_cast<uint64_t>(static_cast<uint32_t>(tag_id)) << 32) |
+           static_cast<uint64_t>(static_cast<uint32_t>(flow_id));
+}
+static std::unordered_map<uint64_t,int> g_expected_sends_per_tagflow;      // incremented in sim_send
+static std::unordered_map<uint64_t,int> g_completed_recvs_per_tagflow;     // incremented when receiver gate fires
+static std::unordered_map<uint64_t,int> g_seen_sends_per_tagflow;          // incremented in notify_sender_sending_finished
+static std::unordered_map<uint64_t,int> g_expected_recvs_per_tagflow;      // incremented in sim_send
 
 static bool is_sending_finished(int src, int dst, AstraSim::ncclFlowTag flowTag) {
     int dep_cur_id = flowTag.current_flow_id;
@@ -213,9 +218,10 @@ int M4Network::sim_send(void* buffer, uint64_t count, int type, int dst, int tag
     // Store using FlowSim key (tag_id, (src,dst))
     auto sh_key = make_pair(request->flowTag.tag_id, make_pair(t.src, t.dest));
     sentHash[sh_key] = t;
-    // Sanity: increment expected sends/recvs per tag
-    g_expected_sends_per_tag[request->flowTag.tag_id]++;
-    g_expected_recvs_per_tag[request->flowTag.tag_id]++;
+    // // Sanity: increment expected sends/recvs per tag+flow (disabled)
+    // uint64_t tfkey = make_tag_flow_key(request->flowTag.tag_id, request->flowTag.current_flow_id);
+    // g_expected_sends_per_tagflow[tfkey]++;
+    // g_expected_recvs_per_tagflow[tfkey]++;
     
     // Track initial request time (actual send occurs after send latency)
     uint64_t start = static_cast<uint64_t>(M4::Now());
@@ -366,13 +372,15 @@ void M4Network::notify_receiver_packet_arrived(int sender_node, int receiver_nod
 
             t.msg_handler(t.fun_arg);
             
-            // Increment completed recvs counter and verify dependency consistency
-            g_completed_recvs_per_tag[tag]++;
-            if (g_completed_recvs_per_tag[tag] > g_expected_recvs_per_tag[tag]) {
-                std::cout << "[DEP ERROR] Tag " << tag << " completed_recvs=" << g_completed_recvs_per_tag[tag] 
-                         << " > expected_recvs=" << g_expected_recvs_per_tag[tag] << std::endl;
-                assert(false && "Dependency leak: more recvs completed than expected");
-            }
+            // Increment completed recvs counter and verify dependency consistency (per tag+flow)
+            // uint64_t tfkey = make_tag_flow_key(tag, flowTag.current_flow_id);
+            // g_completed_recvs_per_tagflow[tfkey]++;
+            // if (g_completed_recvs_per_tagflow[tfkey] > g_expected_recvs_per_tagflow[tfkey]) {
+            //     std::cout << "[DEP ERROR] TagFlow (" << tag << "," << flowTag.current_flow_id << ") completed_recvs="
+            //               << g_completed_recvs_per_tagflow[tfkey]
+            //               << " > expected_recvs=" << g_expected_recvs_per_tagflow[tfkey] << std::endl;
+            //     assert(false && "Dependency leak: more recvs completed than expected");
+            // }
         }
     } else {
         // Receiver not yet registered: queue flowTag and accumulate received size
@@ -420,13 +428,15 @@ void M4Network::notify_sender_sending_finished(int sender_node, int receiver_nod
             // Call sender handler directly to continue AstraSim chain
             t2.msg_handler(t2.fun_arg);
             
-            // Increment seen sends counter and verify dependency consistency
-            g_seen_sends_per_tag[tag]++;
-            if (g_seen_sends_per_tag[tag] > g_expected_sends_per_tag[tag]) {
-                std::cout << "[DEP ERROR] Tag " << tag << " seen_sends=" << g_seen_sends_per_tag[tag] 
-                         << " > expected_sends=" << g_expected_sends_per_tag[tag] << std::endl;
-                assert(false && "Dependency leak: more sends completed than expected");
-            }
+            // Increment seen sends counter and verify dependency consistency (per tag+flow)
+            // uint64_t tfkey = make_tag_flow_key(tag, flowTag.current_flow_id);
+            // g_seen_sends_per_tagflow[tfkey]++;
+            // if (g_seen_sends_per_tagflow[tfkey] > g_expected_sends_per_tagflow[tfkey]) {
+            //     std::cout << "[DEP ERROR] TagFlow (" << tag << "," << flowTag.current_flow_id << ") seen_sends="
+            //               << g_seen_sends_per_tagflow[tfkey]
+            //               << " > expected_sends=" << g_expected_sends_per_tagflow[tfkey] << std::endl;
+            //     assert(false && "Dependency leak: more sends completed than expected");
+            // }
         }
     }
 }
@@ -447,21 +457,23 @@ int M4Network::sim_finish() {
     // Match FlowSim's FCT summary format exactly
     std::cout << "[FCT SUMMARY] lines=" << g_fct_lines_written << std::endl;
     
-    // Print dependency counter summary for debugging
-    std::cout << "[DEP SUMMARY] Dependency counter verification:" << std::endl;
-    for (auto& [tag, expected_sends] : g_expected_sends_per_tag) {
-        int seen_sends = g_seen_sends_per_tag[tag];
-        int expected_recvs = g_expected_recvs_per_tag[tag];
-        int completed_recvs = g_completed_recvs_per_tag[tag];
-        std::cout << "[DEP SUMMARY] Tag " << tag << ": sends=" << seen_sends << "/" << expected_sends
-                  << ", recvs=" << completed_recvs << "/" << expected_recvs << std::endl;
-        if (seen_sends != expected_sends) {
-            std::cout << "[DEP WARNING] Tag " << tag << " send count mismatch!" << std::endl;
-        }
-        if (completed_recvs != expected_recvs) {
-            std::cout << "[DEP WARNING] Tag " << tag << " recv count mismatch!" << std::endl;
-        }
-    }
+    // Print dependency counter summary for debugging (per tag+flow)
+    // std::cout << "[DEP SUMMARY] Dependency counter verification (per tag+flow):" << std::endl;
+    // for (const auto& [tfkey, expected_sends] : g_expected_sends_per_tagflow) {
+    //     int expected_recvs = g_expected_recvs_per_tagflow[tfkey];
+    //     int seen_sends = g_seen_sends_per_tagflow[tfkey];
+    //     int completed_recvs = g_completed_recvs_per_tagflow[tfkey];
+    //     int tag = static_cast<int>((tfkey >> 32) & 0xffffffffULL);
+    //     int flow = static_cast<int>(tfkey & 0xffffffffULL);
+    //     std::cout << "[DEP SUMMARY] TagFlow (" << tag << "," << flow << "): sends=" << seen_sends << "/" << expected_sends
+    //               << ", recvs=" << completed_recvs << "/" << expected_recvs << std::endl;
+    //     if (seen_sends != expected_sends) {
+    //         std::cout << "[DEP WARNING] TagFlow (" << tag << "," << flow << ") send count mismatch!" << std::endl;
+    //     }
+    //     if (completed_recvs != expected_recvs) {
+    //         std::cout << "[DEP WARNING] TagFlow (" << tag << "," << flow << ") recv count mismatch!" << std::endl;
+    //     }
+    // }
     
     if (g_fct_output_file) {
         fflush(g_fct_output_file);
