@@ -484,6 +484,12 @@ void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, Callb
         EventId base_eid = event_queue->schedule_event(base_completion, callback, callbackArg);
         flow_id_to_completion_event_id[cd->flowTag.current_flow_id] = base_eid;
         flow_id_to_scheduled_time_ns[cd->flowTag.current_flow_id] = base_completion;
+        
+        // Mark flow as active for ML immediately when scheduled
+        // This ensures ML graph only includes truly in-flight flows
+        flowid_active_mask[cd->flowTag.current_flow_id] = true;
+        flow_to_graph_id[cd->flowTag.current_flow_id] = 0;
+        n_flows_arrived++;
     } else {
         m4_flow->start_time = static_cast<uint64_t>(event_queue->get_current_time());
     }
@@ -615,8 +621,8 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
             flow_id_to_start_time_ns[flow_id] = flow->start_time;
         }
         time_last[flow_id] = time_clock;  // Initialize time_last to avoid massive time deltas
-        flowid_active_mask[flow_id] = true;
-        flow_to_graph_id[flow_id] = 0;  // All flows use global graph
+        // Note: flowid_active_mask already set to true in M4::Send when scheduled
+        // Initialize h_vec features
         h_vec[flow_id].zero_();
         h_vec[flow_id][0] = 1.0f;
         h_vec[flow_id][2] = std::log2(size_bytes / 1000.0 + 1.0);
@@ -649,7 +655,7 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
     }
     
     // Update counters and check equation: active = arrived - completed
-    n_flows_arrived += flows_arriving_this_batch;
+    // Note: n_flows_arrived incremented in M4::Send when flows are scheduled
     int32_t n_flows_active_current = torch::nonzero(flowid_active_mask).flatten().numel();
     assert(n_flows_active_current == (n_flows_arrived - n_flows_completed));
 
@@ -929,11 +935,7 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
         }
     }
     
-    // No need to schedule next batch - all pending flows processed
 }
-
-// LSTM+GNN state evolution only (no completion selection/scheduling)
-
 
 const AstraSim::RoutingFramework* M4::GetRoutingFramework() {
     return routing_framework_.get();
