@@ -21,7 +21,6 @@ network:
 # M4-specific parameters
 m4:
   batch_time_ns: 15000       # Temporal batching interval (ns)
-  enable_rescheduling: True
 
 # Model parameters
 model:

@@ -72,7 +72,6 @@ private:
     
     // M4-specific configuration parameters
     static uint64_t batch_time_ns_;   // Temporal batching interval
-    static bool enable_rescheduling_;  // Enable ML rescheduling for already active flows
     
     static torch::Tensor h_vec;
     static torch::Tensor flowid_active_mask;

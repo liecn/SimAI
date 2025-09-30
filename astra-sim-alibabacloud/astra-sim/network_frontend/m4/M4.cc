@@ -68,7 +68,6 @@ torch::Tensor M4::i_fct_tensor;
 int32_t M4::hidden_size_ = 200; // Model expects 214 total: 1+13+200=214 (matches main_m4_noflowsim.cpp)
 int32_t M4::n_links_max_ = 1024;
 uint64_t M4::batch_time_ns_ = 300; // Default temporal batching interval
-bool M4::enable_rescheduling_ = false;
 int32_t M4::n_flows_max = 50000;  // Large enough for simulation
 int32_t M4::graph_id_cur = 0;
 float M4::time_clock = 0.0f;
@@ -222,7 +221,6 @@ void M4::SetupML() {
                 auto m4_node = config["m4"];
                 if (!m4_node.invalid()) {
                     try { m4_node["batch_time_ns"] >> batch_time_ns_; } catch(...) {}
-                    try { m4_node["enable_rescheduling"] >> enable_rescheduling_; } catch(...) {}
                 }
             } catch(...) {
                 // m4 section doesn't exist, use defaults
@@ -234,7 +232,7 @@ void M4::SetupML() {
     } catch (const std::exception& e) {
         std::cerr << "[M4] Config parse error: " << e.what() << std::endl;
     }
-    std::cout << "[M4] Loaded network parameters from config: n_links_max=" << n_links_max_ << ", hidden_size=" << hidden_size_ << ", enable_rescheduling=" << enable_rescheduling_ << std::endl;
+    std::cout << "[M4] Loaded network parameters from config: n_links_max=" << n_links_max_ << ", hidden_size=" << hidden_size_ << std::endl;
 
     // Structure from consts.py: [bfsz(0), fwin(1), dctcp_flag(2), dcqcn_flag(3), hp_flag(4), timely_flag(5), 
     //                           dctcp_k(6), dcqcn_k_min(7), dcqcn_k_max(8), u_tgt(9), hpai(10), timely_t_low(11), timely_t_high(12)]
@@ -751,9 +749,9 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
                 }
 
                 // Optional debug
-                // std::cout << "[GNN Update] Flow nodes: " << n_flows_active_cur
-                //           << ", Link nodes: " << active_link_idx.size(0)
-                //           << ", Edges: " << edges_list_active.size(1) << std::endl;
+                std::cout << "[GNN Update] Flow nodes: " << n_flows_active_cur
+                          << ", Link nodes: " << active_link_idx.size(0)
+                          << ", Edges: " << edges_list_active.size(1) << std::endl;
 
                 auto x_combined = torch::cat({h_vec_time_updated, h_vec_time_link_updated}, 0);
                 auto gnn_output_0 = gnn_layer_0.forward(std::vector<c10::IValue>{x_combined, edges_list_active}).toTensor();
@@ -775,20 +773,53 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
                 auto input_batch_all = torch::cat({nlinks_batch_all, params_batch_all, h_vec_rate_updated}, 1);
                 auto sldn_all = output_layer.forward(std::vector<c10::IValue>{input_batch_all}).toTensor().view(-1);
                 sldn_all = torch::clamp(sldn_all, 1.0f, std::numeric_limits<float>::infinity());
+                
+                // Transfer slowdown predictions from GPU to CPU for processing
+                auto sldn_cpu = sldn_all.to(torch::kCPU);
+                auto sldn_data = sldn_cpu.data_ptr<float>();
+                
+                
+                // Step 2: Schedule flow completions (M4Network.cc handles collective completion)
+                for (size_t i = 0; i < flows_to_process.size(); i++) {
+                    M4Flow* flow = flows_to_process[(int)i];
+                    int flow_id = flow->flow_id;
+                    
+                    // Handle short/empty routes (immediate completion with minimal FCT)
+                    if (flow->node_path.empty() || flow->node_path.size() < 2) {
+                        float minimal_fct = 1.0f; // 1ns minimal FCT for local/short flows
+                        uint64_t completion_time = current_time + (uint64_t)minimal_fct;
+                        event_queue->schedule_event(completion_time, flow->callback, flow->callbackArg);
+                        continue; // Skip ML inference for short routes
+                    }
+                    
+                    // Find the ML prediction for this flow in the batch
+                    int batch_idx = -1;
+                    for (size_t j = 0; j < flow_ids_batch.size(); j++) {
+                        if ((int)flow_ids_batch[j] == flow_id) {
+                            batch_idx = j;
+                            break;
+                        }
+                    }
+                    
+                    if (batch_idx >= 0) {
+                        // ML prediction for this flow; schedule once (rescheduling disabled)
+                        float raw_slowdown = sldn_data[batch_idx];
+                        float scaled_slowdown = (raw_slowdown < 1.0f) ? 1.0f : raw_slowdown;
+                        float ideal_fct = i_fct_tensor[flow_id].item<float>();
+                        float predicted_total_fct = scaled_slowdown * ideal_fct;
 
-                // Iterate and (optionally) reschedule active flows
-                for (int i = 0; i < n_flows_active_cur; i++) {
-                    int fid = subset_indices[i].item<int32_t>();
-                    float predicted_total_fct = sldn_all[i].item<float>() * i_fct_tensor[fid].item<float>();
-                    // Use precise simulator time to avoid quantization-induced stepwise slowdowns
-                    uint64_t now_ns = event_queue->get_current_time();
-                    uint64_t start_ns = flow_id_to_start_time_ns.count(fid) ? flow_id_to_start_time_ns[fid] : now_ns;
-                    uint64_t elapsed = now_ns > start_ns ? (now_ns - start_ns) : 0ULL;
-                    uint64_t remaining = (predicted_total_fct > (float)elapsed) ? (uint64_t)(predicted_total_fct - (float)elapsed) : 1ULL;
-                    if (enable_rescheduling_) {
-                        ScheduleWithRemainingTime(fid, now_ns, remaining);
+                        if (!flow_id_to_start_time_ns.count(flow_id)) {
+                            flow_id_to_start_time_ns[flow_id] = flow->start_time;
+                        }
+                        uint64_t now_ns = current_time;
+                        uint64_t start_ns = flow_id_to_start_time_ns[flow_id];
+                        uint64_t elapsed = now_ns > start_ns ? (now_ns - start_ns) : 0ULL;
+                        uint64_t remaining = (predicted_total_fct > (float)elapsed) ? (uint64_t)(predicted_total_fct - (float)elapsed) : 1ULL;
+                        ScheduleWithRemainingTime(flow_id, now_ns, remaining);
                     }
                 }
+                
+                // No need to schedule next batch - all pending flows processed
             }
         }
     }
@@ -881,13 +912,12 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
         }
         
         if (batch_idx >= 0) {
-            // ML prediction
+            // ML prediction for this flow; schedule once (rescheduling disabled)
             float raw_slowdown = sldn_data[batch_idx];
             float scaled_slowdown = (raw_slowdown < 1.0f) ? 1.0f : raw_slowdown;
             float ideal_fct = i_fct_tensor[flow_id].item<float>();
             float predicted_total_fct = scaled_slowdown * ideal_fct;
 
-            // Preserve true start; compute remaining = predicted_total - elapsed
             if (!flow_id_to_start_time_ns.count(flow_id)) {
                 flow_id_to_start_time_ns[flow_id] = flow->start_time;
             }
