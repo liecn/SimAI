@@ -495,7 +495,7 @@ void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, Callb
     // Keep ownership in active_flows_ptrs until batch processing
     active_flows_ptrs.push_back(std::move(m4_flow));
     
-    // Temporal batching: schedule one ML update at now + batch_time_ns_ if none is pending
+    // Temporal batching: arm one update at now + batch_time_ns_
     const auto current_time = event_queue->get_current_time();
     if (batch_timeout_event_id_ == 0) {
         batch_timeout_event_id_ = event_queue->schedule_event(current_time + batch_time_ns_, batch_timeout_callback, nullptr);
@@ -780,11 +780,12 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
                 for (int i = 0; i < n_flows_active_cur; i++) {
                     int fid = subset_indices[i].item<int32_t>();
                     float predicted_total_fct = sldn_all[i].item<float>() * i_fct_tensor[fid].item<float>();
-                    uint64_t now_ns = (uint64_t)time_clock;
+                    // Use precise simulator time to avoid quantization-induced stepwise slowdowns
+                    uint64_t now_ns = event_queue->get_current_time();
                     uint64_t start_ns = flow_id_to_start_time_ns.count(fid) ? flow_id_to_start_time_ns[fid] : now_ns;
                     uint64_t elapsed = now_ns > start_ns ? (now_ns - start_ns) : 0ULL;
                     uint64_t remaining = (predicted_total_fct > (float)elapsed) ? (uint64_t)(predicted_total_fct - (float)elapsed) : 1ULL;
-                    if (enable_rescheduling_ && (interacting_flows.find(fid) != interacting_flows.end())) {
+                    if (enable_rescheduling_) {
                         ScheduleWithRemainingTime(fid, now_ns, remaining);
                     }
                 }
