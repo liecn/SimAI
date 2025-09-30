@@ -70,7 +70,6 @@ int32_t M4::n_links_max_ = 1024;
 uint64_t M4::batch_time_ns_ = 300; // Default temporal batching interval
 int32_t M4::reschedule_flow_count_ = 64; // Default: reschedule every 64 new arrivals
 int32_t M4::n_flows_max = 50000;  // Large enough for simulation
-int32_t M4::graph_id_cur = 0;
 float M4::time_clock = 0.0f;
 std::unordered_map<long long, int32_t> M4::link_key_to_index;
 int32_t M4::next_link_index = 0;
@@ -89,10 +88,6 @@ std::vector<M4Flow*> M4::pending_flows_;
 std::list<std::unique_ptr<M4Flow>> M4::active_flows_ptrs;
 int M4::batch_timeout_event_id_ = 0;
 bool M4::is_processing_batch_ = false;
-
-// (removed) legacy inference-style flow completion tracking
-
-// Remove old scheduling logic - now handled by event-driven processing
 
 void M4::Init(std::shared_ptr<EventQueue> event_queue, std::shared_ptr<Topology> topo) {
 
@@ -299,18 +294,6 @@ void M4::SetupML() {
     // Initialize graph management tensors
     flow_to_graph_id = -torch::ones({n_flows_max}, options_int32);
     
-    // Initialize empty edge_index - will be built dynamically as flows are added
-    // edge_index = torch::empty({2, 0}, torch::TensorOptions().dtype(torch::kInt64).device(device)); // This line was removed from header
-    
-    // Initialize additional tensors for complete ML pipeline
-    // flowid_to_linkid_flat_tensor = torch::empty({0}, options_int32); // This line was removed from header
-    // flowid_to_linkid_offsets_tensor = torch::empty({0}, options_int32); // This line was removed from header
-    // edges_flow_ids_tensor = torch::empty({0}, options_int32); // This line was removed from header
-    // edges_link_ids_tensor = torch::empty({0}, options_int32); // This line was removed from header
-    // ones_cache = torch::ones({1000}, options_float); // Pre-allocate for efficiency // This line was removed from header
-    
-    
-    
     auto setup_end = std::chrono::high_resolution_clock::now();
     auto setup_duration = std::chrono::duration_cast<std::chrono::milliseconds>(setup_end - setup_start).count();
     std::cout << "[M4] SetupML() completed in " << setup_duration << "ms!" << std::endl;
@@ -369,6 +352,9 @@ void M4::OnFlowCompleted(const int flow_id) {
 }
 
 void M4::CleanupCompletedFlow(const int flow_id) {
+    // OPTIMIZATION: Remove from fast lookup map
+    flow_id_to_ptr_.erase(flow_id);
+    
     // Remove completed flow from active_flows_ptrs to prevent memory leak
     auto it = std::remove_if(active_flows_ptrs.begin(), active_flows_ptrs.end(),
         [flow_id](const std::unique_ptr<M4Flow>& flow_ptr) {
@@ -425,12 +411,10 @@ void M4::ScheduleWithRemainingTime(int32_t flow_id, uint64_t now_ns, uint64_t re
     if (remaining_ns == 0) remaining_ns = 1ULL;
     uint64_t completion_time = now_ns + remaining_ns;
 
-    // Find flow object to access callback/callbackArg
-    M4Flow* fptr = nullptr;
-    for (auto &uptr : active_flows_ptrs) {
-        if (uptr && uptr->flow_id == flow_id) { fptr = uptr.get(); break; }
-    }
-    if (!fptr) return; // flow might have completed; nothing to schedule
+    // OPTIMIZATION: O(1) lookup instead of O(N) linear search
+    auto it_ptr = flow_id_to_ptr_.find(flow_id);
+    if (it_ptr == flow_id_to_ptr_.end()) return; // flow completed or not found
+    M4Flow* fptr = it_ptr->second;
 
     auto it_e = flow_id_to_completion_event_id.find(flow_id);
     if (it_e != flow_id_to_completion_event_id.end()) {
@@ -499,9 +483,12 @@ void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, Callb
     }
 
     // Add to pending batch for flow-count processing
+        int32_t flow_id = m4_flow->flow_id; // Save flow_id before moving m4_flow
         pending_flows_.push_back(m4_flow.get());
         // Keep ownership in active_flows_ptrs until batch processing
         active_flows_ptrs.push_back(std::move(m4_flow));
+        // OPTIMIZATION: Register flow pointer for O(1) lookup during rescheduling
+        flow_id_to_ptr_[flow_id] = active_flows_ptrs.back().get();
         
     // Temporal batching: arm one update at now + batch_time_ns_
         const auto current_time = event_queue->get_current_time();
@@ -759,9 +746,9 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
                 }
 
                 // Optional debug
-                std::cout << "[GNN Update] Flow nodes: " << n_flows_active_cur
-                          << ", Link nodes: " << active_link_idx.size(0)
-                          << ", Edges: " << edges_list_active.size(1) << std::endl;
+                // std::cout << "[GNN Update] Flow nodes: " << n_flows_active_cur
+                //           << ", Link nodes: " << active_link_idx.size(0)
+                //           << ", Edges: " << edges_list_active.size(1) << std::endl;
 
                 auto x_combined = torch::cat({h_vec_time_updated, h_vec_time_link_updated}, 0);
                 auto gnn_output_0 = gnn_layer_0.forward(std::vector<c10::IValue>{x_combined, edges_list_active}).toTensor();
@@ -790,9 +777,10 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
                 auto flowid_active_cpu = flowid_active_tensor.to(torch::kCPU);
                 auto flowid_active_data = flowid_active_cpu.data_ptr<int64_t>();
                 
-                // OPTIMIZED: Only reschedule flows in current batch (new arrivals)
-                // Rescheduling all 256 active flows every batch is too expensive (O(N²) due to linear search)
-                // For smooth slowdowns, rely on frequent batching (small batch_time_ns) instead
+                // SMART RESCHEDULING: Balance correctness vs performance
+                // - Always reschedule flows in current batch (new arrivals)
+                // - Periodically reschedule ALL active flows (every reschedule_flow_count arrivals)
+                // This avoids flows getting stuck at baseline while keeping most batches fast
                 uint64_t now_ns = current_time;
                 
                 // Build set of flow IDs in current batch for fast lookup
@@ -801,16 +789,28 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
                     batch_flow_set.insert((int32_t)fid);
                 }
                 
-                // Reschedule flows in current batch with their updated predictions
+                // Decide whether to reschedule all flows or just new arrivals
+                bool reschedule_all = false;
+                if (reschedule_flow_count_ == 0) {
+                    // Always reschedule all (slow but most accurate)
+                    reschedule_all = true;
+                } else if (n_flows_since_last_reschedule >= reschedule_flow_count_) {
+                    // Periodic full reschedule to prevent stale predictions
+                    reschedule_all = true;
+                    n_flows_since_last_reschedule = 0; // Reset counter
+                }
+                
+                // Update arrival counter for next decision
+                n_flows_since_last_reschedule += flows_arriving_this_batch;
+                
+                // Reschedule flows with their updated predictions
                 for (int i = 0; i < n_flows_active_cur; i++) {
                     int32_t flow_id = (int32_t)flowid_active_data[i];
                     
-                    // Only reschedule if flow is in current batch OR reschedule_flow_count_ == 0 (force all)
+                    // Skip if not in batch AND we're not doing a full reschedule
                     bool is_in_batch = batch_flow_set.count(flow_id) > 0;
-                    bool should_reschedule_all = (reschedule_flow_count_ == 0);
-                    
-                    if (!is_in_batch && !should_reschedule_all) {
-                        continue; // Skip flows not in current batch unless forcing reschedule
+                    if (!is_in_batch && !reschedule_all) {
+                        continue; // Skip to save time
                     }
                     
                     float raw_slowdown = sldn_data[i];
@@ -829,7 +829,7 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
                                         ? (uint64_t)(predicted_total_fct - (float)elapsed) 
                                         : 1ULL;
                     
-                    // ScheduleWithRemainingTime only reschedules if completion_time changed
+                    // ScheduleWithRemainingTime is efficient: only reschedules if time changed
                     ScheduleWithRemainingTime(flow_id, now_ns, remaining);
                 }
                 
@@ -874,7 +874,7 @@ void M4::Destroy() {
 }
 
 std::unordered_map<int32_t, EventId> M4::flow_id_to_completion_event_id;
-// (reverted) monotonic guard map removed
+std::unordered_map<int32_t, M4Flow*> M4::flow_id_to_ptr_;
 
 static inline float clamp_ge1(float v) { return v < 1.0f ? 1.0f : v; }
 

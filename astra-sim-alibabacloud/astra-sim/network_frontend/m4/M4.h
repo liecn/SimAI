@@ -87,7 +87,6 @@ private:
     
     // Flow and graph management
     static int32_t n_flows_max;
-    static int32_t graph_id_cur;
     static float time_clock;
 
     // Link indexing for graph construction (derived from RoutingFramework paths)
@@ -111,7 +110,9 @@ private:
     static int batch_timeout_event_id_;
     static bool is_processing_batch_;
     
-    // (removed) inference-style single-flow tracking
+    // OPTIMIZATION: Fast O(1) lookup for flow pointers (avoid O(N) linear search)
+    static std::unordered_map<int32_t, M4Flow*> flow_id_to_ptr_;
+    
     static std::unordered_map<int32_t, EventId> flow_id_to_completion_event_id;
 
 public:

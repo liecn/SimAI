@@ -20,8 +20,8 @@ network:
 
 # M4-specific parameters
 m4:
-  batch_time_ns: 10000        # Temporal batching interval (ns) - smaller = smoother slowdowns
-  reschedule_flow_count: 64   # Only reschedule new arrivals (>0 = batch-local, 0 = all active - VERY SLOW!)
+  batch_time_ns: 10000           # Temporal batching interval (ns) - smaller = smoother slowdowns
+  reschedule_flow_count: 128     # Reschedule all active flows every N new arrivals (0 = every batch, slower but more accurate)
 
 # Model parameters
 model:
