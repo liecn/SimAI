@@ -21,11 +21,11 @@ network:
 # M4-specific parameters
 m4:
   batch_time_ns: 20000           # Temporal batching interval (ns) - smaller = smoother slowdowns
-  reschedule_flow_count: 32     # Reschedule all active flows every N new arrivals (0 = every batch, slower but more accurate)
+  reschedule_flow_count: 8     # Reschedule all active flows every N new arrivals (0 = every batch, slower but more accurate)
   
   # Bottleneck correction (compensate for heterogeneous topology)
   enable_bottleneck_correction: true
-  bottleneck_correction_factor: 2.8      # Scale slowdown for flows traversing bottleneck links
+  bottleneck_correction_factor: 2.7      # Scale slowdown for flows traversing bottleneck links
   bottleneck_threshold_bps: 400000000000 # 400 Gbps - paths with lower bandwidth are considered bottlenecks
 
 # Model parameters
