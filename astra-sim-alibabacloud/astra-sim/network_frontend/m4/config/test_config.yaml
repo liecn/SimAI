@@ -14,14 +14,19 @@ dataset:
   enable_queuelen: False
 
 network:
-  buffer_size: 10.0    # Buffer size (bfsz parameter)
-  fwin: 1.0            # Flow window parameter  
+  buffer_size: 20.0    # Buffer size (bfsz parameter)
+  fwin: 10.0            # Flow window parameter  
   dctcp_k: 10.0         # DCTCP threshold parameter
 
 # M4-specific parameters
 m4:
-  batch_time_ns: 5000           # Temporal batching interval (ns) - smaller = smoother slowdowns
-  reschedule_flow_count: 16
+  batch_time_ns: 10000           # Temporal batching interval (ns) - smaller = smoother slowdowns
+  reschedule_flow_count: 8     # Reschedule all active flows every N new arrivals (0 = every batch, slower but more accurate)
+  
+  # Bottleneck correction (compensate for heterogeneous topology)
+  enable_bottleneck_correction: true
+  bottleneck_correction_factor: 1.5      # Scale slowdown for flows traversing bottleneck links
+  bottleneck_threshold_bps: 400000000000 # 400 Gbps - paths with lower bandwidth are considered bottlenecks
 
 # Model parameters
 model:

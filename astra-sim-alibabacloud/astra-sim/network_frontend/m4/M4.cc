@@ -71,6 +71,11 @@ uint64_t M4::batch_time_ns_ = 300; // Default temporal batching interval
 int32_t M4::reschedule_flow_count_ = 64; // Default: reschedule every 64 new arrivals
 int32_t M4::n_flows_max = 50000;  // Large enough for simulation
 float M4::time_clock = 0.0f;
+
+// Bottleneck correction parameters
+bool M4::enable_bottleneck_correction_ = false;
+float M4::bottleneck_correction_factor_ = 2.0f;
+uint64_t M4::bottleneck_threshold_bps_ = 100000000000ULL; // 100 Gbps default
 std::unordered_map<long long, int32_t> M4::link_key_to_index;
 int32_t M4::next_link_index = 0;
 std::vector<std::vector<int32_t>> M4::flowid_to_link_indices;
@@ -219,6 +224,9 @@ void M4::SetupML() {
                 if (!m4_node.invalid()) {
                     try { m4_node["batch_time_ns"] >> batch_time_ns_; } catch(...) {}
                     try { m4_node["reschedule_flow_count"] >> reschedule_flow_count_; } catch(...) {}
+                    try { m4_node["enable_bottleneck_correction"] >> enable_bottleneck_correction_; } catch(...) {}
+                    try { m4_node["bottleneck_correction_factor"] >> bottleneck_correction_factor_; } catch(...) {}
+                    try { m4_node["bottleneck_threshold_bps"] >> bottleneck_threshold_bps_; } catch(...) {}
                 }
             } catch(...) {
                 // m4 section doesn't exist, use defaults
@@ -266,7 +274,8 @@ void M4::SetupML() {
     
     std::cout << "[M4] Loaded network parameters from config: bfsz=" << param_values[0] << ", fwin=" << param_values[1] 
               << ", cc=dctcp, u_tgt=" << param_values[9] << ", dctcp_k=" << param_values[6] << ", topology_bw=" << (topo_bandwidth * 8.0) << "Gbps, topology_lat=" << topo_latency << "ns, batch_time_ns=" << batch_time_ns_ 
-              << ", reschedule_flow_count=" << reschedule_flow_count_ << std::endl;
+              << ", reschedule_flow_count=" << reschedule_flow_count_ << ", bottleneck_correction=" << (enable_bottleneck_correction_ ? "enabled" : "disabled") 
+              << " (factor=" << bottleneck_correction_factor_ << ", threshold=" << (bottleneck_threshold_bps_/1e9) << "Gbps)" << std::endl;
     
     // Initialize multi-flow state tensors (from @inference/ ground truth)
     auto options_float = torch::TensorOptions().dtype(torch::kFloat32).device(device);
@@ -459,6 +468,12 @@ void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, Callb
 
         // Create M4Flow and add to pending batch (following FlowSim's temporal batching)
         auto m4_flow = std::make_unique<M4Flow>(src, dst, size, node_path, callback, callbackArg);
+    
+    // Detect bottleneck: check if path has significantly lower bandwidth than typical
+    if (enable_bottleneck_correction_) {
+        uint64_t path_bw_bps = routing_framework_->GetPairBandwidth(src, dst);
+        m4_flow->has_bottleneck = (path_bw_bps < bottleneck_threshold_bps_);
+    }
     // Use ASTRA-Sim flow id and actual send start time if available
         if (callbackArg) {
             auto* cd = reinterpret_cast<M4CallbackData*>(callbackArg);
@@ -815,6 +830,16 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
                     
                     float raw_slowdown = sldn_data[i];
                     float scaled_slowdown = (raw_slowdown < 1.0f) ? 1.0f : raw_slowdown;
+                    
+                    // Apply bottleneck correction if flow traverses low-bandwidth links
+                    if (enable_bottleneck_correction_) {
+                        // Find the flow pointer to check bottleneck flag
+                        auto flow_ptr_it = flow_id_to_ptr_.find(flow_id);
+                        if (flow_ptr_it != flow_id_to_ptr_.end() && flow_ptr_it->second->has_bottleneck) {
+                            scaled_slowdown *= bottleneck_correction_factor_;
+                        }
+                    }
+                    
                     float ideal_fct = i_fct_tensor[flow_id].item<float>();
                     float predicted_total_fct = scaled_slowdown * ideal_fct;
                     
