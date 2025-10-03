@@ -21,7 +21,7 @@ network:
 # M4-specific parameters
 m4:
   batch_time_ns: 20000           # Temporal batching interval (ns) - smaller = smoother slowdowns
-  reschedule_flow_count: 8     # Reschedule all active flows every N new arrivals (0 = every batch, slower but more accurate)
+  reschedule_flow_count: 16     # Reschedule all active flows every N new arrivals (0 = every batch, slower but more accurate)
   
   # Bottleneck correction (compensate for heterogeneous topology)
   enable_bottleneck_correction: true

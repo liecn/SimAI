@@ -19,7 +19,7 @@ static inline uint64_t fs_get_payload_size_bytes() {
 
 static inline uint64_t fs_get_header_bytes() {
     // Fixed to NS3/M4 header size for parity
-    return static_cast<uint64_t>(52);
+    return static_cast<uint64_t>(48);
 }
 
 static inline double fs_apply_serialization_overhead(double bytes) {

@@ -408,7 +408,7 @@ uint64_t M4::CalculateIdealFCT(int src, int dst, uint64_t size) {
     uint64_t b_bps = routing_framework_->GetPairBandwidth(src, dst);
     
     const uint32_t packet_payload_size = 1000u;
-    const uint32_t header_overhead = 52u;
+    const uint32_t header_overhead = 48u;
     uint64_t num_pkts = (size + packet_payload_size - 1) / packet_payload_size;
     uint64_t total_bytes = size + num_pkts * header_overhead;
     
