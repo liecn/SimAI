@@ -6,7 +6,6 @@ astra-sim-alibabacloud/build/simai_m4/build/
 astra-sim-alibabacloud/astra-sim/system/routing/build/
 astra-sim-alibabacloud/extern/
 bin/
-test/log/
 *.log
 .cur*
 .DS_Store
@@ -15,3 +14,4 @@ deprecated/
 results/
 results_ori/
 models_old
+internal*
