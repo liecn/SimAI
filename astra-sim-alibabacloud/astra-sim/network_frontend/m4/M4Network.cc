@@ -123,50 +123,7 @@ static void m4_completion_callback(void* arg) {
         data->network->notify_sender_sending_finished(data->src, data->dst, data->count, data->flowTag);
     }
 
-    // Open FCT file on first use
-    if (g_fct_output_file == nullptr) {
-        std::string fct_file_path = data->network->result_dir + "m4_fct.txt";
-        ensure_dir(data->network->result_dir.c_str());
-        g_fct_output_file = fopen(fct_file_path.c_str(), "w");
-    }
-
-    // Gate receiver notify and FCT logging
     if (is_receive_finished(data->src, data->dst, data->flowTag)) {
-        // Counter increment moved to notify_receiver_packet_arrived to avoid double-counting
-        if (g_fct_output_file) {
-            auto flow_key = std::make_tuple(data->flowTag.tag_id, data->flowTag.current_flow_id, data->src, data->dst);
-            auto it = flow_start_times.find(flow_key);
-            uint64_t start_time = 0;
-            if (it != flow_start_times.end()) {
-                start_time = it->second;
-                flow_start_times.erase(it);
-            } else {
-                // Fallback: use start_time stored in callback data if key was overwritten
-                start_time = data->start_time;
-            }
-            if (start_time > 0 && data->actual_completion_time >= start_time) {
-                uint64_t fct_ns = data->actual_completion_time - start_time;
-
-                uint32_t src_ip = 0u;
-                uint32_t dst_ip = 0u;
-                unsigned int src_port = 0u;
-                unsigned int dst_port = 0u;
-
-                // CRITICAL FIX: Use shared ideal FCT calculation
-                uint64_t standalone_fct = M4::CalculateIdealFCT(data->src, data->dst, data->count);
-                
-
-                fprintf(g_fct_output_file, "%08x %08x %u %u %lu %lu %lu %lu %d\n",
-                        src_ip, dst_ip, src_port, dst_port, data->count, start_time, fct_ns, standalone_fct,
-                        data->flowTag.current_flow_id);
-                if (g_fct_lines_written == 0) {
-                    std::cout << "[M4] First FCT: " << (fct_ns/1000.0) << "μs" << std::endl;
-                }
-                fflush(g_fct_output_file);
-                ++g_fct_lines_written;
-            }
-        }
-
         data->network->notify_receiver_packet_arrived(data->src, data->dst, data->count, data->flowTag);
     }
 

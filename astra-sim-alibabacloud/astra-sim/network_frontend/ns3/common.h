@@ -905,12 +905,9 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
 
 #define ENABLE_QP 1
 #if ENABLE_QP
-  // Create organized output file paths using the provided result directory
-  std::string ns3_fct_path = result_dir + "ns3_fct.txt";
-  std::string ns3_send_path = result_dir + "ns3_send.txt";
-  
-  FILE *fct_output = fopen(ns3_fct_path.c_str(), "w");
-  FILE *send_output = fopen(ns3_send_path.c_str(), "w");
+  // FCT logging removed - only keeping send_output for compatibility
+  FILE *fct_output = nullptr;  // No longer used
+  FILE *send_output = nullptr; // No longer used
   for (uint32_t i = 0; i < node_num; i++) {
     if (n.Get(i)->GetNodeType() == 0 || n.Get(i)->GetNodeType() == 2) { 
       Ptr<RdmaHw> rdmaHw = CreateObject<RdmaHw>();

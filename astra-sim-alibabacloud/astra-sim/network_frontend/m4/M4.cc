@@ -66,16 +66,18 @@ torch::Tensor M4::i_fct_tensor;
 
 // Flow and graph management
 int32_t M4::hidden_size_ = 200; // Model expects 214 total: 1+13+200=214 (matches main_m4_noflowsim.cpp)
-int32_t M4::n_links_max_ = 1024;
-uint64_t M4::batch_time_ns_ = 300; // Default temporal batching interval
-int32_t M4::reschedule_flow_count_ = 64; // Default: reschedule every 64 new arrivals
+int32_t M4::n_links_max_ = 768;
 int32_t M4::n_flows_max = 50000;  // Large enough for simulation
 float M4::time_clock = 0.0f;
 
-// Bottleneck correction parameters
-bool M4::enable_bottleneck_correction_ = false;
-float M4::bottleneck_correction_factor_ = 2.0f;
-uint64_t M4::bottleneck_threshold_bps_ = 100000000000ULL; // 100 Gbps default
+// M4 configuration parameters (hardcoded, no YAML config needed for SimAI integration)
+uint64_t M4::batch_time_ns_ = 10000; // Temporal batching interval (ns) - smaller = smoother slowdowns
+int32_t M4::reschedule_flow_count_ = 8; // Reschedule all active flows every N new arrivals
+
+// Bottleneck correction parameters for heterogeneous topologies
+bool M4::enable_bottleneck_correction_ = true;
+float M4::bottleneck_correction_factor_ = 1.5f;
+uint64_t M4::bottleneck_threshold_bps_ = 400000000000ULL; // 400 Gbps - paths with lower bandwidth are bottlenecks
 std::unordered_map<long long, int32_t> M4::link_key_to_index;
 int32_t M4::next_link_index = 0;
 std::vector<std::vector<int32_t>> M4::flowid_to_link_indices;
@@ -177,68 +179,23 @@ void M4::SetupML() {
 
     models_loaded = true;
 
-    // Parse config for model and network parameters
-    float buffer_size_cfg = 1000.0f;  // Default fallback
-    float fwin_cfg = 15.0f;           // Default fallback  
-    float dctcp_k_cfg = 30.0f;        // Default fallback
+    // Network parameters - hardcoded (no YAML config needed for SimAI integration)
+    float buffer_size_cfg = 20.0f;   // Buffer size (bfsz parameter)
+    float fwin_cfg = 1.0f;            // Flow window parameter
+    float dctcp_k_cfg = 10.0f;        // DCTCP threshold parameter
     
-    // Check for environment variable overrides first
+    // Check for environment variable overrides (optional)
     const char* fwin_env = std::getenv("AS_FWIN");
     if (fwin_env) {
         fwin_cfg = std::stof(fwin_env);
+        std::cout << "[M4] Using fwin from AS_FWIN environment variable: " << fwin_cfg << std::endl;
     }
     
-    try {
-        const std::string cfg_path = "./astra-sim-alibabacloud/astra-sim/network_frontend/m4/config/test_config.yaml";
-        std::ifstream infile(cfg_path);
-        if (infile.good()) {
-            std::ostringstream contents;
-            contents << infile.rdbuf();
-            std::string config_contents = contents.str();
-            ryml::Tree config = ryml::parse_in_place(ryml::to_substr(config_contents));
-            
-            // Parse existing model parameters
-            ryml::NodeRef hidden_size_node = config["model"]["hidden_size"];
-            ryml::NodeRef n_links_node = config["dataset"]["n_links_max"];
-            hidden_size_node >> hidden_size_;
-            n_links_node >> n_links_max_;
-            
-            // Parse network parameters from config (environment variables take precedence)
-            try {
-                auto network_node = config["network"];
-                if (!network_node.invalid()) {
-                    try { network_node["buffer_size"] >> buffer_size_cfg; } catch(...) {}
-                    // Only use config fwin if environment variable wasn't set
-                    if (!fwin_env) {
-                        try { network_node["fwin"] >> fwin_cfg; } catch(...) {}
-                    }
-                    try { network_node["dctcp_k"] >> dctcp_k_cfg; } catch(...) {}
-                }
-            } catch(...) {
-                // network section doesn't exist, use defaults
-            }
-            
-            // Parse M4-specific parameters from config
-            try {
-                auto m4_node = config["m4"];
-                if (!m4_node.invalid()) {
-                    try { m4_node["batch_time_ns"] >> batch_time_ns_; } catch(...) {}
-                    try { m4_node["reschedule_flow_count"] >> reschedule_flow_count_; } catch(...) {}
-                    try { m4_node["enable_bottleneck_correction"] >> enable_bottleneck_correction_; } catch(...) {}
-                    try { m4_node["bottleneck_correction_factor"] >> bottleneck_correction_factor_; } catch(...) {}
-                    try { m4_node["bottleneck_threshold_bps"] >> bottleneck_threshold_bps_; } catch(...) {}
-                }
-            } catch(...) {
-                // m4 section doesn't exist, use defaults
-            }
-            
-        } else {
-            throw std::runtime_error("M4 config missing");
-        }
-    } catch (const std::exception& e) {
-        std::cerr << "[M4] Config parse error: " << e.what() << std::endl;
-    }
-    std::cout << "[M4] Loaded network parameters from config: n_links_max=" << n_links_max_ << ", hidden_size=" << hidden_size_ << std::endl;
+    std::cout << "[M4] Using hardcoded network parameters: n_links_max=" << n_links_max_ 
+              << ", hidden_size=" << hidden_size_ 
+              << ", buffer_size=" << buffer_size_cfg 
+              << ", fwin=" << fwin_cfg 
+              << ", dctcp_k=" << dctcp_k_cfg << std::endl;
     
     // Structure from consts.py: [bfsz(0), fwin(1), dctcp_flag(2), dcqcn_flag(3), hp_flag(4), timely_flag(5), 
     //                           dctcp_k(6), dcqcn_k_min(7), dcqcn_k_max(8), u_tgt(9), hpai(10), timely_t_low(11), timely_t_high(12)]
