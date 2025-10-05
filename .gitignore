@@ -12,6 +12,5 @@ bin/
 command.sh
 deprecated/
 results/
-results_ori/
 models_old
 internal*
