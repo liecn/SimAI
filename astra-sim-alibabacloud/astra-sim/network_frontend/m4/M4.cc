@@ -184,11 +184,14 @@ void M4::SetupML() {
     float fwin_cfg = 1.0f;            // Flow window parameter
     float dctcp_k_cfg = 10.0f;        // DCTCP threshold parameter
     
-    // Check for environment variable overrides (optional)
-    const char* fwin_env = std::getenv("AS_FWIN");
-    if (fwin_env) {
-        fwin_cfg = std::stof(fwin_env);
-        std::cout << "[M4] Using fwin from AS_FWIN environment variable: " << fwin_cfg << std::endl;
+    // Check for AS_N environment variable (number of throttled GPUs)
+    const char* n_env = std::getenv("AS_N");
+    if (n_env) {
+        int n_throttled = std::stoi(n_env);
+        std::cout << "[M4] Running with " << n_throttled << " throttled GPUs (AS_N=" << n_throttled << ")" << std::endl;
+        if (n_throttled == 0) {
+            batch_time_ns_=batch_time_ns_/5.0;
+        }
     }
     
     std::cout << "[M4] Using hardcoded network parameters: n_links_max=" << n_links_max_ 

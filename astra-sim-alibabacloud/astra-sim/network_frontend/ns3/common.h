@@ -1003,10 +1003,14 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
   }
   fwin=maxBdp;
   
-  // Check for AS_FWIN environment variable override
-  const char* fwin_env = std::getenv("AS_FWIN");
-  if (fwin_env) {
-    fwin = std::stoull(fwin_env) * 1000;  // Convert to proper units (multiply by 1000)
+  // Check for AS_N environment variable (number of throttled GPUs)
+  const char* n_env = std::getenv("AS_N");
+  if (n_env) {
+    int n_throttled = std::stoi(n_env);
+    std::cout << "[NS3] Running with " << n_throttled << " throttled GPUs (AS_N=" << n_throttled << ")" << std::endl;
+    if (n_throttled == 0) {
+      fwin = maxBdp/2.0;
+    }
   }
   
   printf("maxRtt=%lu maxBdp=%lu fwin=%lu, buffer_size=%lu\n", maxRtt, maxBdp, fwin, buffer_size);

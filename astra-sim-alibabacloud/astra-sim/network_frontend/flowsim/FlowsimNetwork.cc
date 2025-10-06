@@ -219,6 +219,13 @@ int FlowSimNetWork::sim_send(
     waiting_to_sent_callback[dep_key]++;
     waiting_to_notify_receiver[dep_key]++;
 
+    // Check for AS_N environment variable (number of throttled GPUs)
+    const char* n_env = std::getenv("AS_N");
+    if (n_env) {
+        int n_throttled = std::stoi(n_env);
+        std::cout << "[FLOWSIM] Running with " << n_throttled << " throttled GPUs (AS_N=" << n_throttled << ")" << std::endl;
+    }
+    
     // Apply send latency delay like NS3 does
     int send_lat = 0;  // Default 6μs like NS3
     const char* send_lat_env = std::getenv("AS_SEND_LAT");
