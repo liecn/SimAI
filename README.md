@@ -1,5 +1,5 @@
 
-For evaluating m4, please refer to the [m4](https://github.com/netiken/m4).
+For evaluating m4, please refer to the [m4](https://github.com/netiken/m4?tab=readme-ov-file#integrating-m4-into-simai).
 
 # Lastest News
 
