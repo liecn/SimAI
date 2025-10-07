@@ -494,7 +494,6 @@ void qp_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
     }
     flowTag = sender_src_port_map[make_pair(q->sport, make_pair(sid, did))];
     
-    // FCT logging removed
     fflush(fout);
     sender_src_port_map.erase(make_pair(q->sport, make_pair(sid, did)));
     received_chunksize[std::make_pair(flowTag.current_flow_id,std::make_pair(sid,did))]+=q->m_size;
