@@ -223,7 +223,6 @@ int FlowSimNetWork::sim_send(
     const char* n_env = std::getenv("AS_N");
     if (n_env) {
         int n_throttled = std::stoi(n_env);
-        std::cout << "[FLOWSIM] Running with " << n_throttled << " throttled GPUs (AS_N=" << n_throttled << ")" << std::endl;
     }
     
     // Apply send latency delay like NS3 does
