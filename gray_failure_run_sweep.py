@@ -414,11 +414,11 @@ Examples:
     
     parser.add_argument('simulator', choices=['flowsim', 'ns3', 'm4'],
                        help='Simulator to run')
-    parser.add_argument('--topo-dir', default='./example/sweep/gray_failures',
+    parser.add_argument('--topo-dir', default='./example/gray_failures',
                        help='Directory containing topology files')
-    parser.add_argument('--workload', default='./example/sweep/microAllReduce.txt',
+    parser.add_argument('--workload', default='./example/microAllReduce.txt',
                        help='Workload file')
-    parser.add_argument('--config', default='./example/sweep/SimAI.conf',
+    parser.add_argument('--config', default='./example/SimAI.conf',
                        help='Config file (for NS-3)')
     parser.add_argument('--results-dir', default='./results_gray_failures',
                        help='Output directory for results')

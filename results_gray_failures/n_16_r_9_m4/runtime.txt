@@ -2,6 +2,6 @@ simulator: m4
 n: 16
 r: 9
 status: success
-duration_seconds: 42.220132
-start_time: 2025-10-09T13:23:47.403959
-end_time: 2025-10-09T13:24:29.624398
+duration_seconds: 43.273095
+start_time: 2025-10-09T14:42:15.997795
+end_time: 2025-10-09T14:42:59.271252

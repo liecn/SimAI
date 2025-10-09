@@ -2,8 +2,8 @@
 """
 Plot gray failure sweep results: 3 CDF plots.
 
-1. CDF of application completion times (NS-3, FlowSim, M4)
-2. CDF of relative errors (FlowSim and M4 vs NS-3 ground truth)
+1. CDF of relative error magnitudes (FlowSim and M4 vs NS-3 ground truth)
+2. CDF of signed relative errors (FlowSim and M4 vs NS-3 ground truth)
 3. CDF of simulator runtimes (NS-3, FlowSim, M4)
 """
 
@@ -96,8 +96,8 @@ def collect_results(results_dir):
     return completion_times, runtimes
 
 
-def plot_completion_time_cdf(completion_times, output_file='gray_failure_cdf.png'):
-    """Plot 1: CDF of application completion times for all three simulators."""
+def plot_signed_error_cdf(completion_times, output_file='gray_failure_signed_errors.png'):
+    """Plot CDF of signed relative errors (FlowSim and M4 vs NS-3)."""
     fig = plt.figure(figsize=(5, 3.5))
     ax = fig.add_subplot(111)
     ax.spines["right"].set_visible(False)
@@ -105,21 +105,35 @@ def plot_completion_time_cdf(completion_times, output_file='gray_failure_cdf.png
     ax.tick_params(axis="y", direction="in")
     ax.tick_params(axis="x", direction="in")
     
-    # Use consistent colors: crimson (NS-3), orange (FlowSim), cornflowerblue (M4)
-    colors = {'ns3': COLOR_LIST[0], 'flowsim': COLOR_LIST[1], 'm4': COLOR_LIST[2]}
-    labels = {'ns3': 'NS-3', 'flowsim': 'FlowSim', 'm4': 'M4'}
+    # orange (FlowSim), cornflowerblue (M4)
+    colors = {'flowsim': COLOR_LIST[1], 'm4': COLOR_LIST[2]}
+    labels = {'flowsim': 'FlowSim', 'm4': 'M4'}
     
-    for idx, simulator in enumerate(['ns3', 'flowsim', 'm4']):
-        times = list(completion_times[simulator].values())
-        if not times:
-            print(f"⚠️  No completion time data for {simulator}")
+    ns3_configs = set(completion_times['ns3'].keys())
+    
+    for idx, simulator in enumerate(['flowsim', 'm4']):
+        sim_configs = set(completion_times[simulator].keys())
+        common_configs = sorted(ns3_configs & sim_configs)
+        
+        if not common_configs:
+            print(f"⚠️  No common configs for {simulator}")
             continue
         
-        data = np.array(times) / 1000.0  # Convert to milliseconds
-        data = data[~np.isnan(data)]
+        errors = []
+        for config in common_configs:
+            ns3_time = completion_times['ns3'][config]
+            sim_time = completion_times[simulator][config]
+            error = (sim_time - ns3_time) / ns3_time * 100  # Signed relative error in %
+            errors.append(error)
+        
+        errors = np.array(errors)
+        errors = errors[~np.isnan(errors)]
+        
+        # For this plot, use signed errors (not magnitude)
+        data = errors
         data_size = len(data)
         
-        # Use histogram method for CDF (matching util/plot.py)
+        # Use histogram method for CDF
         data_set = sorted(set(data))
         bins = np.append(data_set, data_set[-1] + 1)
         counts, bin_edges = np.histogram(data, bins=bins, density=False)
@@ -133,10 +147,14 @@ def plot_completion_time_cdf(completion_times, output_file='gray_failure_cdf.png
                 linestyle=LINESTYLE_LIST[idx],
                 linewidth=2)
         
-        print(f"📊 {simulator.upper()}: {len(times)} samples, "
-              f"range [{data.min():.1f}, {data.max():.1f}] ms")
+        # Print statistics with signed errors
+        print(f"\n📊 {simulator.upper()} Signed Error Statistics:")
+        print(f"   Mean: {np.mean(errors):+.2f}%")
+        print(f"   Median: {np.median(errors):+.2f}%")
+        print(f"   MAE: {np.mean(np.abs(errors)):.2f}%")
+        print(f"   Range: [{np.min(errors):+.2f}%, {np.max(errors):+.2f}%]")
     
-    plt.xlabel('Application Completion Time (ms)', fontsize=15)
+    plt.xlabel('Signed relative error (%)', fontsize=15)
     plt.ylabel('CDF (%)', fontsize=15)
     plt.ylim((0, 100))
     plt.yticks(fontsize=15)
@@ -370,10 +388,10 @@ Examples:
     
     parser.add_argument('--results-dir', default='./results_gray_failures',
                         help='Directory containing simulation results')
-    parser.add_argument('--cdf-output', default='gray_failure_cdf.png',
-                        help='Output file for completion time CDF')
     parser.add_argument('--error-output', default='gray_failure_errors.png',
-                        help='Output file for error CDF')
+                        help='Output file for error magnitude CDF')
+    parser.add_argument('--signed-error-output', default='gray_failure_signed_errors.png',
+                        help='Output file for signed error CDF')
     parser.add_argument('--runtime-output', default='gray_failure_runtimes.png',
                         help='Output file for runtime CDF')
     parser.add_argument('--scatter-output', default='gray_failure_scatter_n8.png',
@@ -396,11 +414,12 @@ Examples:
     print(f"⏱️  Found {n_runtime} runtime results")
     
     # Generate plots
-    print("\n📈 Generating CDF plots...")
-    plot_completion_time_cdf(completion_times, args.cdf_output)
+    print("\n📈 Generating error CDF plots...")
     plot_error_cdf(completion_times, args.error_output)
+    plot_signed_error_cdf(completion_times, args.signed_error_output)
     
     if n_runtime > 0:
+        print("\n⏱️  Generating runtime CDF plot...")
         plot_runtime_cdf(runtimes, args.runtime_output)
     else:
         print("⚠️  No runtime data, skipping runtime plot")

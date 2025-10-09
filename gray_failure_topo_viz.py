@@ -36,51 +36,6 @@ def build_graph(edges):
     gpu_to_l2 = {g:(l2, adj[l2][g]) for l2 in L2 for g,_ in l2_to_gpus[l2]}
     return adj, spine, sorted(L1), sorted(L2), l2_to_gpus, l2_uplink, gpu_to_l2
 
-def hop_bw(adj, spine, gpu_to_l2, g1, g2):
-    l2_1, bw1 = gpu_to_l2[g1]
-    l2_2, bw2 = gpu_to_l2[g2]
-    bu = adj[l2_1][spine]; bd = adj[spine][l2_2]
-    return min(bw1, bu, bd, bw2)
-
-def plot_bundles_with_adjacent(out_path, header, adj, spine, L2, l2_to_gpus, l2_uplink, gpu_to_l2, group_size=16):
-    cols = len(L2)
-    max_rows = max(len(l2_to_gpus[l2]) for l2 in L2)
-    fig, ax = plt.subplots(figsize=(min(22, 2+cols*1.4), 2.5 + max_rows*0.9))
-    gpu_pos = {}
-    for ci, l2 in enumerate(L2):
-        upl = l2_uplink[l2]
-        ax.add_patch(plt.Rectangle((ci, max_rows+0.6), 0.9, 0.6, fill=False, edgecolor='black'))
-        ax.text(ci+0.45, max_rows+0.9, f"L2 {l2}\n↑{upl}G", ha='center', va='center', fontsize=9)
-        for ri, (gid, gbw) in enumerate(l2_to_gpus[l2]):
-            y = max_rows - ri
-            gpu_pos[gid]=(ci+0.45, y)
-            ax.text(ci+0.45, y, f"{gid}", ha='center', va='center', fontsize=9)
-            if gbw<=200:
-                ax.text(ci+0.45, y-0.32, f"{gbw}", ha='center', va='center', fontsize=8)
-        ax.text(ci+0.45, 0.15, f"{len(l2_to_gpus[l2])} GPUs", ha='center', va='bottom', fontsize=8)
-    max_gpu = max([g for l in l2_to_gpus.values() for g,_ in l]) if l2_to_gpus else -1
-    total_gpus = max_gpu+1
-    for start in range(0, total_gpus, group_size):
-        ids = list(range(start, min(start+group_size, total_gpus)))
-        if len(ids)<2: continue
-        for i in range(len(ids)):
-            g1 = ids[i]; g2 = ids[(i+1)%len(ids)]
-            if (g1 not in gpu_pos) or (g2 not in gpu_pos): continue
-            bw = hop_bw(adj, spine, gpu_to_l2, g1,g2)
-            x1,y1 = gpu_pos[g1]; x2,y2 = gpu_pos[g2]
-            ls = '-' if bw>=400 else '--'
-            ax.plot([x1,x2],[y1,y2], linestyle=ls, linewidth=1.8)
-            xm,ym=(x1+x2)/2,(y1+y2)/2
-            ax.text(xm, ym+0.15, f"{bw}", ha='center', va='bottom', fontsize=8)
-    ax.set_xlim(-0.2, cols+0.2)
-    ax.set_ylim(0, max_rows+1.5)
-    ax.set_xticks([i+0.45 for i in range(cols)]); ax.set_xticklabels([str(l2) for l2 in L2])
-    ax.set_yticks([])
-    ax.set_title(f"NIC bundles with adjacent-GPU ring bandwidths\n{' '.join(header)}\nLine: solid=400, dashed=200; labels show bottleneck Gbps")
-    ax.axhline(max_rows+0.6, linewidth=0.8)
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=160, bbox_inches="tight")
-
 def plot_groups_layers(out_path, header, adj, spine, L1, L2):
     nodes = set(adj.keys())
     gpus = sorted([n for n in nodes if n < 32])
@@ -161,22 +116,15 @@ def plot_groups_layers(out_path, header, adj, spine, L1, L2):
     plt.savefig(out_path, dpi=160, bbox_inches="tight")
 
 def main():
-    import argparse
-    ap = argparse.ArgumentParser(description="SimAI topology visualizations")
-    ap.add_argument("topo", help="path to topology file (e.g., topo_N8_M2.txt)")
-    sub = ap.add_subparsers(dest="cmd", required=True)
-    ap_b = sub.add_parser("bundles", help="Draw NIC-bundle grid with adjacent-GPU ring bandwidths")
-    ap_b.add_argument("--group-size", type=int, default=16, help="ring group size (default 16)")
-    ap_b.add_argument("--out", default="simai_topo_bundles.png")
-    ap_g = sub.add_parser("groups", help="Draw layered topo with group overlays")
-    ap_g.add_argument("--out", default="simai_topo_groups.png")
+    ap = argparse.ArgumentParser(description="SimAI topology visualizations - groups layer view")
+    ap.add_argument("--topo", default="example/topo.txt", help="path to topology file (default: example/topo.txt)")
+    ap.add_argument("--out", default="simai_topo_groups.png", help="output filename (default: simai_topo_groups.png)")
     args = ap.parse_args()
+    
     header, edges = parse_topo(args.topo)
     adj, spine, L1, L2, l2_to_gpus, l2_uplink, gpu_to_l2 = build_graph(edges)
-    if args.cmd == "bundles":
-        plot_bundles_with_adjacent(args.out, header, adj, spine, L2, l2_to_gpus, l2_uplink, gpu_to_l2, group_size=args.group_size)
-    elif args.cmd == "groups":
-        plot_groups_layers(args.out, header, adj, spine, L1, L2)
+    plot_groups_layers(args.out, header, adj, spine, L1, L2)
+    print(f"✅ Saved topology visualization to: {args.out}")
 
 if __name__ == "__main__":
     main()

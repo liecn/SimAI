@@ -107,7 +107,7 @@ def generate_topology(num_degraded_gpus, reduction_factor, seed=None):
 
 
 def main():
-    output_dir = "./example/sweep/gray_failures"
+    output_dir = "./example/gray_failures"
     os.makedirs(output_dir, exist_ok=True)
     
     num_gpus_range = range(2, 17)
