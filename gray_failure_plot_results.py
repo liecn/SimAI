@@ -2,9 +2,9 @@
 """
 Plot gray failure sweep results: 3 CDF plots.
 
-1. CDF of relative error magnitudes (FlowSim and M4 vs NS-3 ground truth)
-2. CDF of signed relative errors (FlowSim and M4 vs NS-3 ground truth)
-3. CDF of simulator runtimes (NS-3, FlowSim, M4)
+1. CDF of relative error magnitudes (flowSim and M4 vs UNISON ground truth)
+2. CDF of signed relative errors (flowSim and M4 vs UNISON ground truth)
+3. CDF of simulator runtimes (UNISON, flowSim, M4)
 """
 
 import re
@@ -16,7 +16,9 @@ import argparse
 # Color scheme matching util/plot.py
 COLOR_LIST = ["crimson", "orange", "cornflowerblue", "blueviolet", "seagreen", "mediumpurple"]
 LINESTYLE_LIST = ["-", "--", "--", "-.", ":"]
-
+figure_size = (5, 3)
+font_size = 18
+ours = "m4"
 
 def parse_endtoend_csv(filepath):
     """Parse EndToEnd.csv to extract total completion time in microseconds."""
@@ -75,10 +77,6 @@ def collect_results(results_dir):
         r = int(match.group(2))
         simulator = match.group(3)
         
-        # fileter
-        # if n<=16:
-        #     continue
-        
         # Parse EndToEnd.csv
         csv_file = subdir / 'EndToEnd.csv'
         if csv_file.exists():
@@ -97,17 +95,17 @@ def collect_results(results_dir):
 
 
 def plot_signed_error_cdf(completion_times, output_file='gray_failure_signed_errors.png'):
-    """Plot CDF of signed relative errors (FlowSim and M4 vs NS-3)."""
-    fig = plt.figure(figsize=(5, 3.5))
+    """Plot CDF of signed relative errors (flowSim and M4 vs UNISON)."""
+    fig = plt.figure(figsize=figure_size)
     ax = fig.add_subplot(111)
     ax.spines["right"].set_visible(False)
     ax.spines["top"].set_visible(False)
     ax.tick_params(axis="y", direction="in")
     ax.tick_params(axis="x", direction="in")
     
-    # orange (FlowSim), cornflowerblue (M4)
+    # orange (flowSim), cornflowerblue (M4)
     colors = {'flowsim': COLOR_LIST[1], 'm4': COLOR_LIST[2]}
-    labels = {'flowsim': 'FlowSim', 'm4': 'M4'}
+    labels = {'flowsim': 'flowSim', 'm4': ours}
     
     ns3_configs = set(completion_times['ns3'].keys())
     
@@ -154,32 +152,32 @@ def plot_signed_error_cdf(completion_times, output_file='gray_failure_signed_err
         print(f"   MAE: {np.mean(np.abs(errors)):.2f}%")
         print(f"   Range: [{np.min(errors):+.2f}%, {np.max(errors):+.2f}%]")
     
-    plt.xlabel('Signed relative error (%)', fontsize=15)
-    plt.ylabel('CDF (%)', fontsize=15)
+    plt.xlabel('Signed relative error (%)', fontsize=font_size)
+    plt.ylabel('CDF (%)', fontsize=font_size)
     plt.ylim((0, 100))
-    plt.yticks(fontsize=15)
-    plt.xticks(fontsize=15)
+    plt.yticks(fontsize=font_size)
+    plt.xticks(fontsize=font_size)
     
-    legend_properties = {"size": 18}
+    legend_properties = {"size": font_size}
     plt.legend(prop=legend_properties, frameon=False, loc=4)
     
-    plt.savefig(output_file, bbox_inches='tight', pad_inches=0)
+    plt.savefig(output_file, bbox_inches='tight', pad_inches=0.05)
     print(f"✅ Saved: {output_file}")
     plt.close()
 
 
 def plot_error_cdf(completion_times, output_file='gray_failure_errors.png'):
-    """Plot 2: CDF of relative errors (FlowSim and M4 vs NS-3)."""
-    fig = plt.figure(figsize=(5, 3.5))
+    """Plot 2: CDF of relative errors (flowSim and m4 vs UNISON)."""
+    fig = plt.figure(figsize=figure_size)
     ax = fig.add_subplot(111)
     ax.spines["right"].set_visible(False)
     ax.spines["top"].set_visible(False)
     ax.tick_params(axis="y", direction="in")
     ax.tick_params(axis="x", direction="in")
     
-    # orange (FlowSim), cornflowerblue (M4)
+    # orange (flowSim), cornflowerblue (M4)
     colors = {'flowsim': COLOR_LIST[1], 'm4': COLOR_LIST[2]}
-    labels = {'flowsim': 'FlowSim', 'm4': 'M4'}
+    labels = {'flowsim': 'flowSim', 'm4': ours}
     
     ns3_configs = set(completion_times['ns3'].keys())
     
@@ -226,24 +224,24 @@ def plot_error_cdf(completion_times, output_file='gray_failure_errors.png'):
         print(f"   MAE: {np.mean(np.abs(errors)):.2f}%")
         print(f"   Range: [{np.min(errors):+.2f}%, {np.max(errors):+.2f}%]")
     
-    plt.xlabel('Magnitude of relative error (%)', fontsize=15)
-    plt.ylabel('CDF (%)', fontsize=15)
+    plt.xlabel('Magnitude of relative error (%)', fontsize=font_size)
+    plt.ylabel('CDF (%)', fontsize=font_size)
     plt.ylim((0, 100))
     plt.xlim(left=0.01)
-    plt.yticks(fontsize=15)
-    plt.xticks(fontsize=15)
+    plt.yticks(fontsize=font_size)
+    plt.xticks(fontsize=font_size)
     
-    legend_properties = {"size": 18}
+    legend_properties = {"size": font_size}
     plt.legend(prop=legend_properties, frameon=False, loc=4)
     
-    plt.savefig(output_file, bbox_inches='tight', pad_inches=0)
+    plt.savefig(output_file, bbox_inches='tight', pad_inches=0.05)
     print(f"✅ Saved: {output_file}")
     plt.close()
 
 
 def plot_runtime_cdf(runtimes, output_file='gray_failure_runtimes.png'):
     """Plot 3: CDF of simulator execution runtimes."""
-    fig = plt.figure(figsize=(5, 3.5))
+    fig = plt.figure(figsize=figure_size)
     ax = fig.add_subplot(111)
     ax.spines["right"].set_visible(False)
     ax.spines["top"].set_visible(False)
@@ -251,9 +249,9 @@ def plot_runtime_cdf(runtimes, output_file='gray_failure_runtimes.png'):
     ax.tick_params(axis="x", direction="in")
     ax.set_xscale("log")
     
-    # crimson (NS-3), orange (FlowSim), cornflowerblue (M4)
+    # crimson (UNISON), orange (flowSim), cornflowerblue (M4)
     colors = {'ns3': COLOR_LIST[0], 'flowsim': COLOR_LIST[1], 'm4': COLOR_LIST[2]}
-    labels = {'ns3': 'NS-3', 'flowsim': 'FlowSim', 'm4': 'M4'}
+    labels = {'ns3': 'UNISON', 'flowsim': 'flowSim', 'm4': ours}
     
     for idx, simulator in enumerate(['ns3', 'flowsim', 'm4']):
         times = list(runtimes[simulator].values())
@@ -290,21 +288,125 @@ def plot_runtime_cdf(runtimes, output_file='gray_failure_runtimes.png'):
         common_configs = ns3_configs & sim_configs
         if common_configs:
             speedups = [runtimes['ns3'][c] / runtimes[simulator][c] for c in common_configs]
-            print(f"   {simulator.upper()} speedup vs NS-3: "
+            print(f"   {simulator.upper()} speedup vs UNISON: "
                   f"{np.median(speedups):.1f}x median, "
                   f"[{np.min(speedups):.1f}x, {np.max(speedups):.1f}x] range")
     
-    plt.xlabel('Simulator execution time (s)', fontsize=15)
-    plt.ylabel('CDF (%)', fontsize=15)
+    plt.xlabel('Simulator execution time (s)', fontsize=font_size)
+    plt.ylabel('CDF (%)', fontsize=font_size)
     plt.ylim((0, 100))
     plt.xlim(left=10)
-    plt.yticks(fontsize=15)
-    plt.xticks(fontsize=15)
+    plt.yticks(fontsize=font_size)
+    plt.xticks(fontsize=font_size)
     
-    legend_properties = {"size": 18}
+    legend_properties = {"size": font_size}
     plt.legend(prop=legend_properties, frameon=False, loc=1)
     
-    plt.savefig(output_file, bbox_inches='tight', pad_inches=0)
+    plt.savefig(output_file, bbox_inches='tight', pad_inches=0.05)
+    print(f"✅ Saved: {output_file}")
+    plt.close()
+
+
+def plot_mae_by_n(completion_times, output_file='gray_failure_mae_by_n.png'):
+    """Plot MAE analysis by N: magnitude of relative error vs number of degraded GPUs."""
+    # Compute MAE for each N
+    ns3_configs = set(completion_times['ns3'].keys())
+    
+    n_values = list(range(2, 17))
+    flowsim_mae_by_n = []
+    m4_mae_by_n = []
+    
+    for n in n_values:
+        fs_errors = []
+        m4_errors = []
+        for r in range(4, 11):
+            if (n, r) in completion_times['ns3']:
+                ns3_time = completion_times['ns3'][(n, r)]
+                if (n, r) in completion_times['flowsim']:
+                    fs_time = completion_times['flowsim'][(n, r)]
+                    fs_errors.append(abs((fs_time - ns3_time) / ns3_time * 100))
+                if (n, r) in completion_times['m4']:
+                    m4_time = completion_times['m4'][(n, r)]
+                    m4_errors.append(abs((m4_time - ns3_time) / ns3_time * 100))
+        
+        flowsim_mae_by_n.append(np.mean(fs_errors) if fs_errors else np.nan)
+        m4_mae_by_n.append(np.mean(m4_errors) if m4_errors else np.nan)
+    
+    # Create figure with matching scatter plot style
+    fig = plt.figure(figsize=figure_size)
+    ax = fig.add_subplot(111)
+    ax.spines["right"].set_visible(False)
+    ax.spines["top"].set_visible(False)
+    ax.tick_params(axis="y", direction="in")
+    ax.tick_params(axis="x", direction="in")
+    
+    ax.plot(n_values, flowsim_mae_by_n, '^-', color=COLOR_LIST[1], linewidth=2, 
+            markersize=10, label='flowSim', alpha=0.8, markeredgewidth=1.5)
+    ax.plot(n_values, m4_mae_by_n, 'x-', color=COLOR_LIST[2], linewidth=2, 
+            markersize=12, label=ours, alpha=0.8, markeredgewidth=2)
+    ax.set_xlabel('Number of Degraded GPUs (N)', fontsize=font_size)
+    ax.set_ylabel('Mean magnitude of\nrelative error (%)', fontsize=font_size-2)
+    ax.set_ylim([0, 35])
+    ax.margins(y=0.1)
+    ax.tick_params(axis='both', labelsize=font_size)
+    
+    legend_properties = {"size": font_size}
+    ax.legend(prop=legend_properties, frameon=False, loc='upper left')
+    
+    plt.tight_layout()
+    plt.savefig(output_file, bbox_inches='tight', pad_inches=0.05)
+    print(f"✅ Saved: {output_file}")
+    plt.close()
+
+
+def plot_mae_by_r(completion_times, output_file='gray_failure_mae_by_r.png'):
+    """Plot MAE analysis by R: magnitude of relative error vs reduction factor."""
+    # Compute MAE for each R
+    ns3_configs = set(completion_times['ns3'].keys())
+    
+    r_values = list(range(4, 11))
+    flowsim_mae_by_r = []
+    m4_mae_by_r = []
+    
+    for r in r_values:
+        fs_errors = []
+        m4_errors = []
+        for n in range(2, 17):
+            if (n, r) in completion_times['ns3']:
+                ns3_time = completion_times['ns3'][(n, r)]
+                if (n, r) in completion_times['flowsim']:
+                    fs_time = completion_times['flowsim'][(n, r)]
+                    fs_errors.append(abs((fs_time - ns3_time) / ns3_time * 100))
+                if (n, r) in completion_times['m4']:
+                    m4_time = completion_times['m4'][(n, r)]
+                    m4_errors.append(abs((m4_time - ns3_time) / ns3_time * 100))
+        
+        flowsim_mae_by_r.append(np.mean(fs_errors) if fs_errors else np.nan)
+        m4_mae_by_r.append(np.mean(m4_errors) if m4_errors else np.nan)
+    
+    # Create figure with matching scatter plot style
+    fig = plt.figure(figsize=figure_size)
+    ax = fig.add_subplot(111)
+    ax.spines["right"].set_visible(False)
+    ax.spines["top"].set_visible(False)
+    ax.tick_params(axis="y", direction="in")
+    ax.tick_params(axis="x", direction="in")
+    
+    ax.plot(r_values, flowsim_mae_by_r, '^-', color=COLOR_LIST[1], linewidth=2, 
+            markersize=10, label='flowSim', alpha=0.8, markeredgewidth=1.5)
+    ax.plot(r_values, m4_mae_by_r, 'x-', color=COLOR_LIST[2], linewidth=2, 
+            markersize=12, label=ours, alpha=0.8, markeredgewidth=2)
+    ax.set_xlabel('Reduction Factor (R)', fontsize=font_size)
+    ax.set_ylabel('Mean magnitude of\nrelative error (%)', fontsize=font_size-2)
+    ax.set_ylim([0, 35])
+    ax.margins(y=0.1)
+    ax.tick_params(axis='both', labelsize=font_size)
+    
+    legend_properties = {"size": font_size}
+    ax.legend(prop=legend_properties, frameon=False, loc='upper left')
+    
+    plt.tight_layout()
+    plt.savefig(output_file, bbox_inches='tight', pad_inches=0.05)
     print(f"✅ Saved: {output_file}")
     plt.close()
 
@@ -315,11 +417,11 @@ def plot_scatter_by_n(completion_times, output_file='gray_failure_scatter_n8.png
     
     # Match reference figure style
     colors = {'ns3': COLOR_LIST[0], 'flowsim': COLOR_LIST[1], 'm4': COLOR_LIST[2]}
-    labels = {'ns3': 'UNISON', 'flowsim': 'flowSim', 'm4': 'FLS'}
+    labels = {'ns3': 'UNISON', 'flowsim': 'flowSim', 'm4': ours}
     markers = {'ns3': 'o', 'flowsim': '^', 'm4': 'x'}
     markersizes = {'ns3': 10, 'flowsim': 10, 'm4': 12}
     
-    fig = plt.figure(figsize=(5, 3.5))
+    fig = plt.figure(figsize=figure_size)
     ax = fig.add_subplot(111)
     ax.spines["right"].set_visible(False)
     ax.spines["top"].set_visible(False)
@@ -361,12 +463,12 @@ def plot_scatter_by_n(completion_times, output_file='gray_failure_scatter_n8.png
     # Set y-axis limits with some padding to prevent cutoff
     ax.margins(y=0.1)  # Add 10% margin on y-axis
     
-    plt.xlabel('Reduction Factor (R)', fontsize=15)
-    plt.ylabel('Application Completion\nTime (ms)', fontsize=15)
-    plt.yticks(fontsize=15)
-    plt.xticks(fontsize=15)
+    plt.xlabel('Reduction Factor (R)', fontsize=font_size)
+    plt.ylabel('Application\nCompletion Time (ms)', fontsize=font_size-4)
+    plt.yticks(fontsize=font_size)
+    plt.xticks(fontsize=font_size)
     
-    legend_properties = {"size": 15}
+    legend_properties = {"size": font_size}
     plt.legend(prop=legend_properties, frameon=False, loc='upper left')
     
     plt.tight_layout()
@@ -396,6 +498,10 @@ Examples:
                         help='Output file for runtime CDF')
     parser.add_argument('--scatter-output', default='gray_failure_scatter_n8.png',
                         help='Output file for N=8 scatter plot')
+    parser.add_argument('--mae-n-output', default='gray_failure_mae_by_n.png',
+                        help='Output file for MAE by N plot')
+    parser.add_argument('--mae-r-output', default='gray_failure_mae_by_r.png',
+                        help='Output file for MAE by R plot')
     
     args = parser.parse_args()
     
@@ -426,6 +532,10 @@ Examples:
     
     print("\n📊 Generating scatter plot for N=8...")
     plot_scatter_by_n(completion_times, args.scatter_output)
+    
+    print("\n📊 Generating MAE analysis plots...")
+    plot_mae_by_n(completion_times, args.mae_n_output)
+    plot_mae_by_r(completion_times, args.mae_r_output)
     
     print("\n✅ Done!")
 
