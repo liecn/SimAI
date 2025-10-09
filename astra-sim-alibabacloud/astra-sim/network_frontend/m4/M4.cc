@@ -24,10 +24,6 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <algorithm>
-#include <ryml_std.hpp>
-#include <ryml.hpp>
-#include <fstream>
-#include <sstream>
 #include <chrono>
 #include <ATen/Context.h>
 #include "M4Network.h"
@@ -73,11 +69,6 @@ float M4::time_clock = 0.0f;
 // M4 configuration parameters (hardcoded, no YAML config needed for SimAI integration)
 uint64_t M4::batch_time_ns_ = 10000; // Temporal batching interval (ns) - smaller = smoother slowdowns
 int32_t M4::reschedule_flow_count_ = 8; // Reschedule all active flows every N new arrivals
-
-// Bottleneck correction parameters for heterogeneous topologies
-bool M4::enable_bottleneck_correction_ = true;
-float M4::bottleneck_correction_factor_ = 1.5f;
-uint64_t M4::bottleneck_threshold_bps_ = 400000000000ULL; // 400 Gbps - paths with lower bandwidth are bottlenecks
 std::unordered_map<long long, int32_t> M4::link_key_to_index;
 int32_t M4::next_link_index = 0;
 std::vector<std::vector<int32_t>> M4::flowid_to_link_indices;
@@ -116,6 +107,11 @@ void M4::SetupML() {
     if (models_loaded) return;
     
     auto setup_start = std::chrono::high_resolution_clock::now();
+    
+    // Hardcoded network parameters (from test_config.yaml)
+    const float buffer_size_cfg = 10.0f;   // Buffer size (bfsz parameter)
+    const float fwin_cfg = 1.0f;            // Flow window parameter
+    const float dctcp_k_cfg = 10.0f;        // DCTCP threshold parameter
     
     if (!torch::cuda::is_available()) {
         std::cerr << "[M4] ERROR: CUDA is not available!" << std::endl;
@@ -178,23 +174,8 @@ void M4::SetupML() {
     std::cout << "[M4] Model optimization completed" << std::endl;
 
     models_loaded = true;
-
-    // Network parameters - hardcoded (no YAML config needed for SimAI integration)
-    float buffer_size_cfg = 20.0f;   // Buffer size (bfsz parameter)
-    float fwin_cfg = 1.0f;            // Flow window parameter
-    float dctcp_k_cfg = 10.0f;        // DCTCP threshold parameter
     
-    // Check for AS_N environment variable (number of throttled GPUs)
-    const char* n_env = std::getenv("AS_N");
-    if (n_env) {
-        int n_throttled = std::stoi(n_env);
-        std::cout << "[M4] Running with " << n_throttled << " throttled GPUs (AS_N=" << n_throttled << ")" << std::endl;
-        if (n_throttled == 0) {
-            batch_time_ns_=batch_time_ns_/5.0;
-        }
-    }
-    
-    std::cout << "[M4] Using hardcoded network parameters: n_links_max=" << n_links_max_ 
+    std::cout << "[M4] Using network parameters from config: n_links_max=" << n_links_max_ 
               << ", hidden_size=" << hidden_size_ 
               << ", buffer_size=" << buffer_size_cfg 
               << ", fwin=" << fwin_cfg 
@@ -234,8 +215,7 @@ void M4::SetupML() {
     
     std::cout << "[M4] Loaded network parameters from config: bfsz=" << param_values[0] << ", fwin=" << param_values[1] 
               << ", cc=dctcp, u_tgt=" << param_values[9] << ", dctcp_k=" << param_values[6] << ", topology_bw=" << (topo_bandwidth * 8.0) << "Gbps, topology_lat=" << topo_latency << "ns, batch_time_ns=" << batch_time_ns_ 
-              << ", reschedule_flow_count=" << reschedule_flow_count_ << ", bottleneck_correction=" << (enable_bottleneck_correction_ ? "enabled" : "disabled") 
-              << " (factor=" << bottleneck_correction_factor_ << ", threshold=" << (bottleneck_threshold_bps_/1e9) << "Gbps)" << std::endl;
+              << ", reschedule_flow_count=" << reschedule_flow_count_ << std::endl;
     
     // Initialize multi-flow state tensors (from @inference/ ground truth)
     auto options_float = torch::TensorOptions().dtype(torch::kFloat32).device(device);
@@ -429,11 +409,6 @@ void M4::Send(int src, int dst, uint64_t size, int tag, Callback callback, Callb
         // Create M4Flow and add to pending batch (following FlowSim's temporal batching)
         auto m4_flow = std::make_unique<M4Flow>(src, dst, size, node_path, callback, callbackArg);
     
-    // Detect bottleneck: check if path has significantly lower bandwidth than typical
-    if (enable_bottleneck_correction_) {
-        uint64_t path_bw_bps = routing_framework_->GetPairBandwidth(src, dst);
-        m4_flow->has_bottleneck = (path_bw_bps < bottleneck_threshold_bps_);
-    }
     // Use ASTRA-Sim flow id and actual send start time if available
         if (callbackArg) {
             auto* cd = reinterpret_cast<M4CallbackData*>(callbackArg);
@@ -790,15 +765,6 @@ void M4::process_batch_of_flows_count(int32_t max_flows) {
                     
                     float raw_slowdown = sldn_data[i];
                     float scaled_slowdown = (raw_slowdown < 1.0f) ? 1.0f : raw_slowdown;
-                    
-                    // Apply bottleneck correction if flow traverses low-bandwidth links
-                    if (enable_bottleneck_correction_) {
-                        // Find the flow pointer to check bottleneck flag
-                        auto flow_ptr_it = flow_id_to_ptr_.find(flow_id);
-                        if (flow_ptr_it != flow_id_to_ptr_.end() && flow_ptr_it->second->has_bottleneck) {
-                            scaled_slowdown *= bottleneck_correction_factor_;
-                        }
-                    }
                     
                     float ideal_fct = i_fct_tensor[flow_id].item<float>();
                     float predicted_total_fct = scaled_slowdown * ideal_fct;

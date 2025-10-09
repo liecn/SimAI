@@ -45,10 +45,9 @@ struct M4Flow {
     void* callbackArg;
     uint64_t start_time;
     int flow_id;
-    bool has_bottleneck;  // True if path has significantly lower bandwidth than typical
     
     M4Flow(int s, int d, uint64_t sz, const std::vector<int>& path, void (*cb)(void*), void* arg)
-        : src(s), dst(d), size(sz), node_path(path), callback(cb), callbackArg(arg), start_time(0), flow_id(-1), has_bottleneck(false) {}
+        : src(s), dst(d), size(sz), node_path(path), callback(cb), callbackArg(arg), start_time(0), flow_id(-1) {}
 };
 
 /**
@@ -74,11 +73,6 @@ private:
     // M4-specific configuration parameters
     static uint64_t batch_time_ns_;      // Temporal batching interval
     static int32_t reschedule_flow_count_; // Reschedule all active flows every N new arrivals (0 = every batch)
-    
-    // Bottleneck correction parameters
-    static bool enable_bottleneck_correction_;
-    static float bottleneck_correction_factor_;
-    static uint64_t bottleneck_threshold_bps_;  // Bandwidth threshold to detect bottleneck (e.g., 100 Gbps)
     
     static torch::Tensor h_vec;
     static torch::Tensor flowid_active_mask;
