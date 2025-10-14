@@ -1,7 +1,0 @@
-simulator: m4
-n: 6
-r: 8
-status: success
-duration_seconds: 13.847994
-start_time: 2025-10-09T14:44:14.741123
-end_time: 2025-10-09T14:44:28.589348

@@ -50,6 +50,9 @@
 using namespace ns3;
 using namespace std;
 
+// Global flow route tracking: (src_port, src_node, dst_node) -> route vector
+std::map<std::tuple<uint16_t, uint32_t, uint32_t>, std::vector<int>> flow_routes;
+
 // Concise dependency tracing controls
 static bool ns3_trace_deps = [](){
   const char* v = std::getenv("NS3_TRACE_DEPS");
@@ -121,6 +124,13 @@ void SendFlow(int src, int dst, uint64_t maxPacketCount,
       MtpInterface::explicitCriticalSection cs;
       #endif
       sender_src_port_map[make_pair(port, make_pair(src, dst))] = request->flowTag;
+      
+      // Track route for this flow
+      if (g_system_routing != nullptr) {
+        std::vector<int> route = g_system_routing->GetFlowSimPathByNodeIds(src, dst);
+        flow_routes[std::make_tuple(port, src, dst)] = route;
+      }
+      
       #ifdef NS3_MTP
       cs.ExitSection();
       #endif

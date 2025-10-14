@@ -110,7 +110,7 @@ void M4::SetupML() {
     
     // Hardcoded network parameters (from test_config.yaml)
     const float buffer_size_cfg = 10.0f;   // Buffer size (bfsz parameter)
-    const float fwin_cfg = 1.0f;            // Flow window parameter
+    const float fwin_cfg = 10.0f;            // Flow window parameter
     const float dctcp_k_cfg = 10.0f;        // DCTCP threshold parameter
     
     if (!torch::cuda::is_available()) {

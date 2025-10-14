@@ -905,8 +905,14 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
 
 #define ENABLE_QP 1
 #if ENABLE_QP
-  // FCT logging removed - only keeping send_output for compatibility
-  FILE *fct_output = nullptr;  // No longer used
+  // Open FCT output file in result directory
+  std::string fct_path = result_dir + "/fct_output.txt";
+  FILE *fct_output = fopen(fct_path.c_str(), "w");
+  if (fct_output == nullptr) {
+    std::cerr << "Failed to open FCT output file: " << fct_path << std::endl;
+    exit(1);
+  }
+  
   FILE *send_output = nullptr; // No longer used
   for (uint32_t i = 0; i < node_num; i++) {
     if (n.Get(i)->GetNodeType() == 0 || n.Get(i)->GetNodeType() == 2) { 

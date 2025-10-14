@@ -1,7 +1,0 @@
-simulator: flowsim
-n: 7
-r: 8
-status: success
-duration_seconds: 57.810270
-start_time: 2025-10-09T11:46:24.459393
-end_time: 2025-10-09T11:47:22.269870

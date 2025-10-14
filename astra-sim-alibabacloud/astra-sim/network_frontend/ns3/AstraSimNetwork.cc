@@ -494,6 +494,24 @@ void qp_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
     }
     flowTag = sender_src_port_map[make_pair(q->sport, make_pair(sid, did))];
     
+    // Get route for this flow
+    auto route_key = std::make_tuple(q->sport, sid, did);
+    std::string route_str = "";
+    if (flow_routes.find(route_key) != flow_routes.end()) {
+      const auto& route = flow_routes[route_key];
+      for (size_t i = 0; i < route.size(); i++) {
+        route_str += std::to_string(route[i]);
+        if (i < route.size() - 1) route_str += "->";
+      }
+      flow_routes.erase(route_key);
+    } else {
+      route_str = std::to_string(sid) + "->" + std::to_string(did);
+    }
+    
+    // Write FCT with flow_id and route
+    fprintf(fout, "%08x %08x %u %u %lu %lu %lu %lu %d %s\n", q->sip.Get(), q->dip.Get(),
+            q->sport, q->dport, q->m_size, q->startTime.GetTimeStep(),
+            (Simulator::Now() - q->startTime).GetTimeStep(), standalone_fct, flowTag.current_flow_id, route_str.c_str());
     fflush(fout);
     sender_src_port_map.erase(make_pair(q->sport, make_pair(sid, did)));
     received_chunksize[std::make_pair(flowTag.current_flow_id,std::make_pair(sid,did))]+=q->m_size;

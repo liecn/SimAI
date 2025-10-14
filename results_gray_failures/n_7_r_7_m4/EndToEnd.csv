@@ -1,7 +1,0 @@
-File name, Expose DP comm, Expose DP_EP comm, Expose TP comm, Expose_EP_comm, Expose_PP_comm, bubble time, total comp, total exposed comm, Total time
-m4, 0 (0.00%), 0 (0.00%), 17367 (93.98%), 0 (0.00%), 0 (0.00%), 0 (0.00%), 1112 (6.02%), 17367 (93.98%), 18479
-layer_name,m4,fwd compute,wg compute,ig compute,fwd exposed comm,wg exposed comm,ig exposed comm,fwd total comm,algbw,busbw,wg total comm,algbw,busbw,ig total comm,algbw,busbw,workload finished at
-embedding_layer,m4,556.000000,0.001000,0.001000,1007.416000,0.000000,0.000000,1007.416000,15.509978,29.081209,0.000000,-nan,0.000000,0.000000,-nan,0.000000,18478.894000
-embedding_layer,m4,556.000000,0.001000,0.001000,16359.468000,0.000000,0.000000,16359.468000,15.281671,28.653131,0.000000,-nan,0.000000,0.000000,-nan,0.000000,18478.894000
-SUM,m4,1112.000000,0.002000,0.002000,17366.884000,0.000000,0.000000,17366.884000,NONE,NONE,0.000000,NONE,NONE,0.000000,NONE,NONE
-total exposed comm,17366.890000,total comp,1112.004000,total time,18478.894000

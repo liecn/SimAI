@@ -1,7 +1,0 @@
-simulator: ns3
-n: 14
-r: 9
-status: success
-duration_seconds: 1035.050591
-start_time: 2025-10-09T12:15:35.457135
-end_time: 2025-10-09T12:32:50.508298
