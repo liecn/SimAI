@@ -1,0 +1,6 @@
+simulator: flowsim
+topology: example/T2_AlibabaHPN_64g_8gps_DualToR_SinglePlane_200Gbps_A100
+status: success
+duration_seconds: 7.443378
+start_time: 2025-10-15T13:12:24.974117
+end_time: 2025-10-15T13:12:32.417785

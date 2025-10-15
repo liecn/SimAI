@@ -1,0 +1,6 @@
+simulator: ns3
+topology: example/T3_Spectrum-X_64g_8gps_100Gbps_A100
+status: timeout
+duration_seconds: 3600.003988
+start_time: 2025-10-15T13:19:41.319895
+end_time: 2025-10-15T14:19:41.324295

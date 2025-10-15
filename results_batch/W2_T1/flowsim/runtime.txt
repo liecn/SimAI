@@ -1,0 +1,6 @@
+simulator: flowsim
+topology: example/T1_DCN+SingleToR_64g_8gps_100Gbps_A100
+status: success
+duration_seconds: 3.225055
+start_time: 2025-10-15T13:12:17.403692
+end_time: 2025-10-15T13:12:20.628953

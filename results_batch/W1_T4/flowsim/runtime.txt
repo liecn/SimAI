@@ -1,0 +1,6 @@
+simulator: flowsim
+topology: example/T4_Spectrum-X_64g_8gps_200Gbps_A100
+status: success
+duration_seconds: 2.820591
+start_time: 2025-10-15T13:12:17.503011
+end_time: 2025-10-15T13:12:20.323850

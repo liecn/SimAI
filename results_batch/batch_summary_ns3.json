@@ -1,0 +1,214 @@
+{
+  "timestamp": "2025-10-15T14:19:41.336515",
+  "simulator": "ns3",
+  "total_jobs": 25,
+  "success": 0,
+  "failed": 25,
+  "skipped": 0,
+  "total_duration_seconds": 3600.04821062088,
+  "avg_job_duration_seconds": 3600.004801740646,
+  "max_workers": 25,
+  "results": [
+    {
+      "job_id": 1,
+      "workload": "W1",
+      "topology": "T1",
+      "status": "timeout",
+      "duration": 3600.003790616989,
+      "results_dir": "results_batch/W1_T1"
+    },
+    {
+      "job_id": 2,
+      "workload": "W1",
+      "topology": "T2",
+      "status": "timeout",
+      "duration": 3600.003526687622,
+      "results_dir": "results_batch/W1_T2"
+    },
+    {
+      "job_id": 3,
+      "workload": "W1",
+      "topology": "T3",
+      "status": "timeout",
+      "duration": 3600.0041637420654,
+      "results_dir": "results_batch/W1_T3"
+    },
+    {
+      "job_id": 4,
+      "workload": "W1",
+      "topology": "T4",
+      "status": "timeout",
+      "duration": 3600.006613254547,
+      "results_dir": "results_batch/W1_T4"
+    },
+    {
+      "job_id": 5,
+      "workload": "W1",
+      "topology": "T5",
+      "status": "timeout",
+      "duration": 3600.0035746097565,
+      "results_dir": "results_batch/W1_T5"
+    },
+    {
+      "job_id": 6,
+      "workload": "W2",
+      "topology": "T1",
+      "status": "timeout",
+      "duration": 3600.0029096603394,
+      "results_dir": "results_batch/W2_T1"
+    },
+    {
+      "job_id": 7,
+      "workload": "W2",
+      "topology": "T2",
+      "status": "timeout",
+      "duration": 3600.005741596222,
+      "results_dir": "results_batch/W2_T2"
+    },
+    {
+      "job_id": 8,
+      "workload": "W2",
+      "topology": "T3",
+      "status": "timeout",
+      "duration": 3600.0072333812714,
+      "results_dir": "results_batch/W2_T3"
+    },
+    {
+      "job_id": 9,
+      "workload": "W2",
+      "topology": "T4",
+      "status": "timeout",
+      "duration": 3600.005319595337,
+      "results_dir": "results_batch/W2_T4"
+    },
+    {
+      "job_id": 10,
+      "workload": "W2",
+      "topology": "T5",
+      "status": "timeout",
+      "duration": 3600.003729581833,
+      "results_dir": "results_batch/W2_T5"
+    },
+    {
+      "job_id": 11,
+      "workload": "W3",
+      "topology": "T1",
+      "status": "timeout",
+      "duration": 3600.003567457199,
+      "results_dir": "results_batch/W3_T1"
+    },
+    {
+      "job_id": 12,
+      "workload": "W3",
+      "topology": "T2",
+      "status": "timeout",
+      "duration": 3600.005625486374,
+      "results_dir": "results_batch/W3_T2"
+    },
+    {
+      "job_id": 13,
+      "workload": "W3",
+      "topology": "T3",
+      "status": "timeout",
+      "duration": 3600.0048887729645,
+      "results_dir": "results_batch/W3_T3"
+    },
+    {
+      "job_id": 14,
+      "workload": "W3",
+      "topology": "T4",
+      "status": "timeout",
+      "duration": 3600.0050010681152,
+      "results_dir": "results_batch/W3_T4"
+    },
+    {
+      "job_id": 15,
+      "workload": "W3",
+      "topology": "T5",
+      "status": "timeout",
+      "duration": 3600.0065591335297,
+      "results_dir": "results_batch/W3_T5"
+    },
+    {
+      "job_id": 16,
+      "workload": "W4",
+      "topology": "T1",
+      "status": "timeout",
+      "duration": 3600.0049543380737,
+      "results_dir": "results_batch/W4_T1"
+    },
+    {
+      "job_id": 17,
+      "workload": "W4",
+      "topology": "T2",
+      "status": "timeout",
+      "duration": 3600.006826400757,
+      "results_dir": "results_batch/W4_T2"
+    },
+    {
+      "job_id": 18,
+      "workload": "W4",
+      "topology": "T3",
+      "status": "timeout",
+      "duration": 3600.0043540000916,
+      "results_dir": "results_batch/W4_T3"
+    },
+    {
+      "job_id": 19,
+      "workload": "W4",
+      "topology": "T4",
+      "status": "timeout",
+      "duration": 3600.0061514377594,
+      "results_dir": "results_batch/W4_T4"
+    },
+    {
+      "job_id": 20,
+      "workload": "W4",
+      "topology": "T5",
+      "status": "timeout",
+      "duration": 3600.0040893554688,
+      "results_dir": "results_batch/W4_T5"
+    },
+    {
+      "job_id": 21,
+      "workload": "W5",
+      "topology": "T1",
+      "status": "timeout",
+      "duration": 3600.004247903824,
+      "results_dir": "results_batch/W5_T1"
+    },
+    {
+      "job_id": 22,
+      "workload": "W5",
+      "topology": "T2",
+      "status": "timeout",
+      "duration": 3600.0047845840454,
+      "results_dir": "results_batch/W5_T2"
+    },
+    {
+      "job_id": 23,
+      "workload": "W5",
+      "topology": "T3",
+      "status": "timeout",
+      "duration": 3600.0040929317474,
+      "results_dir": "results_batch/W5_T3"
+    },
+    {
+      "job_id": 24,
+      "workload": "W5",
+      "topology": "T4",
+      "status": "timeout",
+      "duration": 3600.004401922226,
+      "results_dir": "results_batch/W5_T4"
+    },
+    {
+      "job_id": 25,
+      "workload": "W5",
+      "topology": "T5",
+      "status": "timeout",
+      "duration": 3600.003895998001,
+      "results_dir": "results_batch/W5_T5"
+    }
+  ],
+  "skipped_combinations": []
+}
