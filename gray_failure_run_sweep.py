@@ -117,7 +117,7 @@ class SweepRunner:
         # Directory will be named like: n_8_r_4_flowsim/
         
         # Base command components
-        env_vars = f"AS_SEND_LAT=3 AS_NVLS_ENABLE=1 AS_M={r}"
+        env_vars = f"AS_SEND_LAT=3 AS_NVLS_ENABLE=1"
         
         # Add GPU assignment for M4
         if self.simulator == 'm4' and gpu_id is not None:
