@@ -295,7 +295,7 @@ def plot_runtime_cdf(runtimes, output_file='gray_failure_runtimes.png'):
     plt.xlabel('Simulator execution time (s)', fontsize=font_size)
     plt.ylabel('CDF (%)', fontsize=font_size)
     plt.ylim((0, 100))
-    plt.xlim(left=10)
+    plt.xlim(left=1)
     plt.yticks(fontsize=font_size)
     plt.xticks(fontsize=font_size)
     

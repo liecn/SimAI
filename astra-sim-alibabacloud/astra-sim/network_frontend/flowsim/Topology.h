@@ -90,6 +90,9 @@ class Topology {
   // Batching methods (performance optimization)
   void process_batch_of_chunks();
   static void batch_timeout_callback(void* arg) noexcept;
+
+  // Schedule only the next minimal-completion set (like standalone flowSim)
+  void schedule_next_min_completion_set();
 };
 
 #endif // _TOPOLOGY_

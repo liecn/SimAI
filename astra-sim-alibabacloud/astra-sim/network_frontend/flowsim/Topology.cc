@@ -240,29 +240,9 @@ void Topology::add_chunk_to_links(Chunk* chunk) {
         }
     }
     
-    // Calculate rates for all chunks and schedule completion for this new chunk
-    // This is more efficient than canceling all events
+    // Calculate rates for all chunks and schedule only the next minimal-completion set
     update_link_states();
-    // logging removed
-    
-    // Schedule completion for the new chunk based on its calculated rate
-    const auto current_time = event_queue->get_current_time();
-    double remaining_size = chunk->get_remaining_size();
-    double rate = chunk->get_rate();
-    
-    if (rate <= 0) {
-        assert(false && "Invalid rate assigned to chunk");
-    }
-    
-    // Include transmission time based on remaining size (already includes overhead if enabled) and path latency
-    double transmission_time = remaining_size / rate;
-    double path_latency = calculate_path_latency(chunk);
-    uint64_t completion_time = current_time + std::max(1.0, transmission_time + path_latency);
-    
-    // Schedule completion event for this chunk
-    auto* chunk_ptr = static_cast<void*>(chunk);
-    int event_id = event_queue->schedule_event(completion_time, chunk_completion_callback, chunk_ptr);
-    chunk->set_completion_event_id(event_id);
+    schedule_next_min_completion_set();
 }
 
 void Topology::associate_chunk_with_links(Chunk* chunk) {
@@ -341,21 +321,8 @@ void Topology::post_batch_completion_callback(void* arg) noexcept {
     // Recalculate link states only once for all active flows
     topology->update_link_states();
 
-    // Reschedule completion events for the remaining chunks
-    for (Chunk* active_chunk : topology->active_chunks) {
-        double remaining_size = active_chunk->get_remaining_size();
-        double new_rate = active_chunk->get_rate();
-        if (new_rate <= 0) {
-            assert(false && "Invalid rate in post batch completion");
-        }
-        double transmission_time = remaining_size / new_rate;
-        double path_latency = topology->calculate_path_latency(active_chunk);
-        uint64_t completion_time = current_time + std::max(1.0, transmission_time + path_latency);
-        
-        auto* chunk_ptr = static_cast<void*>(active_chunk);
-        int event_id = topology->event_queue->schedule_event(completion_time, chunk_completion_callback, chunk_ptr);
-        active_chunk->set_completion_event_id(event_id);
-    }
+    // Reschedule only the next minimal-completion set
+    topology->schedule_next_min_completion_set();
 }
 
 // Batching Implementation (Performance Optimization)
@@ -401,25 +368,8 @@ void Topology::process_batch_of_chunks() {
     // Clear pending chunks since they're now active
     pending_chunks_.clear();
     
-    // Schedule completion events for all newly processed chunks
-    for (Chunk* chunk : newly_added_chunks) {
-        double remaining_size = chunk->get_remaining_size();
-        double rate = chunk->get_rate();
-        
-        if (rate <= 0) {
-            assert(false && "Invalid rate in batch processing");
-        }
-        
-        // Calculate completion time based on remaining size (already includes overhead if enabled)
-        double transmission_time = remaining_size / rate;
-        double path_latency = calculate_path_latency(chunk);
-        uint64_t completion_time = current_time + std::max(1.0, transmission_time + path_latency);
-        
-        // Schedule completion event
-        auto* chunk_ptr = static_cast<void*>(chunk);
-        int event_id = event_queue->schedule_event(completion_time, chunk_completion_callback, chunk_ptr);
-        chunk->set_completion_event_id(event_id);
-    }
+    // Schedule only the next minimal-completion set
+    schedule_next_min_completion_set();
     
     // Clear the batch
     pending_chunks_.clear();
@@ -428,6 +378,52 @@ void Topology::process_batch_of_chunks() {
 void Topology::batch_timeout_callback(void* arg) noexcept {
     Topology* topology = static_cast<Topology*>(arg);
     topology->process_batch_of_chunks();
+}
+
+// Schedule only the next minimal-completion set among active chunks.
+void Topology::schedule_next_min_completion_set() {
+    if (active_chunks.empty()) {
+        return;
+    }
+    const auto current_time = event_queue->get_current_time();
+
+    // Cancel any pre-existing completion events to avoid duplicates
+    for (Chunk* chunk : active_chunks) {
+        if (chunk->get_completion_event_id() > 0) {
+            event_queue->cancel_event(chunk->get_completion_event_id());
+            chunk->set_completion_event_id(0);
+        }
+    }
+
+    // Find minimal completion time among all active chunks
+    uint64_t min_completion_time = std::numeric_limits<uint64_t>::max();
+    std::vector<Chunk*> min_chunks;
+
+    for (Chunk* chunk : active_chunks) {
+        double rate = chunk->get_rate();
+        if (rate <= 0) {
+            assert(false && "Invalid rate when scheduling next completion");
+        }
+        double remaining_size = chunk->get_remaining_size();
+        double transmission_time = remaining_size / rate;
+        double path_latency = calculate_path_latency(chunk);
+        uint64_t completion_time = current_time + static_cast<uint64_t>(std::max(1.0, transmission_time + path_latency));
+
+        if (completion_time < min_completion_time) {
+            min_completion_time = completion_time;
+            min_chunks.clear();
+            min_chunks.push_back(chunk);
+        } else if (completion_time == min_completion_time) {
+            min_chunks.push_back(chunk);
+        }
+    }
+
+    // Schedule only those chunks that complete at the minimal time
+    for (Chunk* chunk : min_chunks) {
+        auto* chunk_ptr = static_cast<void*>(chunk);
+        int event_id = event_queue->schedule_event(min_completion_time, chunk_completion_callback, chunk_ptr);
+        chunk->set_completion_event_id(event_id);
+    }
 }
 
 // RESTORED: Working temporal batching that gave correct ~3μs FCT results

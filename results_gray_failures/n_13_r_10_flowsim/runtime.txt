@@ -2,6 +2,6 @@ simulator: flowsim
 n: 13
 r: 10
 status: success
-duration_seconds: 170.648817
-start_time: 2025-10-09T11:36:09.176489
-end_time: 2025-10-09T11:38:59.825620
+duration_seconds: 5.075816
+start_time: 2025-11-07T11:29:41.335780
+end_time: 2025-11-07T11:29:46.411801
