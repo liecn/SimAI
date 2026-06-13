@@ -308,7 +308,7 @@ def plot_runtime_cdf(runtimes, output_file='gray_failure_runtimes.png'):
 
 
 def plot_mae_by_n(completion_times, output_file='gray_failure_mae_by_n.png'):
-    """Plot MAE analysis by N: magnitude of relative error vs number of degraded GPUs."""
+    """Plot MAE analysis by N: magnitude of relative error vs number of degraded edge links."""
     # Compute MAE for each N
     ns3_configs = set(completion_times['ns3'].keys())
     
@@ -344,7 +344,7 @@ def plot_mae_by_n(completion_times, output_file='gray_failure_mae_by_n.png'):
             markersize=10, label='flowSim', alpha=0.8, markeredgewidth=1.5)
     ax.plot(n_values, m4_mae_by_n, 'x-', color=COLOR_LIST[2], linewidth=2, 
             markersize=12, label=ours, alpha=0.8, markeredgewidth=2)
-    ax.set_xlabel('Number of Degraded GPUs (N)', fontsize=font_size)
+    ax.set_xlabel('Number of Degraded Edge Links (N)', fontsize=font_size-3)
     ax.set_ylabel('Mean magnitude of\nrelative error (%)', fontsize=font_size-2)
     ax.set_ylim([0, 35])
     ax.margins(y=0.1)
